@@ -1,0 +1,12 @@
+# build output
+build/
+launcher/bin/
+launcher/stub/*.exe
+launcher/screenshots/
+# demos are other people's runs: fetched or copied for testing, never committed
+demos/
+*.dem
+# local state
+*.log
+P2Practice.ini
+P2Practice.cache

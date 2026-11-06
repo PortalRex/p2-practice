@@ -1,0 +1,435 @@
+#include "engine.h"
+
+#include <windows.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+namespace engine {
+namespace {
+
+using sdk::CallVirtual;
+
+void *g_cvar = nullptr;
+void *g_engineClient = nullptr;
+void *g_playerInfoManager = nullptr;
+void *g_serverGame = nullptr;
+sdk::GlobalVars *g_globals = nullptr;
+
+void *g_commandVtable = nullptr;  // an engine ConCommand's vtable, shared by ours
+std::vector<sdk::ConCommand *> g_commands;
+sdk::ConVar *g_svCheats = nullptr;
+
+std::string g_scriptBatch;
+
+// Development trace: with the environment variable P2PRACTICE_LOG set to a file path, everything the plugin
+// prints and every command and script it runs is appended there, flushed line by line (so the last line before a
+// crash is on disk).
+FILE *g_trace = nullptr;
+
+void Trace(const char *kind, const char *text) {
+	if (!g_trace) return;
+	fprintf(g_trace, "%7d %s %s", g_globals ? g_globals->tickcount : 0, kind, text);
+	size_t length = strlen(text);
+	if (!length || text[length - 1] != 10) fputc(10, g_trace);
+	fflush(g_trace);
+}
+// One "script" call carries a command line of at most 512 characters, "script " included
+constexpr size_t kScriptLimit = sdk::CCommand::kMaxLength - 8 - 1;
+
+// tier0.dll's console output
+struct Color {
+	unsigned char r, g, b, a;
+};
+using ColorMsgFn = void(__cdecl *)(const Color &, const char *, ...);
+using MsgFn = void(__cdecl *)(const char *, ...);
+ColorMsgFn g_colorMsg = nullptr;
+MsgFn g_msg = nullptr;
+constexpr Color kPrefixColor{90, 200, 255, 255};
+constexpr Color kTextColor{225, 235, 240, 255};
+constexpr Color kWarnColor{255, 170, 60, 255};
+
+// Where the fields we read live inside a player entity
+struct PlayerOffsets {
+	int origin = -1, eyePitch = -1, eyeYaw = -1, velocity = -1, flags = -1, team = -1, viewOffsetZ = -1, lifeState = -1;
+	int activeWeapon = -1;  // handle of the weapon in hand (the portal gun)
+} g_player;
+
+// ... and inside a portal gun: handles of the two portals it shoots
+struct GunOffsets {
+	int primaryPortal = -1, secondaryPortal = -1;
+} g_gun;
+
+constexpr int kMaxEdicts = 2048;
+constexpr unsigned kHandleIndexMask = 0xFFF;  // an entity handle is its index in the low 12 bits, a serial above
+
+sdk::ServerClass *FindServerClass(void *serverGame, const char *name) {
+	auto *cls = CallVirtual<sdk::ServerClass *>(serverGame, sdk::slot::GetAllServerClasses);
+	for (; cls; cls = cls->next)
+		if (cls->networkName && !strcmp(cls->networkName, name)) return cls;
+	return nullptr;
+}
+
+// A networked field's offset inside its entity, by the name the game networks it under. Send tables nest
+// (base classes, embedded structs); offsets add up along the way.
+int FindPropOffset(const sdk::SendTable *table, const char *name, int depth = 0) {
+	if (!table || !table->props || depth > 12) return -1;
+	for (int i = 0; i < table->propCount; i++) {
+		const sdk::SendProp &prop = table->props[i];
+		if (prop.type == sdk::kPropDataTable) {
+			int inner = FindPropOffset(prop.dataTable, name, depth + 1);
+			if (inner >= 0) return prop.offset + inner;
+		} else if (prop.varName && !strcmp(prop.varName, name)) {
+			// Portal 2 keeps the field's offset in the low 16 bits; float and vector props carry other data above
+			// them (seen: 0x30.... on floats, 0x50.... on vectors, nothing on ints)
+			return prop.offset & 0xFFFF;
+		}
+	}
+	return -1;
+}
+
+bool FindPlayerOffsets(void *serverGame) {
+	sdk::ServerClass *cls = FindServerClass(serverGame, "CPortal_Player");
+	if (!cls) return false;
+	// Optional: without these the trainer can't tell which portals are a player's own
+	g_player.activeWeapon = FindPropOffset(cls->table, "m_hActiveWeapon");
+	if (sdk::ServerClass *gun = FindServerClass(serverGame, "CWeaponPortalgun")) {
+		g_gun.primaryPortal = FindPropOffset(gun->table, "m_hPrimaryPortal");
+		g_gun.secondaryPortal = FindPropOffset(gun->table, "m_hSecondaryPortal");
+	}
+	g_player.origin = FindPropOffset(cls->table, "m_vecOrigin");
+	g_player.eyePitch = FindPropOffset(cls->table, "m_angEyeAngles[0]");
+	g_player.eyeYaw = FindPropOffset(cls->table, "m_angEyeAngles[1]");
+	g_player.velocity = FindPropOffset(cls->table, "m_vecVelocity[0]");
+	g_player.flags = FindPropOffset(cls->table, "m_fFlags");
+	g_player.team = FindPropOffset(cls->table, "m_iTeamNum");
+	g_player.viewOffsetZ = FindPropOffset(cls->table, "m_vecViewOffset[2]");
+	g_player.lifeState = FindPropOffset(cls->table, "m_lifeState");
+	return g_player.origin >= 0 && g_player.eyePitch >= 0 && g_player.eyeYaw >= 0 && g_player.velocity >= 0 &&
+	       g_player.flags >= 0 && g_player.team >= 0 && g_player.viewOffsetZ >= 0 && g_player.lifeState >= 0;
+}
+
+void *FindCommandBase(const char *name) {
+	return g_cvar ? CallVirtual<void *>(g_cvar, sdk::slot::FindCommandBase, name) : nullptr;
+}
+
+bool IsCommand(void *commandBase) {
+	return CallVirtual<bool>(commandBase, 1);
+}
+
+sdk::ConVar *FindVar(const char *name) {
+	void *base = FindCommandBase(name);
+	if (!base || IsCommand(base)) return nullptr;
+	auto *var = static_cast<sdk::ConVar *>(base);
+	return var->parent ? var->parent : var;
+}
+
+void Output(const Color &color, const char *format, va_list args) {
+	char text[2048];
+	vsnprintf(text, sizeof(text), format, args);
+	Trace("print ", text);
+	if (g_colorMsg) {
+		g_colorMsg(kPrefixColor, "[practice] ");
+		g_colorMsg(color, "%s", text);
+	} else if (g_msg) {
+		g_msg("[practice] %s", text);
+	}
+}
+
+// Splits a command line into arguments the way the console does (whitespace, "quoted strings").
+bool Tokenize(sdk::CCommand &cmd, const char *name, const char *arguments) {
+	int written = snprintf(cmd.argSBuffer, sizeof(cmd.argSBuffer), "%s %s", name, arguments);
+	if (written < 0 || written >= static_cast<int>(sizeof(cmd.argSBuffer))) return false;
+	cmd.argv0Size = static_cast<int>(strlen(name)) + 1;
+	cmd.argc = 0;
+	char *out = cmd.argvBuffer;
+	char *const end = cmd.argvBuffer + sizeof(cmd.argvBuffer);
+	const char *in = cmd.argSBuffer;
+	while (*in && cmd.argc < sdk::CCommand::kMaxArgc) {
+		while (*in == ' ' || *in == '\t') in++;
+		if (!*in) break;
+		bool quoted = *in == '"';
+		if (quoted) in++;
+		cmd.argv[cmd.argc++] = out;
+		while (*in && (quoted ? *in != '"' : (*in != ' ' && *in != '\t'))) {
+			if (out + 1 >= end) return false;
+			*out++ = *in++;
+		}
+		if (quoted && *in == '"') in++;
+		if (out >= end) return false;
+		*out++ = 0;
+	}
+	return cmd.argc > 0;
+}
+
+void Dispatch(sdk::ConCommand *command, const sdk::CCommand &args) {
+	if (command->usingNewCommandCallback && !command->usingCommandCallbackInterface && command->callback)
+		command->callback(args);
+	else
+		CallVirtual<void, const sdk::CCommand &>(command, 14, args);  // ConCommand::Dispatch
+}
+
+}  // namespace
+
+bool Init(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn serverFactory) {
+	if (const char *path = getenv("P2PRACTICE_LOG")) g_trace = fopen(path, "a");
+	if (HMODULE tier0 = GetModuleHandleA("tier0.dll")) {
+		g_colorMsg = reinterpret_cast<ColorMsgFn>(GetProcAddress(tier0, "?ConColorMsg@@YAXABVColor@@PBDZZ"));
+		g_msg = reinterpret_cast<MsgFn>(GetProcAddress(tier0, "Msg"));
+	}
+	g_cvar = interfaceFactory(sdk::kCvar, nullptr);
+	g_engineClient = interfaceFactory(sdk::kEngineClient, nullptr);
+	void *serverGame = g_serverGame = serverFactory(sdk::kServerGameDLL, nullptr);
+	g_playerInfoManager = serverFactory(sdk::kPlayerInfoManager, nullptr);
+	if (!g_cvar || !g_engineClient || !serverGame || !g_playerInfoManager) {
+		Warn("This game doesn't offer the interfaces P2 Practice needs (cvar %p, client %p, server %p, players %p).\n",
+		     g_cvar, g_engineClient, serverGame, g_playerInfoManager);
+		return false;
+	}
+	g_globals = CallVirtual<sdk::GlobalVars *>(g_playerInfoManager, sdk::slot::GetGlobalVars);
+
+	if (void *listdemo = FindCommandBase("listdemo")) g_commandVtable = *static_cast<void **>(listdemo);
+	g_svCheats = FindVar("sv_cheats");
+	if (!g_globals || !g_commandVtable || !g_svCheats || !FindCommandBase("script")) {
+		Warn("Not a game P2 Practice understands (no VScript console or cvar system as expected).\n");
+		return false;
+	}
+	if (!FindPlayerOffsets(serverGame)) {
+		Warn("Couldn't find the player's networked fields; this game version isn't supported.\n");
+		return false;
+	}
+	return true;
+}
+
+void Shutdown() {
+	for (sdk::ConCommand *command : g_commands) {
+		CallVirtual<void>(g_cvar, sdk::slot::UnregisterConCommand, command);
+		delete command;
+	}
+	g_commands.clear();
+	g_scriptBatch.clear();
+	if (g_trace) fclose(g_trace);
+	g_trace = nullptr;
+}
+
+void Print(const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	Output(kTextColor, format, args);
+	va_end(args);
+}
+
+void Warn(const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	Output(kWarnColor, format, args);
+	va_end(args);
+}
+
+void Debug(const char *format, ...) {
+	if (!g_trace) return;
+	char text[1024];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(text, sizeof(text), format, args);
+	va_end(args);
+	Trace("debug ", text);
+}
+
+bool RegisterCommand(const char *name, sdk::CommandCallback callback, const char *help) {
+	if (!g_cvar || !g_commandVtable || FindCommandBase(name)) return false;
+	auto *command = new sdk::ConCommand{};
+	command->vtable = g_commandVtable;
+	command->name = name;
+	command->helpString = help;
+	command->callback = callback;
+	command->usingNewCommandCallback = true;
+	CallVirtual<void>(g_cvar, sdk::slot::RegisterConCommand, command);
+	g_commands.push_back(command);
+	return true;
+}
+
+void Execute(const char *format, ...) {
+	char line[1024];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	Trace("exec  ", line);
+	if (g_engineClient) CallVirtual<void, const char *>(g_engineClient, sdk::slot::ExecuteClientCmd, line);
+}
+
+bool CallCommand(const char *name, const char *arguments) {
+	void *base = FindCommandBase(name);
+	if (!base || !IsCommand(base)) return false;
+	sdk::CCommand args{};
+	if (!Tokenize(args, name, arguments)) return false;
+	Trace("call  ", args.argSBuffer);
+	Dispatch(static_cast<sdk::ConCommand *>(base), args);
+	return true;
+}
+
+bool CommandExists(const char *name) {
+	void *base = FindCommandBase(name);
+	return base && IsCommand(base);
+}
+
+bool CheatsOn() {
+	return g_svCheats && g_svCheats->intValue != 0;
+}
+
+float CvarFloat(const char *name, float fallback) {
+	sdk::ConVar *var = FindVar(name);
+	return var ? var->floatValue : fallback;
+}
+
+void Script(const char *format, ...) {
+	char statement[sdk::CCommand::kMaxLength];
+	va_list args;
+	va_start(args, format);
+	int length = vsnprintf(statement, sizeof(statement), format, args);
+	va_end(args);
+	if (length <= 0) return;
+	if (static_cast<size_t>(length) > kScriptLimit) {
+		Warn("Script statement too long (%d characters), dropped.\n", length);
+		return;
+	}
+	if (g_scriptBatch.size() + length + 1 > kScriptLimit) FlushScript();
+	g_scriptBatch.append(statement, length);
+	g_scriptBatch.push_back(';');
+}
+
+void FlushScript() {
+	if (g_scriptBatch.empty()) return;
+	void *base = FindCommandBase("script");
+	if (base && IsCommand(base)) {
+		// The game's handler takes the raw line after "script", so the code goes through untokenized
+		sdk::CCommand args{};
+		snprintf(args.argSBuffer, sizeof(args.argSBuffer), "script %s", g_scriptBatch.c_str());
+		args.argv0Size = 7;
+		args.argc = 2;
+		args.argv[0] = "script";
+		args.argv[1] = args.argSBuffer + args.argv0Size;
+		Trace("script", args.argv[1]);
+		Dispatch(static_cast<sdk::ConCommand *>(base), args);
+	}
+	g_scriptBatch.clear();
+}
+
+int MaxClients() {
+	return g_globals ? g_globals->maxClients : 0;
+}
+
+int TickCount() {
+	return g_globals ? g_globals->tickcount : 0;
+}
+
+float TickInterval() {
+	return g_globals && g_globals->intervalPerTick > 0 ? g_globals->intervalPerTick : 1.0f / 60;
+}
+
+const char *MapName() {
+	return g_globals && g_globals->mapname ? g_globals->mapname : "";
+}
+
+std::string GameDirectory() {
+	const char *dir = g_engineClient ? CallVirtual<const char *>(g_engineClient, sdk::slot::GetGameDirectory) : nullptr;
+	return dir ? dir : "";
+}
+
+// Prints every nested table on the way to a networked field, with the offset each adds.
+bool PrintPropPath(const sdk::SendTable *table, const char *name, int depth = 0) {
+	if (!table || !table->props || depth > 12) return false;
+	for (int i = 0; i < table->propCount; i++) {
+		const sdk::SendProp &prop = table->props[i];
+		if (prop.type == sdk::kPropDataTable) {
+			if (PrintPropPath(prop.dataTable, name, depth + 1)) {
+				Print("  in table %s via \"%s\": offset %d (%#x), flags %#x\n", table->netTableName, prop.varName, prop.offset, prop.offset, prop.flags);
+				return true;
+			}
+		} else if (prop.varName && !strcmp(prop.varName, name)) {
+			Print("%s: found in %s at offset %d (%#x), flags %#x\n", name, table->netTableName, prop.offset, prop.offset, prop.flags);
+			return true;
+		}
+	}
+	return false;
+}
+
+// The entity a handle stored in another entity points at, or null
+static const char *EntityFromHandle(const char *owner, int handleOffset, int *index = nullptr) {
+	if (!owner || handleOffset < 0 || !g_globals || !g_globals->edicts) return nullptr;
+	unsigned handle;
+	memcpy(&handle, owner + handleOffset, sizeof(handle));
+	if (handle == 0xFFFFFFFF) return nullptr;
+	int entIndex = static_cast<int>(handle & kHandleIndexMask);
+	if (entIndex <= 0 || entIndex >= kMaxEdicts || entIndex >= g_globals->maxEntities) return nullptr;
+	const sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse()) return nullptr;
+	if (index) *index = entIndex;
+	return static_cast<const char *>(edict.unknown);
+}
+
+bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary) {
+	primary = secondary = -1;
+	if (!g_globals || !g_globals->edicts || playerEntIndex < 1 || playerEntIndex > g_globals->maxClients) return false;
+	const sdk::Edict &edict = g_globals->edicts[playerEntIndex];
+	if (!edict.InUse() || g_gun.primaryPortal < 0 || g_gun.secondaryPortal < 0) return false;
+	const char *gun = EntityFromHandle(static_cast<const char *>(edict.unknown), g_player.activeWeapon);
+	if (!gun) return false;
+	EntityFromHandle(gun, g_gun.primaryPortal, &primary);
+	EntityFromHandle(gun, g_gun.secondaryPortal, &secondary);
+	return primary > 0 || secondary > 0;
+}
+
+void PrintRawState() {
+	Print("portal gun fields: active weapon %d, primary portal %d, secondary portal %d\n", g_player.activeWeapon, g_gun.primaryPortal, g_gun.secondaryPortal);
+	for (int i = 1; i <= MaxClients(); i++) {
+		int primary, secondary;
+		bool found = GetPlayerPortals(i, primary, secondary);
+		Print("player %d portals: %s, entities %d and %d\n", i, found ? "found" : "none", primary, secondary);
+	}
+	if (g_serverGame) {
+		sdk::ServerClass *cls = FindServerClass(g_serverGame, "CPortal_Player");
+		if (cls)
+			for (const char *name : {"m_vecOrigin", "m_angEyeAngles[0]", "m_vecVelocity[0]", "m_vecViewOffset[2]", "m_fFlags"})
+				PrintPropPath(cls->table, name);
+	}
+	Print("globals %p, edicts %p, maxClients %d, tick %d\n", g_globals, g_globals ? g_globals->edicts : nullptr, MaxClients(), TickCount());
+	Print("player field offsets: origin %d, eye %d %d, velocity %d, flags %d, team %d, view offset %d, life %d\n", g_player.origin,
+	      g_player.eyePitch, g_player.eyeYaw, g_player.velocity, g_player.flags, g_player.team, g_player.viewOffsetZ, g_player.lifeState);
+	if (!g_globals || !g_globals->edicts) return;
+	for (int i = 0; i <= MaxClients() && i < 34; i++) {
+		const sdk::Edict &edict = g_globals->edicts[i];
+		Print("edict %d: flags %#x, serial %d, networkable %p, entity %p\n", i, edict.stateFlags, edict.networkSerialNumber, edict.networkable,
+		      edict.unknown);
+	}
+}
+
+bool GetPlayer(int entIndex, PlayerState &out) {
+	if (!g_globals || !g_globals->edicts || entIndex < 1 || entIndex > g_globals->maxClients) return false;
+	sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse()) return false;
+	const char *entity = static_cast<const char *>(edict.unknown);
+	auto read = [entity](int offset, void *to, size_t size) { memcpy(to, entity + offset, size); };
+	read(g_player.origin, &out.origin, sizeof(Vec3));
+	read(g_player.velocity, &out.velocity, sizeof(Vec3));
+	read(g_player.eyePitch, &out.pitch, sizeof(float));
+	read(g_player.eyeYaw, &out.yaw, sizeof(float));
+	read(g_player.viewOffsetZ, &out.viewOffsetZ, sizeof(float));
+	read(g_player.flags, &out.flags, sizeof(int));
+	read(g_player.team, &out.team, sizeof(int));
+	unsigned char lifeState = 0;
+	read(g_player.lifeState, &lifeState, 1);
+	out.alive = lifeState == 0;
+	out.bot = false;
+	if (void *info = CallVirtual<void *, sdk::Edict *>(g_playerInfoManager, sdk::slot::GetPlayerInfo, &edict)) {
+		const char *id = CallVirtual<const char *>(info, sdk::slot::GetNetworkIDString);
+		out.bot = id && !strcmp(id, "BOT");
+	}
+	return true;
+}
+
+}  // namespace engine
