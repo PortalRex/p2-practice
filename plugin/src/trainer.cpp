@@ -406,15 +406,22 @@ void DrawRoute() {
 	if (!g_set.path) return;
 	const float kForever = 100000;
 	int from = g.handover, to = g.route.timerEnd;
-	int step = std::max(2, (to - from) / 500);
+	int step = std::max(2, (to - from) / 300);
 	for (size_t a = 0; a < g.route.actors.size(); a++) {
 		if (!g.slots[a].human && !g.replaying) continue;
 		Rgb c = TeamColor(g.route.actors[a].team);
 		for (int tick = from; tick + step <= to; tick += step) {
 			const Sample &p = g.route.At(static_cast<int>(a), tick), &q = g.route.At(static_cast<int>(a), tick + step);
 			if (!p.present || !q.present || Distance(p.pos, q.pos) > 64 + 3500 * step * g.route.tickInterval) continue;
-			engine::Script("::PP.Line(%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%d,%.0f)", p.pos.x, p.pos.y, p.pos.z + 4, q.pos.x, q.pos.y, q.pos.z + 4,
-			               c.r, c.g, c.b, kForever);
+			// A debug line is one pixel wide. Three of them, a unit apart sideways and upwards, read as a band.
+			float dx = q.pos.x - p.pos.x, dy = q.pos.y - p.pos.y;
+			float length = std::sqrt(dx * dx + dy * dy);
+			float sx = length > 0.01f ? -dy / length : 1, sy = length > 0.01f ? dx / length : 0;
+			static const float offsets[3][2] = {{0, 0}, {1, 0}, {-1, 1}};  // sideways, up
+			for (const auto &offset : offsets)
+				engine::Script("::PP.Line(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%.0f)", p.pos.x + sx * offset[0], p.pos.y + sy * offset[0],
+				               p.pos.z + 4 + offset[1], q.pos.x + sx * offset[0], q.pos.y + sy * offset[0], q.pos.z + 4 + offset[1], c.r, c.g, c.b,
+				               kForever);
 		}
 		for (const auto &portal : g.route.portals) {
 			if (!portal.active || portal.actor != static_cast<int>(a) || portal.tick < from) continue;
@@ -491,7 +498,8 @@ void UpdateHud() {
 		int clock = slot.finished ? slot.finishCursor : g.cursor;
 		float delta = (clock - slot.progress) * dt;
 		bool ahead = delta < 0;
-		SetText(ent, kChClock, -1, 0.07f, ahead ? 110 : 255, ahead ? 255 : 120, ahead ? 140 : 110);
+		// the portal colours: blue while ahead of the run, orange while behind
+		SetText(ent, kChClock, -1, 0.07f, ahead ? 60 : 255, ahead ? 170 : 150, ahead ? 255 : 30);
 		Say(ent, kChClock, hold, route::FormatTime(g.route.TimeAt(clock)) + "   " + SignedTime(delta));
 
 		engine::PlayerState state;
