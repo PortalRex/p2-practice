@@ -40,7 +40,7 @@ struct Actor {
 struct MoverKey {
 	int tick = 0;
 	Vec3 pos, ang;
-	bool present = true;  // false from the tick the object stopped existing (fizzled, destroyed)
+	bool present = true;  // false from the tick the object stopped existing (fizzled, destroyed) or left the demo's view
 };
 
 struct Mover {
@@ -87,12 +87,17 @@ struct Segment {
 };
 
 struct Route {
-	std::string map;
+	std::string map;   // the map's file name: sp_a2_laser_stairs
+	std::string name;  // the chamber's name, for showing: Laser Stairs
 	bool coop = false;
+	bool challenge = false;  // made in Challenge Mode, where levels are set up differently in places
 	std::vector<std::string> files;
 	float tickInterval = 1.0f / 60;
 	int firstTick = 0, lastTick = 0;    // demo ticks the samples cover
 	int timerStart = 0, timerEnd = 0;   // the run: its time is (timerEnd - timerStart) ticks
+	// The server's tick count, counted from the map's load, at demo tick 0 (p2demo::Demo::kNoServerTick when the
+	// demo doesn't say). A level's lifts, doors and timers run on that count.
+	int levelTickAtZero = p2demo::Demo::kNoServerTick;
 	bool timerFromSar = false;          // timerStart comes from SAR's recorded time, not a guess
 	std::vector<Actor> actors;          // one in single player; co-op: blue first, then orange
 	std::vector<PortalChange> portals;  // in tick order

@@ -132,6 +132,7 @@ struct PlayerTrack {
 	std::string name;  // from "userinfo"
 	std::string model;
 	bool isRecorder = false;
+	bool challenge = false;  // the player was in Challenge Mode (the level is set up differently in places)
 	std::vector<PlayerKey> keys;  // in tick order, one per snapshot that held the player
 	// (and one with inSnapshot false on the tick the player left the snapshot or was deleted)
 };
@@ -190,6 +191,10 @@ struct Demo {
 	float intervalPerTick = 1.0f / 60;
 	int firstTick = 0, lastTick = 0;
 	int recorderEntIndex = 0;  // the recording player's entity index
+	// The server's tick count (counted from the map's load) at this demo's tick 0: what the level's own clock
+	// showed when the recording began. kNoServerTick when the demo doesn't say.
+	static constexpr int kNoServerTick = -1000000;
+	int serverTickAtZero = kNoServerTick;
 
 	std::vector<View> views;
 	std::vector<UserCmd> userCmds;

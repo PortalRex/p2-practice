@@ -1,5 +1,5 @@
 # The route builder without the engine: shared by the plugin and the command-line tools
-add_library(p2route_lib STATIC src/route.cpp)
+add_library(p2route_lib STATIC src/route.cpp src/maps.cpp)
 target_compile_features(p2route_lib PUBLIC cxx_std_17)
 target_include_directories(p2route_lib PUBLIC src)
 target_link_libraries(p2route_lib PUBLIC p2demo)

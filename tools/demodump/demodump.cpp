@@ -211,6 +211,7 @@ void WriteDemo(JsonWriter &j, const Demo &demo) {
 	j.field("firstTick", demo.firstTick);
 	j.field("lastTick", demo.lastTick);
 	j.field("recorderEntIndex", demo.recorderEntIndex);
+	j.field("serverTickAtZero", demo.serverTickAtZero);
 
 	j.key("views");
 	j.beginArray();
@@ -332,6 +333,7 @@ void WriteDemo(JsonWriter &j, const Demo &demo) {
 		j.field("name", p.name);
 		j.field("model", p.model, Text::LATIN1);
 		j.field("isRecorder", p.isRecorder);
+		j.field("challenge", p.challenge);
 		j.key("keys");
 		j.beginArray();
 		for (const PlayerKey &k : p.keys) {

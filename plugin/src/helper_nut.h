@@ -33,39 +33,79 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	p.SetVelocity(Vector(vx, vy, vz))
 }
 
-// Use something as a player: what the run named if it has a name (the nearest one of several), else the nearest
-// thing of that kind the player is aiming at within reach. Buttons get pressed, cubes picked up.
-::PP.UseEnt <- function(index, classname, name, dx, dy, dz) {
+// How well a player looking from `eye` along `aim` is looking at `thing`: the cosine of the angle between the
+// aim and the direction to it, or -1 when it is out of reach
+::PP.reach <- 140.0
+::PP.LooksAt <- function(eye, aim, thing) {
+	local to = thing.GetCenter() - eye
+	local distance = to.Length()
+	if (distance < 1 || distance > reach) return -1.0
+	return to.Dot(aim) / distance
+}
+
+// Use something as a player: the thing of that kind (and name, if the run recorded one) that the player is
+// looking at within reach. A player also reaches through a portal: for each pair of portals given (entity
+// numbers, -1 for none), a look into one of them is carried on from the other. Buttons get pressed this way;
+// what a recorded player picked up is moved by the trainer instead.
+::PP.UseEnt <- function(index, classname, name, dx, dy, dz, a1, b1, a2, b2) {
 	local p = Player(index)
 	if (p == null) return
-	local eye = p.EyePosition()
+	// the views to judge from: the player's own, and the one through every portal they are looking into
+	local views = [[p.EyePosition(), Vector(dx, dy, dz)]]
+	foreach (pair in [[a1, b1], [b1, a1], [a2, b2], [b2, a2]]) {
+		local near = (pair[0] > 0) ? Portal(pair[0]) : null
+		local far = (pair[1] > 0) ? Portal(pair[1]) : null
+		if (near == null || far == null) continue
+		local view = ThroughPortal(views[0][0], views[0][1], near, far)
+		if (view != null) views.append(view)
+	}
 	local best = null
+	local bestDot = 0.5
+	local nearest = null
+	local nearestDistance = 0.0
 	local e = null
-	if (name != "") {
-		local bestDistance = 0.0
-		while (e = Entities.FindByName(e, name)) {
-			if (e.GetClassname() != classname) continue
-			local distance = (e.GetCenter() - eye).Length()
-			if (best == null || distance < bestDistance) {
-				best = e
-				bestDistance = distance
-			}
-		}
-	} else {
-		local aim = Vector(dx, dy, dz)
-		local bestDot = 0.5
-		while (e = Entities.FindByClassnameWithin(e, classname, eye, 140)) {
-			local to = e.GetCenter() - eye
-			local distance = to.Length()
-			if (distance < 1) continue
-			local dot = to.Dot(aim) / distance
+	while (e = Entities.FindByClassname(e, classname)) {
+		if (name != "" && e.GetName() != name) continue
+		foreach (view in views) {
+			local dot = LooksAt(view[0], view[1], e)
 			if (dot > bestDot) {
 				bestDot = dot
 				best = e
 			}
 		}
+		local distance = (e.GetCenter() - views[0][0]).Length()
+		if (nearest == null || distance < nearestDistance) {
+			nearest = e
+			nearestDistance = distance
+		}
 	}
+	// (a thing the run named, with nothing in view: the nearest of that name, as long as it is within reach)
+	if (best == null && name != "" && nearest != null && nearestDistance <= reach) best = nearest
 	if (best != null) EntFireByHandle(best, "Use", "", 0, p, p)
+}
+
+// The view a player has through a portal: where their eye and aim are, seen from the other portal's side. Null
+// when the aim doesn't go into the portal's opening.
+::PP.ThroughPortal <- function(eye, aim, near, far) {
+	local forward = near.GetForwardVector()
+	local left = near.GetLeftVector()
+	local up = near.GetUpVector()
+	local offset = eye - near.GetOrigin()
+	local x = offset.Dot(forward)
+	local ax = aim.Dot(forward)
+	if (x <= 0 || ax >= -0.01) return null  // behind the portal, or not looking into it
+	local ay = aim.Dot(left)
+	local az = aim.Dot(up)
+	local y = offset.Dot(left)
+	local z = offset.Dot(up)
+	// where the aim meets the portal's plane: inside the opening (64 wide, 108 high)?
+	local t = x / -ax
+	if (t > reach || fabs(y + ay * t) > 34 || fabs(z + az * t) > 56) return null
+	// a portal shows the other one's side turned half round its upright axis
+	local farForward = far.GetForwardVector()
+	local farLeft = far.GetLeftVector()
+	local farUp = far.GetUpVector()
+	return [far.GetOrigin() - farForward * x - farLeft * y + farUp * z, farForward * -ax - farLeft * ay + farUp * az]
 }
 
 // The player lets go of what they carry. The game holds a carried object through a "player_pickup" entity per
@@ -115,14 +155,32 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	objects.clear()
 }
 
-// An object that has come to rest in the run: its live counterpart is put there if it lies somewhere else
-::PP.Rest <- function(id, classname, x, y, z, pitch, yaw, roll) {
+// The smallest turn between two angles, in degrees
+::PP.AngleApart <- function(a, b) {
+	local d = fabs(a - b) % 360.0
+	return d > 180 ? 360 - d : d
+}
+
+// One of the run's objects is put where the run had it this tick, moving as it moved. With `slack` above zero
+// it is left alone while it is within that distance of the spot (and, with `turnMatters`, turned the same way
+// to within a few degrees): an object the game's physics is already carrying along the run's path is not
+// disturbed, which matters to buttons and catapults that have hold of it. `held1` and `held2` are the entity
+// numbers of what the people in the game have in their hands (-1: nothing): those are never touched, since
+// moving an object out of a player's hands breaks the game's physics.
+::PP.Pose <- function(id, classname, x, y, z, pitch, yaw, roll, vx, vy, vz, held1, held2, slack, turnMatters) {
 	local e = Claim(id, classname, x, y, z)
+	if (e == null) return
+	local index = e.entindex()
+	if (index == held1 || index == held2) return
 	local spot = Vector(x, y, z)
-	if (e == null || (e.GetOrigin() - spot).Length() < 12) return
+	if (slack > 0 && (e.GetOrigin() - spot).Length() <= slack) {
+		if (!turnMatters) return
+		local angles = e.GetAngles()
+		if (AngleApart(angles.x, pitch) < 5 && AngleApart(angles.y, yaw) < 5 && AngleApart(angles.z, roll) < 5) return
+	}
 	e.SetOrigin(spot)
 	e.SetAngles(pitch, yaw, roll)
-	e.SetVelocity(Vector(0, 0, 0))
+	e.SetVelocity(Vector(vx, vy, vz))
 }
 
 // The player picks up (uses) the live counterpart of one of the run's objects
@@ -175,20 +233,42 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 }
 
 // A copy of a player model, in one flat colour, that the trainer moves along the recorded run. It is never
-// spawned as a prop, so it has no collision: players, portals and lasers pass through it.
+// spawned as a prop, so it has no collision: players, portals and lasers pass through it. The plugin is told
+// the prop's entity number (it sets the model's pose there, which no script function does).
 ::PP.Ghost <- function(id, model, r, g, b) {
 	if (id in ghosts && ghosts[id] != null && ghosts[id].IsValid()) return
 	local e = CreateProp("prop_dynamic", Vector(0, 0, -16000), model, 1)
 	e.__KeyValueFromString("targetname", "p2practice_ghost" + id)
 	e.__KeyValueFromString("rendercolor", r + " " + g + " " + b)
 	e.__KeyValueFromInt("disableshadows", 1)
+	e.__KeyValueFromInt("SuppressAnimSounds", 1)  // (the robots' animations carry footstep and servo sounds)
 	ghosts[id] <- e
+	SendToConsole("prac_debug ghost " + id + " " + e.entindex())
 }
 
 ::PP.Gm <- function(id, x, y, z, yaw) {
 	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return
 	ghosts[id].SetOrigin(Vector(x, y, z))
 	ghosts[id].SetAngles(0, yaw, 0)
+}
+
+// The animation a ghost plays from now on, over and over
+::PP.Ga <- function(id, sequence) {
+	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return
+	EntFireByHandle(ghosts[id], "SetDefaultAnimation", sequence, 0, null, null)
+	EntFireByHandle(ghosts[id], "SetAnimation", sequence, 0, null, null)
+}
+
+// How fast a ghost's animation plays (1: as made)
+::PP.Gr <- function(id, rate) {
+	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return
+	EntFireByHandle(ghosts[id], "SetPlaybackRate", rate.tostring(), 0, null, null)
+}
+
+// Whether a ghost is drawn
+::PP.Gv <- function(id, visible) {
+	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return
+	EntFireByHandle(ghosts[id], visible ? "EnableDraw" : "DisableDraw", "", 0, null, null)
 }
 
 ::PP.ClearGhosts <- function() {

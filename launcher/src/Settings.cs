@@ -5,9 +5,9 @@ using System.IO;
 using System.Text;
 
 namespace P2Practice {
-	// How the player wants to practise. Each one is a plugin setting (prac_set / prac_role / prac_auto).
+	// How the player wants to practice. Each one is a plugin setting (prac_set / prac_role / prac_auto).
 	class Options {
-		public bool Watch;              // ride along with the run instead of practising it
+		public bool Watch;              // ride along with the run instead of practicing it
 		public bool Orange;             // co-op alone: play P-body (otherwise ATLAS)
 		public bool RealPartner;        // co-op: a real partner plays the other robot (otherwise a bot does)
 		public bool Ghost = true;       // show the recorded players
@@ -15,7 +15,7 @@ namespace P2Practice {
 		public bool Keys = true;        // the keys the record holds
 		public bool Line = true;        // the route drawn in the level ("path")
 		public double LeadIn = 1.5;     // seconds the run plays itself before the player takes over
-		public double Speed = 1.0;      // game speed while practising
+		public double Speed = 1.0;      // game speed while practicing
 		public bool Loop;               // start again by itself after the finish
 		public string Extra = "";       // the player's own launch options, appended as typed
 
@@ -43,7 +43,7 @@ namespace P2Practice {
 		}
 
 		public IEnumerable<string> Lines() {
-			yield return "mode=" + (Watch ? "watch" : "practise");
+			yield return "mode=" + (Watch ? "watch" : "practice");
 			yield return "role=" + (Orange ? "orange" : "blue");
 			yield return "partner=" + (RealPartner ? "real" : "bot");
 			yield return "ghost=" + (Ghost ? 1 : 0);

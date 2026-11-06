@@ -56,15 +56,30 @@ struct PlayerState {
 	int flags = 0;     // FL_ONGROUND 1, FL_DUCKING 2
 	int team = 0;
 	bool alive = false;
+	bool challenge = false;  // spawned into Challenge Mode
+	int held = -1;           // entity index of the object in the player's hands, -1 = none
 	bool bot = false;  // no human behind it: the second split-screen player, or a fake client
 };
 
 // False when no player holds that entity index (1-based).
 bool GetPlayer(int entIndex, PlayerState &out);
 
+// Turns the game's god mode on or off for a player: the flag its own "god" command sets, which that command
+// can only set for the player typing it. This is the one place the plugin writes into the game's memory.
+void SetGodMode(int entIndex, bool on);
+
 // The entity indices of the two portals a player's portal gun shoots (-1 where it has none). False when the
 // player holds no portal gun.
 bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary);
+
+// ---- the trainer's own props ----
+// A model blends its walk between directions (and its aim between angles) by pose parameters, numbers from 0 to
+// 1 that the game offers no console or script way to set. For a prop the trainer made itself (a ghost) they are
+// written straight into the prop, and the prop is marked as changed so that the game sends them to the players.
+// Besides god mode this is the only place the plugin writes into the game's memory, and never into anything
+// that isn't its own prop_dynamic. False when `entIndex` is not a prop_dynamic.
+constexpr int kPoseParameters = 24;
+bool SetPoseParameters(int entIndex, const float values[kPoseParameters]);
 
 // Development aid: the raw pointers and offsets GetPlayer works from, printed without following them.
 void PrintRawState();

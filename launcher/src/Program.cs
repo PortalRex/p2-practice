@@ -1,4 +1,4 @@
-// P2 Practice launcher: lists demos, lets the player choose how to practise one, and starts Portal 2 with the
+// P2 Practice launcher: lists demos, lets the player choose how to practice one, and starts Portal 2 with the
 // p2practice plugin loaded and the session set up.
 using System;
 using System.Collections.Generic;
@@ -30,6 +30,7 @@ namespace P2Practice {
 		public static int RescaleTo;          // --rescale <percent>: then rebuild the window for this scale, as moving it to another monitor does
 		public static bool SaveSettings;      // --save: the screenshot run remembers settings like a real one (otherwise it leaves them alone)
 		public static bool RemovePlugin;      // --remove-plugin: choose Game > Remove plugin from game before the screenshot
+		public static bool SelfTest;          // --selftest: do what the mouse and keys would do, through the controls' own handlers, and log it
 		public static readonly List<KeyValuePair<string, string>> Sets = new List<KeyValuePair<string, string>>(); // --set key=value: an option, as in the ini
 
 		public static bool Headless { get { return Screenshot != null; } }
@@ -48,6 +49,8 @@ namespace P2Practice {
 					case "--launch": PressLaunch = true; break;
 					case "--save": SaveSettings = true; break;
 					case "--remove-plugin": RemovePlugin = true; break;
+					case "--selftest": SelfTest = true; break;
+					case "--show-focus": SignControl.AllFocusCues = true; break; // every keyboard-focus cue drawn at once, to look at them
 					case "--rescale": if (int.TryParse(next, out n)) { RescaleTo = Math.Max(50, Math.Min(400, n)); i++; } break;
 					case "--home": if (next != null) { Home = Path.GetFullPath(next); i++; } break;
 					case "--game": if (next != null) { GameOverride = Path.GetFullPath(next); i++; } break;
@@ -124,6 +127,7 @@ namespace P2Practice {
 							if (DateTime.UtcNow > deadline) throw new TimeoutException("the window did not settle in time");
 							if (step == 0 && form.LibraryIdle) { form.SelectRow(App.Select); step = 1; }
 							else if (step == 1 && form.RunReady) {
+								if (App.SelfTest) form.SelfTest();
 								if (App.Part > 0) form.SelectPart(App.Part);
 								if (App.PressLaunch) form.Launch();
 								if (App.RemovePlugin) form.RemovePlugin();
@@ -132,6 +136,7 @@ namespace P2Practice {
 							} else if (step == 2 && ++settle >= 3) {
 								timer.Stop();
 								form.SavePicture(App.Screenshot);
+								if (App.SelfTest) form.SaveMenuPicture(Path.ChangeExtension(App.Screenshot, null) + "-menu.png");
 								form.Close(); // (remembers the settings, with --save)
 								Application.ExitThread();
 							}

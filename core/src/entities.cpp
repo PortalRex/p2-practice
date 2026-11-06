@@ -186,6 +186,7 @@ struct Track {
 	bool hasCurrent = false;
 	bool currentRemoved = false;
 	bool ownerDataSeen = false;  // the recording player's own entity
+	bool challenge = false;      // seen in Challenge Mode
 
 	// portals and movers
 	std::vector<MotionKey> keys;
@@ -218,6 +219,7 @@ struct ClassFields {
 	int playerFlags = -1;
 	int team = -1;
 	int heldObject = -1;
+	int challenge = -1;  // which challenge the player is in (0: none)
 	int velocity[3] = {-1, -1, -1};
 	std::vector<uint8_t> ownerOnly;  // per prop: sent to the player it belongs to only
 
@@ -270,6 +272,7 @@ ClassFields FieldsFor(const ServerClass &cls, const ParseOptions &options) {
 		f.playerFlags = cls.find("m_fFlags");
 		f.team = cls.find("m_iTeamNum");
 		f.heldObject = cls.find("m_hAttachedObject");
+		f.challenge = cls.findFirst({"m_iBonusChallenge", "localdata.m_iBonusChallenge"});
 		f.velocity[0] = cls.find("localdata.m_vecVelocity[0]");
 		f.velocity[1] = cls.find("localdata.m_vecVelocity[1]");
 		f.velocity[2] = cls.find("localdata.m_vecVelocity[2]");
@@ -384,6 +387,12 @@ public:
 			for (const int classIndex : decodedBaselines_) instanceBaselines_[size_t(classIndex)].reset();
 			decodedBaselines_.clear();
 		}
+	}
+
+	void onServerTick(int serverTick) override {
+		// (demo ticks and server ticks advance together once the recording proper has begun; packets from before
+		// that still carry the previous map's ticks, so the latest packet is the one to go by)
+		if (tick_ > 0) serverTickAtZero_ = serverTick - tick_;
 	}
 
 	void onPacketEntities(const PacketEntitiesHeader &header, BitReader data) override {
@@ -739,6 +748,7 @@ private:
 		key.flags = ToInt32(NumberAt(s, f.playerFlags));
 		key.team = ToInt(NumberAt(s, f.team));
 		key.heldEntity = HandleIndex(NumberAt(s, f.heldObject, -1));
+		if (f.challenge >= 0 && ToInt(NumberAt(s, f.challenge)) != 0) track.challenge = true;
 		key.hasVelocity = f.velocity[0] >= 0 && f.velocity[1] >= 0 && f.velocity[2] >= 0;
 		if (key.hasVelocity) {
 			key.velocity.x = ToFloat(NumberAt(s, f.velocity[0]));
@@ -816,6 +826,7 @@ private:
 	std::vector<std::string> errors_, baselineErrors_;
 	size_t keyCount_ = 0;
 	int tick_ = 0;
+	int serverTickAtZero_ = Demo::kNoServerTick;
 };
 
 // Each client's player_info_t in "userinfo" (its slot is one less than its
@@ -872,6 +883,7 @@ int FindRecorder(const std::vector<PlayerTrack> &players, const std::vector<View
 }
 
 void EntityDecoder::finish(Demo &demo) {
+	demo.serverTickAtZero = serverTickAtZero_;
 	for (const std::string &error : baselineErrors_) demo.warnings.push_back("Entities: " + error);
 
 	if (!errors_.empty()) {
@@ -892,6 +904,7 @@ void EntityDecoder::finish(Demo &demo) {
 			const auto name = names.find(track.entIndex);
 			if (name != names.end()) out.name = name->second;
 			out.model = std::move(track.model);
+			out.challenge = track.challenge;
 			out.keys = std::move(track.playerKeys);
 			demo.players.push_back(std::move(out));
 			continue;

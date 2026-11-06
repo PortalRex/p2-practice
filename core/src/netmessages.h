@@ -25,6 +25,7 @@ public:
 	virtual void onTableChange(StringTable &table) = 0;
 	virtual void onPacketEntities(const PacketEntitiesHeader &header, BitReader data) = 0;
 	virtual void onUserMessage(int type, BitReader data) = 0;
+	virtual void onServerTick(int /*serverTick*/) {}  // the server's own tick count, sent with every packet
 };
 
 // Throws DecodeError at a message it can't read; the handler has then seen

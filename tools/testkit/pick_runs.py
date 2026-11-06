@@ -4,19 +4,24 @@
 
 The archive (H:\\Board-Demos\\demos, named Map_time_steamid_id.dem) is only read; copies go to demos/matrix.
 A run qualifies when its demo is the host's and carries SAR's time (so it has SAR's entity-input records, which
-the map test compares against). For co-op, the partner's demo of the same run is copied too when it exists.
+the map test compares against), and when it was made on the level as installed: the archive also holds runs made
+on altered maps, which no practice session on the real level can follow. For co-op, the partner's demo of the same run is copied too when it exists.
 Writes demos/matrix/cases.json for maptest.py.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+
+from bspents import entity_text, find_map
 
 ARCHIVE = r'H:\Board-Demos\demos'
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, 'demos', 'matrix')
 P2ROUTE = os.path.join(ROOT, 'build', 'x86', 'tools', 'routeinfo', 'Release', 'p2route.exe')
+DEMODUMP = os.path.join(ROOT, 'build', 'x86', 'tools', 'demodump', 'Release', 'demodump.exe')
 
 # One map per single-player chapter and per co-op course: (group, board names to try in order)
 CASES = [
@@ -49,6 +54,20 @@ def scan(path):
         return {'ok': False}
 
 
+def on_installed_level(path, map_name):
+    """Whether the entities the run's level fired inputs at are the installed map's. (Names made at run time, with
+    a number or built by scripts, are left out; a few misses are allowed for those the test doesn't recognise.)"""
+    out = subprocess.run([DEMODUMP, path, '--no-movers'], capture_output=True, timeout=120).stdout.decode('utf-8', 'replace')
+    try:
+        inputs = json.loads(out).get('sarEntityInputs', [])
+    except ValueError:
+        return False
+    level = entity_text(find_map(map_name))
+    names = {e['target'] for e in inputs if e['target'] and '&' not in e['target'] and not re.search(r'_\d+$', e['target'])}
+    missing = [n for n in names if f'"{n}"' not in level]
+    return len(missing) <= max(2, len(names) // 20)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     names = os.listdir(ARCHIVE)
@@ -72,6 +91,9 @@ def main():
                 continue
             info = scan(path)
             if not info.get('ok') or not info.get('host') or not info.get('hasTime'):
+                continue
+            if not on_installed_level(path, info['map']):
+                print(f'  (skipping {name}: not made on the installed {info["map"]})')
                 continue
             picked = (time, run_id, name, info, board_name, runs)
             break

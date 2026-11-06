@@ -16,6 +16,8 @@ param(
 	[switch]$Sar,
 	[string[]]$Cfg = @(),
 	[string]$GameArgs = '',
+	[switch]$CopyOnly,          # copy -Plugins into the profile without loading them from the autoexec
+	[string[]]$CfgFiles = @(),  # extra cfg files copied into the profile's cfg folder
 	[int]$Width = 1280,
 	[int]$Height = 720
 )
@@ -51,7 +53,7 @@ $autoexec = @(
 # loads the first plugin again)
 $load = @()
 foreach ($dll in @($Plugins | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
-	$load += 'plugin_load ' + [IO.Path]::GetFileNameWithoutExtension($dll)
+	if (-not $CopyOnly) { $load += 'plugin_load ' + [IO.Path]::GetFileNameWithoutExtension($dll) }
 }
 if ($Sar) {
 	Copy-Item (Join-Path $game 'sar.dll') (Join-Path $profile 'sar.dll')
@@ -62,6 +64,7 @@ if ($Sar) {
 $Plugins = @($Plugins | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Cfg = @($Cfg | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($dll in $Plugins) { Copy-Item $dll $profile }
+foreach ($cfg in @($CfgFiles | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })) { Copy-Item $cfg (Join-Path $profile 'cfg') }
 ($autoexec + $load + $Cfg) | Set-Content -Encoding ascii (Join-Path $profile 'cfg\autoexec.cfg')
 
 # Without the workshop maps linked in, the menu downloads every subscribed map into the profile

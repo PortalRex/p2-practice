@@ -56,12 +56,18 @@ constexpr Color kWarnColor{255, 170, 60, 255};
 struct PlayerOffsets {
 	int origin = -1, eyePitch = -1, eyeYaw = -1, velocity = -1, flags = -1, team = -1, viewOffsetZ = -1, lifeState = -1;
 	int activeWeapon = -1;  // handle of the weapon in hand (the portal gun)
+	int challenge = -1;     // which challenge the player spawned into (0: none)
+	int heldObject = -1;    // handle of the object in the player's hands
 } g_player;
 
 // ... and inside a portal gun: handles of the two portals it shoots
 struct GunOffsets {
 	int primaryPortal = -1, secondaryPortal = -1;
 } g_gun;
+
+// ... and inside a prop_dynamic: its pose parameters (an array of floats)
+sdk::ServerClass *g_dynamicPropClass = nullptr;
+int g_poseParameterOffset = -1;
 
 constexpr int kMaxEdicts = 2048;
 constexpr unsigned kHandleIndexMask = 0xFFF;  // an entity handle is its index in the low 12 bits, a serial above
@@ -91,6 +97,25 @@ int FindPropOffset(const sdk::SendTable *table, const char *name, int depth = 0)
 	return -1;
 }
 
+// The offset of a networked array's first element. An array is networked as a table of its own, named after
+// the field, holding one entry per element.
+int FindArrayOffset(const sdk::SendTable *table, const char *name, int depth = 0) {
+	if (!table || !table->props || depth > 12) return -1;
+	for (int i = 0; i < table->propCount; i++) {
+		const sdk::SendProp &prop = table->props[i];
+		if (prop.type != sdk::kPropDataTable || !prop.dataTable) continue;
+		if (prop.varName && !strcmp(prop.varName, name) && prop.dataTable->propCount > 0) return prop.offset + (prop.dataTable->props[0].offset & 0xFFFF);
+		int inner = FindArrayOffset(prop.dataTable, name, depth + 1);
+		if (inner >= 0) return prop.offset + inner;
+	}
+	return -1;
+}
+
+void FindPropFields(void *serverGame) {
+	g_dynamicPropClass = FindServerClass(serverGame, "CDynamicProp");
+	if (g_dynamicPropClass) g_poseParameterOffset = FindArrayOffset(g_dynamicPropClass->table, "m_flPoseParameter");
+}
+
 bool FindPlayerOffsets(void *serverGame) {
 	sdk::ServerClass *cls = FindServerClass(serverGame, "CPortal_Player");
 	if (!cls) return false;
@@ -100,6 +125,8 @@ bool FindPlayerOffsets(void *serverGame) {
 		g_gun.primaryPortal = FindPropOffset(gun->table, "m_hPrimaryPortal");
 		g_gun.secondaryPortal = FindPropOffset(gun->table, "m_hSecondaryPortal");
 	}
+	g_player.challenge = FindPropOffset(cls->table, "m_iBonusChallenge");
+	g_player.heldObject = FindPropOffset(cls->table, "m_hAttachedObject");
 	g_player.origin = FindPropOffset(cls->table, "m_vecOrigin");
 	g_player.eyePitch = FindPropOffset(cls->table, "m_angEyeAngles[0]");
 	g_player.eyeYaw = FindPropOffset(cls->table, "m_angEyeAngles[1]");
@@ -201,6 +228,7 @@ bool Init(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn server
 		Warn("Couldn't find the player's networked fields; this game version isn't supported.\n");
 		return false;
 	}
+	FindPropFields(serverGame);  // (optional: without them ghosts aren't animated)
 	return true;
 }
 
@@ -372,6 +400,18 @@ static const char *EntityFromHandle(const char *owner, int handleOffset, int *in
 	return static_cast<const char *>(edict.unknown);
 }
 
+void SetGodMode(int entIndex, bool on) {
+	constexpr int kFlagGodMode = 1 << 14;  // FL_GODMODE in Portal 2 (checked against what "god" toggles)
+	if (!g_globals || !g_globals->edicts || entIndex < 1 || entIndex > g_globals->maxClients) return;
+	sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse()) return;
+	char *field = static_cast<char *>(edict.unknown) + g_player.flags;
+	int flags;
+	memcpy(&flags, field, sizeof(flags));
+	flags = on ? flags | kFlagGodMode : flags & ~kFlagGodMode;
+	memcpy(field, &flags, sizeof(flags));
+}
+
 bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary) {
 	primary = secondary = -1;
 	if (!g_globals || !g_globals->edicts || playerEntIndex < 1 || playerEntIndex > g_globals->maxClients) return false;
@@ -384,7 +424,22 @@ bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary) {
 	return primary > 0 || secondary > 0;
 }
 
+bool SetPoseParameters(int entIndex, const float values[kPoseParameters]) {
+	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;  // "look at every field of it when sending"
+	constexpr int kGetServerClass = 1;                                  // IServerNetworkable
+	if (!g_globals || !g_globals->edicts || g_poseParameterOffset < 0 || entIndex <= g_globals->maxClients || entIndex >= kMaxEdicts) return false;
+	sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse() || !edict.networkable) return false;
+	if (CallVirtual<sdk::ServerClass *>(edict.networkable, kGetServerClass) != g_dynamicPropClass) return false;
+	char *field = static_cast<char *>(edict.unknown) + g_poseParameterOffset;
+	if (!memcmp(field, values, sizeof(float) * kPoseParameters)) return true;
+	memcpy(field, values, sizeof(float) * kPoseParameters);
+	edict.stateFlags |= kEdictChanged | kEdictFullyChanged;
+	return true;
+}
+
 void PrintRawState() {
+	Print("prop_dynamic pose parameters at %d\n", g_poseParameterOffset);
 	Print("portal gun fields: active weapon %d, primary portal %d, secondary portal %d\n", g_player.activeWeapon, g_gun.primaryPortal, g_gun.secondaryPortal);
 	for (int i = 1; i <= MaxClients(); i++) {
 		int primary, secondary;
@@ -400,6 +455,10 @@ void PrintRawState() {
 	Print("globals %p, edicts %p, maxClients %d, tick %d\n", g_globals, g_globals ? g_globals->edicts : nullptr, MaxClients(), TickCount());
 	Print("player field offsets: origin %d, eye %d %d, velocity %d, flags %d, team %d, view offset %d, life %d\n", g_player.origin,
 	      g_player.eyePitch, g_player.eyeYaw, g_player.velocity, g_player.flags, g_player.team, g_player.viewOffsetZ, g_player.lifeState);
+	for (int i = 1; i <= MaxClients(); i++) {
+		PlayerState state;
+		if (GetPlayer(i, state)) Print("player %d: challenge field at %d, challenge mode %s\n", i, g_player.challenge, state.challenge ? "on" : "off");
+	}
 	if (!g_globals || !g_globals->edicts) return;
 	for (int i = 0; i <= MaxClients() && i < 34; i++) {
 		const sdk::Edict &edict = g_globals->edicts[i];
@@ -424,6 +483,11 @@ bool GetPlayer(int entIndex, PlayerState &out) {
 	unsigned char lifeState = 0;
 	read(g_player.lifeState, &lifeState, 1);
 	out.alive = lifeState == 0;
+	int challenge = 0;
+	if (g_player.challenge >= 0) read(g_player.challenge, &challenge, sizeof(int));
+	out.challenge = challenge != 0;
+	out.held = -1;
+	if (g_player.heldObject >= 0) EntityFromHandle(entity, g_player.heldObject, &out.held);
 	out.bot = false;
 	if (void *info = CallVirtual<void *, sdk::Edict *>(g_playerInfoManager, sdk::slot::GetPlayerInfo, &edict)) {
 		const char *id = CallVirtual<const char *>(info, sdk::slot::GetNetworkIDString);

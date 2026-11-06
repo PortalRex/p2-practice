@@ -1,5 +1,7 @@
 #include "route.h"
 
+#include "maps.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -195,7 +197,11 @@ void ApplyHeld(const p2demo::PlayerTrack &track, int tickOffset, int firstTick, 
 // The map's entity class for a networked class whose objects the trainer can put back on their recorded paths:
 // things physics moves or players carry. Doors, lifts and other map machinery are not here: the map moves those
 // itself when its triggers fire.
-const char *MoverClass(const std::string &serverClass) {
+// The class an object has in the map, from the class the game networks it as (and, where several map classes
+// share one, its model): the live object is looked up by its map class.
+const char *MoverClass(const std::string &serverClass, const std::string &model) {
+	// (a frankenturret is networked as a plain physics prop)
+	if (serverClass == "CPhysicsProp" && model.find("npcs/monsters/monster_") != std::string::npos) return "prop_monster_box";
 	static const struct {
 		const char *server, *map;
 	} classes[] = {
@@ -229,49 +235,110 @@ bool IsHostDemo(const Demo &demo) {
 	return demo.header.server.compare(0, 9, "localhost") == 0;
 }
 
-// How many ticks to add to `b`'s ticks to get `a`'s. Both demos saw the same portal shots land.
-bool TickOffset(const Demo &a, const Demo &b, int &offset) {
+// The smallest turn between two angles, in degrees (0..180)
+float AngleApart(float a, float b) {
+	float d = std::fabs(std::fmod(a - b, 360.0f));
+	return d > 180 ? 360 - d : d;
+}
+
+// One moment of a player, for lining two demos up: where it looked and (optionally) where it stood
+struct SyncPoint {
+	int tick;
+	float yaw;
+	bool hasPosition;
+	Vec3 position;
+};
+
+// How badly `points` (in one demo's ticks) fit the player as the other demo saw it when `offset` is added to
+// their ticks: the mean distance in view direction (degrees) plus a share of the distance in position.
+// Negative when too few moments can be compared.
+float SyncError(const std::vector<SyncPoint> &points, const std::vector<const p2demo::PlayerKey *> &seenAt, int seenFirstTick, int offset) {
+	constexpr float kPositionWeight = 0.2f;  // degrees per unit
+	constexpr int kFewest = 30;
+	float error = 0;
+	int used = 0;
+	for (const SyncPoint &point : points) {
+		int index = point.tick + offset - seenFirstTick;
+		if (index < 0 || index >= static_cast<int>(seenAt.size()) || !seenAt[index]) continue;
+		const p2demo::PlayerKey &seen = *seenAt[index];
+		error += AngleApart(point.yaw, seen.eyeYaw);
+		if (point.hasPosition) error += kPositionWeight * Distance({point.position.x, point.position.y, 0}, {seen.origin.x, seen.origin.y, 0});
+		used++;
+	}
+	return used >= kFewest ? error / used : -1;
+}
+
+// The offset in [first, last] that fits best, and how well it fits (false when nothing could be compared)
+bool BestSync(const std::vector<SyncPoint> &points, const std::vector<const p2demo::PlayerKey *> &seenAt, int seenFirstTick, int first, int last,
+              int &offset, float &error) {
+	bool found = false;
+	for (int candidate = first; candidate <= last; candidate++) {
+		float candidateError = SyncError(points, seenAt, seenFirstTick, candidate);
+		if (candidateError < 0 || (found && candidateError >= error)) continue;
+		found = true;
+		error = candidateError;
+		offset = candidate;
+	}
+	return found;
+}
+
+// How many ticks to add to `b`'s ticks to get `a`'s (a: the host's demo, b: the partner's). Two answers:
+// `stateOffset` for what b's demo shows of the game (its own player included), and `inputOffset` for what b's
+// player did (keys, aim), which the host's game acts on a moment later: the time b's inputs take to arrive.
+//
+// Both are found by sliding b's record of its own player along a's record of that player until they agree:
+// speedrunners flick their view around so much that the fit is sharp to the tick. (Portal shots both demos saw
+// are not a good clock: each demo notes them when its own game shows them.)
+bool TickOffset(const Demo &a, const Demo &b, int &stateOffset, int &inputOffset) {
+	constexpr float kGoodFit = 25;      // degrees: anything worse is two records that don't belong together
+	constexpr int kAroundGuess = 90;    // ticks searched either side of what the demos' server ticks suggest
+	constexpr int kAnywhere = 1800;     // ... and when they suggest nothing
+	constexpr int kLongestDelay = 60;   // inputs arrive within a second
+	const p2demo::PlayerTrack *seen = FindTrack(a, b.recorderEntIndex);
+	const p2demo::PlayerTrack *own = FindTrack(b, b.recorderEntIndex);
+	if (seen && own && seen->keys.size() >= 8 && own->keys.size() >= 8) {
+		// a's view of the player, tick by tick (a snapshot holds for the couple of ticks until the next)
+		constexpr int kSnapshotHolds = 3;
+		int seenFirstTick = seen->keys.front().tick;
+		std::vector<const p2demo::PlayerKey *> seenAt(static_cast<size_t>(seen->keys.back().tick - seenFirstTick + 1), nullptr);
+		for (const p2demo::PlayerKey &key : seen->keys) {
+			if (!key.inSnapshot) continue;
+			for (int hold = 0; hold < kSnapshotHolds; hold++) {
+				size_t index = static_cast<size_t>(key.tick - seenFirstTick + hold);
+				if (index < seenAt.size() && (hold == 0 || !seenAt[index])) seenAt[index] = &key;
+			}
+		}
+		std::vector<SyncPoint> states, inputs;
+		for (const p2demo::PlayerKey &key : own->keys)
+			if (key.inSnapshot) states.push_back({key.tick, key.eyeYaw, true, key.origin});
+		for (const p2demo::UserCmd &cmd : b.userCmds)
+			if (cmd.slot == 0) inputs.push_back({cmd.tick, cmd.viewAngles.y, false, {}});
+
+		bool guessed = a.serverTickAtZero != Demo::kNoServerTick && b.serverTickAtZero != Demo::kNoServerTick;
+		int guess = guessed ? b.serverTickAtZero - a.serverTickAtZero : 0;
+		int reach = guessed ? kAroundGuess : kAnywhere;
+		float error = 0;
+		if (BestSync(states, seenAt, seenFirstTick, guess - reach, guess + reach, stateOffset, error) && error <= kGoodFit) {
+			inputOffset = stateOffset;
+			int delayed = stateOffset;
+			if (BestSync(inputs, seenAt, seenFirstTick, stateOffset, stateOffset + kLongestDelay, delayed, error) && error <= kGoodFit) inputOffset = delayed;
+			return true;
+		}
+	}
+	// No record of the player to compare: the portal shots both demos saw land
 	std::map<int, int> votes;
 	for (const auto &sa : a.portalShots)
 		for (const auto &sb : b.portalShots)
 			if (sa.result == sb.result && sa.portalNum == sb.portalNum && sa.team == sb.team && Distance(sa.origin, sb.origin) < 1)
 				votes[sa.tick - sb.tick]++;
-	if (votes.empty()) {
-		// No shots in common: line up where `a` saw b's player with where b's player says it was
-		const p2demo::PlayerTrack *seen = FindTrack(a, b.recorderEntIndex);
-		const p2demo::PlayerTrack *own = FindTrack(b, b.recorderEntIndex);
-		if (!seen || !own || seen->keys.size() < 8 || own->keys.size() < 8) return false;
-		int best = 0;
-		float bestError = 1e30f;
-		for (int candidate = -1800; candidate <= 1800; candidate++) {
-			float error = 0;
-			int used = 0;
-			size_t j = 0;
-			for (size_t i = 0; i < own->keys.size(); i += 4) {
-				int tick = own->keys[i].tick + candidate;
-				while (j + 1 < seen->keys.size() && seen->keys[j + 1].tick <= tick) j++;
-				if (std::abs(seen->keys[j].tick - tick) > 3) continue;
-				error += Distance(seen->keys[j].origin, own->keys[i].origin);
-				used++;
-			}
-			if (used < 6) continue;
-			error /= used;
-			if (error < bestError) {
-				bestError = error;
-				best = candidate;
-			}
-		}
-		if (bestError > 200) return false;
-		offset = best;
-		return true;
-	}
 	int bestVotes = 0;
 	for (const auto &[diff, count] : votes)
 		if (count > bestVotes) {
 			bestVotes = count;
-			offset = diff;
+			stateOffset = diff;
 		}
-	return true;
+	inputOffset = stateOffset;
+	return bestVotes > 0;
 }
 
 std::string SurfaceName(Vec3 angles) {
@@ -377,7 +444,7 @@ void FindEvents(Route &route, const Demo &primary) {
 	std::stable_sort(route.events.begin(), route.events.end(), [](const Event &a, const Event &b) { return a.tick < b.tick; });
 }
 
-// Parts start at events, but not closer together than a player could meaningfully practise apart.
+// Parts start at events, but not closer together than a player could meaningfully practice apart.
 void CutSegments(Route &route) {
 	constexpr int kMinTicks = 20;
 	int last = -1;
@@ -469,8 +536,10 @@ std::string FormatTime(float seconds) {
 bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &error) {
 	Route route;
 	route.map = primary.header.map;
+	route.name = maps::ChamberName(route.map);
 	route.tickInterval = primary.intervalPerTick > 0 ? primary.intervalPerTick : 1.0f / 60;
 	route.firstTick = std::max(0, primary.firstTick);
+	route.levelTickAtZero = primary.serverTickAtZero;
 	route.lastTick = primary.lastTick;
 	if (route.lastTick <= route.firstTick || route.Ticks() > 60 * 60 * 60 * 4) {
 		error = "the demo has no playable ticks";
@@ -479,7 +548,7 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 	const float dt = route.tickInterval;
 	const size_t count = static_cast<size_t>(route.Ticks());
 
-	int secondaryOffset = 0;
+	int secondaryOffset = 0, secondaryInputOffset = 0;
 	if (secondary) {
 		if (secondary->header.map != primary.header.map) {
 			error = "the two demos are of different maps (" + primary.header.map + ", " + secondary->header.map + ")";
@@ -488,8 +557,8 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 		if (secondary->recorderEntIndex == primary.recorderEntIndex) {
 			route.notes.push_back("Both demos are from the same player; the second one was ignored.");
 			secondary = nullptr;
-		} else if (!TickOffset(primary, *secondary, secondaryOffset)) {
-			route.notes.push_back("Couldn't line up the second demo with the first (no portal shots or positions in common); it was ignored.");
+		} else if (!TickOffset(primary, *secondary, secondaryOffset, secondaryInputOffset)) {
+			route.notes.push_back("Couldn't line up the second demo with the first (nothing of the partner in common); it was ignored.");
 			secondary = nullptr;
 		}
 	}
@@ -511,6 +580,9 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 	std::stable_sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) { return a.team > b.team; });
 	if (entries.size() > 2) entries.resize(2);
 	route.coop = entries.size() > 1 || entries[0].team != 0;
+	// Challenge Mode: the players say so themselves; SAR's record of the finish flags says so too
+	route.challenge = !primary.sarFlags.empty();
+	for (const auto &player : primary.players) route.challenge = route.challenge || player.challenge;
 
 	for (const Entry &entry : entries) {
 		Actor actor;
@@ -521,6 +593,7 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 		const Demo *own = entry.entIndex == primary.recorderEntIndex ? &primary
 		                  : secondary && entry.entIndex == secondary->recorderEntIndex ? secondary : nullptr;
 		int offset = own == secondary ? secondaryOffset : 0;
+		int inputOffset = own == secondary ? secondaryInputOffset : 0;
 		const p2demo::PlayerTrack *seen = FindTrack(primary, entry.entIndex);
 
 		if (own) {
@@ -535,7 +608,7 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 			} else {
 				Resample(KeysFromTrack(*ownTrack, offset), route.firstTick, dt, actor.samples);
 			}
-			ApplyUserCmds(*own, offset, route.firstTick, actor.samples);
+			ApplyUserCmds(*own, inputOffset, route.firstTick, actor.samples);
 			actor.hasInputs = !own->userCmds.empty();
 		} else if (seen) {
 			Resample(KeysFromTrack(*seen, 0), route.firstTick, dt, actor.samples);
@@ -632,7 +705,9 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 	// Objects the run moved. An object attached to something (parent) has an origin relative to it, which says
 	// nothing here: those stretches are left out and the object stays where it last was.
 	for (const auto &track : primary.movers) {
-		const char *mapClass = MoverClass(track.className);
+		std::string model = track.model;
+		std::transform(model.begin(), model.end(), model.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		const char *mapClass = MoverClass(track.className, model);
 		if (!mapClass) continue;
 		Mover mover;
 		mover.entIndex = track.entIndex;
@@ -643,7 +718,9 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 			key.tick = k.tick;
 			key.pos = k.origin;
 			key.ang = k.angles;
-			key.present = !k.removed;
+			// (out of the recording player's view the demo says nothing about the object: from there until it is
+			// seen again it counts as not there, and the trainer keeps its hands off the live one)
+			key.present = !k.removed && k.inSnapshot;
 			if (!mover.keys.empty() && mover.keys.back().tick >= key.tick) continue;
 			mover.keys.push_back(key);
 		}
@@ -686,8 +763,9 @@ bool Load(const std::vector<std::string> &paths, Route &out, std::string &error)
 std::string Describe(const Route &route) {
 	std::string text;
 	char line[256];
-	snprintf(line, sizeof(line), "%s  %s  (%s, %d demo%s)\n", route.map.c_str(), FormatTime(route.RunTime()).c_str(),
-	         route.coop ? "co-op" : "single player", static_cast<int>(route.files.size()), route.files.size() == 1 ? "" : "s");
+	snprintf(line, sizeof(line), "%s  %s  (%s%s, %d demo%s)\n", route.name.c_str(), FormatTime(route.RunTime()).c_str(),
+	         route.coop ? "co-op" : "single player", route.challenge ? ", Challenge Mode" : "", static_cast<int>(route.files.size()),
+	         route.files.size() == 1 ? "" : "s");
 	text += line;
 	for (const Actor &actor : route.actors) {
 		snprintf(line, sizeof(line), "  %-6s %s%s\n", TeamName(actor.team), actor.name.c_str(), actor.hasInputs ? "" : "  (no inputs)");

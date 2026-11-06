@@ -1,5 +1,6 @@
-// The window: the demos on the left; the selected run, its parts, the options and Launch on the right; a status
-// line along the bottom.
+// The window: a dark band along the top (the mark, the menus), the demos on a board on the left, and on the
+// right the selected run as a chamber sign - its time in huge numerals, its parts, the options as pictograms -
+// with Launch at the bottom. A status line runs along the foot. How it all looks is in Theme.cs and Controls.cs.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -16,35 +17,33 @@ using Timer = System.Windows.Forms.Timer;
 namespace P2Practice {
 	class MainForm : Form {
 		// sizes at 100% scale
-		const int DefaultWidth = 1180, DefaultHeight = 760, MinWidth = 960, MinHeight = 690, SideWidth = 456;
-		const int MapColumn = 150, TimeColumn = 62, PlayersColumn = 200, ModeColumn = 98, FileColumn = 160;
-		static readonly Color Accent = Color.FromArgb(0, 103, 192);
-		static readonly Color ErrorText = Color.FromArgb(176, 32, 32);
+		const int DefaultWidth = 1260, DefaultHeight = 880, MinWidth = 1010, MinHeight = 730, SideWidth = 474;
 
 		readonly Settings settings;
 		readonly DemoLibrary library = new DemoLibrary();
-		readonly Timer poll = new Timer { Interval = 150 };      // picks up what the library read in the background
-		readonly Timer selectDelay = new Timer { Interval = 40 }; // a click deselects, then selects: act once, on the result
+		readonly Timer poll = new Timer { Interval = 150 };  // picks up what the library read in the background
 		readonly Dictionary<string, RouteInfo> infos = new Dictionary<string, RouteInfo>(); // run key -> its parts, once read
 
-		// The window is laid out by hand for one scale: every size goes through P() and every font through NewFont().
-		// When the window moves to a monitor with another scale it is built again for that scale (Rescale).
+		// The window is laid out by hand for one scale: every size goes through P() and every font comes from the
+		// Look made for that scale. When the window moves to a monitor with another scale it is built again (Rescale).
 		float S = 1;
 		int P(float v) { return (int)Math.Round(v * S); }
-		Font NewFont(string family, float points) { return new Font(family, points * S * 96f / 72f, FontStyle.Regular, GraphicsUnit.Pixel); }
-		Font uiFont, titleFont, launchFont;
+		Look look;
 		ToolTip tips;
 
 		MenuStrip menu;
 		ToolStripMenuItem demosMenu, gameMenu;
-		TextBox search, extra;
-		ListViewEx list, parts;
-		Label title, subtitle, playersLine, notes, status, libraryLabel, roleCaption, partnerCaption;
-		RadioButton practise, watch, blue, orange, bot, real;
-		CheckBox ghost, clock, keys, line, loop;
-		NumericUpDown leadIn, speed;
-		Button launch;
-		ProgressBar progress;
+		Panel band;
+		TextField search, extra;
+		DemoList list;
+		PartsList parts;
+		RunHeader sign;
+		Words notes, status, libraryLabel;
+		Caption roleCaption, partnerCaption;
+		Option practice, watch, blue, orange, bot, real, ghost, clock, keys, line, loop;
+		Stepper leadIn, speed;
+		SignButton launch;
+		TickBar progress;
 
 		List<Run> allRuns = new List<Run>(), rows = new List<Run>();
 		Run selected;
@@ -52,9 +51,8 @@ namespace P2Practice {
 		string partRun;        // the run the player chose a part of...
 		int partChosen = 1;    // ...and the part
 		int shownVersion = -1;
-		int fittedWidth = -1;  // the list width its columns were last shared out for
 		DateTime lastRefresh;
-		bool building, applying, fitting, fitQueued, infoBusy, progressShown;
+		bool building, infoBusy, progressShown;
 		string message = "";
 		bool messageIsError;
 
@@ -75,7 +73,6 @@ namespace P2Practice {
 			else if (App.DryRun) Say("Dry run: Launch starts nothing and writes what it would do to " + App.LogPath);
 
 			poll.Tick += (s, e) => Poll();
-			selectDelay.Tick += (s, e) => { selectDelay.Stop(); SyncSelection(); };
 			DragEnter += (s, e) => e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Link : DragDropEffects.None;
 			DragDrop += (s, e) => AddFolders(DroppedFolders((string[])e.Data.GetData(DataFormats.FileDrop)));
 			library.Start(settings.Folders);
@@ -87,20 +84,19 @@ namespace P2Practice {
 		void BuildUi() {
 			building = true;
 			SuspendLayout();
-			uiFont = NewFont("Segoe UI", 9f);
-			titleFont = NewFont("Segoe UI Semibold", 15f);
-			launchFont = NewFont("Segoe UI Semibold", 11.5f);
-			Font = uiFont;
-			BackColor = SystemColors.Control;
-			tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 500, ReshowDelay = 100 };
+			look = new Look(S);
+			look.Tips = tips = NewTips();
+			Font = look.Body;
+			BackColor = Theme.Field;
+			ForeColor = Theme.Ink;
 
-			var listPanel = BuildLibrary();
-			var rule = new Panel { Dock = DockStyle.Right, Width = Math.Max(1, P(1)), BackColor = RuleColor };
+			var body = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Field, Padding = new Padding(P(12), P(12), P(12), P(2)) };
+			var board = BuildLibrary();
+			var gap = new Panel { Dock = DockStyle.Right, Width = P(12), BackColor = Theme.Field };
 			var side = BuildSide();
-			var bar = BuildStatusBar();
-			menu = BuildMenu();
-			// (docked from the last one added to the first: menu, status line, side, rule; the list gets the rest)
-			Controls.AddRange(new Control[] { listPanel, rule, side, bar, menu });
+			// (docked from the last one added to the first: the sign on the right, the gap, and the list gets the rest)
+			body.Controls.AddRange(new Control[] { board, gap, side });
+			Controls.AddRange(new Control[] { body, BuildStatusBar(), BuildBand() });
 			MainMenuStrip = menu;
 			building = false;
 			ResumeLayout(true);
@@ -111,155 +107,198 @@ namespace P2Practice {
 			ShowStatus();
 		}
 
-		static Color RuleColor {
-			get { var a = SystemColors.Control; var b = SystemColors.ControlDark; return Color.FromArgb((a.R + b.R) / 2, (a.G + b.G) / 2, (a.B + b.B) / 2); }
+		// tooltips in the sign's colours: white on black
+		ToolTip NewTips() {
+			var t = new ToolTip { AutoPopDelay = 15000, InitialDelay = 500, ReshowDelay = 100, OwnerDraw = true };
+			var face = look.Small;
+			int pad = P(7), widest = P(420);
+			t.Popup += (s, e) => {
+				var size = Ui.Wrapped(t.GetToolTip(e.AssociatedControl), face, widest);
+				e.ToolTipSize = new Size((int)Math.Ceiling(size.Width) + pad * 2 + 2, (int)Math.Ceiling(size.Height) + pad * 2);
+			};
+			t.Draw += (s, e) => {
+				Ui.Prepare(e.Graphics);
+				e.Graphics.Clear(Theme.Ink);
+				Ui.Text(e.Graphics, e.ToolTipText, face, Color.White, new RectangleF(pad, pad, e.Bounds.Width - pad * 2, e.Bounds.Height - pad * 2), ContentAlignment.TopLeft, true);
+			};
+			return t;
 		}
 
+		// The dark band: the launcher's mark and name, then the menus.
+		Control BuildBand() {
+			const string name = "P2 PRACTICE";
+			float tracking = S * 2.4f, mark = P(24);
+			float nameAt = P(16) + mark + P(10), nameWidth = Ui.TrackedWidth(name, look.Brand, tracking);
+
+			menu = new MenuStrip { Dock = DockStyle.None, AutoSize = true, BackColor = Theme.Dark, ForeColor = Color.White, Font = look.Strong,
+				Renderer = new SignMenuRenderer(), Padding = Padding.Empty, GripStyle = ToolStripGripStyle.Hidden, CanOverflow = false, Stretch = false };
+			demosMenu = new ToolStripMenuItem("&DEMOS") { Padding = new Padding(P(5), P(3), P(5), P(3)) };
+			gameMenu = new ToolStripMenuItem("&GAME") { Padding = new Padding(P(5), P(3), P(5), P(3)) };
+			// (filled again whenever they open: the folders and the game folder change)
+			demosMenu.DropDownOpening += (s, e) => FillDemosMenu();
+			gameMenu.DropDownOpening += (s, e) => FillGameMenu();
+			menu.Items.Add(demosMenu);
+			menu.Items.Add(gameMenu);
+			FillDemosMenu();
+			FillGameMenu();
+
+			band = new Panel { Dock = DockStyle.Top, Height = P(44), BackColor = Theme.Dark };
+			menu.Location = new Point((int)(nameAt + nameWidth) + P(26), (band.Height - menu.PreferredSize.Height) / 2);
+			band.Controls.Add(menu);
+			band.Paint += (s, e) => {
+				var g = e.Graphics;
+				Ui.Prepare(g);
+				Pict.Draw(g, "iris", new RectangleF(P(16), (band.Height - mark) / 2f, mark, mark), Color.White, Theme.Dark);
+				Ui.Tracked(g, name, look.Brand, Color.White, new RectangleF(nameAt, 0, nameWidth + 8, band.Height), tracking);
+				Ui.Fill(g, Theme.Mix(Theme.Dark, Color.White, 0.28f), new RectangleF(nameAt + nameWidth + P(14), P(14), Math.Max(1, P(1)), band.Height - P(28)));
+				if (App.DryRun) {
+					// a tag, so nobody waits for a game that a dry run never starts
+					const string tag = "DRY RUN";
+					float w = Ui.TrackedWidth(tag, look.Caps, S) + P(16), h = P(20);
+					var box = new RectangleF(band.Width - w - P(16), (band.Height - h) / 2f, w, h);
+					Ui.StrokeRound(g, Color.White, box, P(3), Math.Max(1, P(1)));
+					Ui.Tracked(g, tag, look.Caps, Color.White, box, S, ContentAlignment.MiddleCenter);
+				}
+			};
+			band.Resize += (s, e) => band.Invalidate();
+			return band;
+		}
+
+		// The board on the left: the search box, Add folder, and the list of runs.
 		Control BuildLibrary() {
-			search = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, 0, P(8), 0), Text = searchText };
-			Native.SetPrompt(search, "Search map, player or file");
-			search.TextChanged += (s, e) => { if (building) return; searchText = search.Text; ApplyRows(); };
-			var add = new Button { Text = "Add folder…", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(P(8), 0, P(8), 0),
-				Margin = Padding.Empty, Anchor = AnchorStyles.None, UseVisualStyleBackColor = true };
+			search = new TextField(look, "search", "Search map, player or file");
+			search.Box.Text = searchText;
+			search.Box.TextChanged += (s, e) => { if (building) return; searchText = search.Box.Text; ApplyRows(); };
+			var add = new SignButton(look, "ADD FOLDER") { Icon = "plus" };
+			add.Width += P(12);
 			add.Click += (s, e) => AddFolder();
 			tips.SetToolTip(add, "Add a folder of demos (its subfolders are searched too). You can also drop a folder on the window.");
-			var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 1,
-				Padding = new Padding(P(10), P(10), P(10), P(9)) };
-			top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-			top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-			top.Controls.Add(search, 0, 0);
-			top.Controls.Add(add, 1, 0);
 
-			list = new ListViewEx { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, VirtualMode = true, ShowItemToolTips = true };
-			list.Columns.Add("Map", P(MapColumn));
-			list.Columns.Add("Time", P(TimeColumn), HorizontalAlignment.Right);
-			list.Columns.Add("Players", P(PlayersColumn));
-			list.Columns.Add("Mode", P(ModeColumn));
-			list.Columns.Add("File", P(FileColumn));
-			fittedWidth = -1;
-			list.RetrieveVirtualItem += (s, e) => e.Item = ItemFor(e.ItemIndex);
-			list.SelectedIndexChanged += (s, e) => { if (!building && !applying) { selectDelay.Stop(); selectDelay.Start(); } };
-			list.ColumnClick += (s, e) => {
-				if (settings.SortColumn == e.Column) settings.SortDescending ^= 1;
-				else { settings.SortColumn = e.Column; settings.SortDescending = 0; }
-				ApplyRows();
+			var top = new Panel { Dock = DockStyle.Top, Height = P(54), BackColor = Theme.Panel };
+			top.Controls.Add(search);
+			top.Controls.Add(add);
+			EventHandler place = (s, e) => {
+				add.Location = new Point(top.Width - add.Width - P(13), P(13));
+				search.SetBounds(P(13), P(13), Math.Max(P(60), add.Left - P(10) - P(13)), P(28));
 			};
-			list.ItemActivate += (s, e) => { SyncSelection(); Launch(); }; // double-click or Enter
-			list.Resize += (s, e) => FitColumnsSoon();
-			// (a list that isn't a window yet takes no selection and no sort arrow: they are given when it becomes one)
-			list.Realized += (s, e) => { SelectInList(selected != null ? rows.FindIndex(r => r.Key == selected.Key) : -1, true); list.ShowSortArrow(settings.SortColumn, settings.SortDescending != 0); };
+			top.Resize += place;
 
-			var panel = new Panel { Dock = DockStyle.Fill };
-			panel.Controls.Add(list);
-			panel.Controls.Add(top);
-			return panel;
+			list = new DemoList(look) { Dock = DockStyle.Fill, SortColumn = settings.SortColumn, SortDescending = settings.SortDescending != 0 };
+			list.Source = i => i >= 0 && i < rows.Count ? rows[i] : null;
+			list.RowTip = i => {
+				var r = i >= 0 && i < rows.Count ? rows[i] : null;
+				return r == null ? null : r.Demo.Path + (r.Partner != null ? "\n" + r.Partner.Path : "") + (r.Ok ? "" : "\n" + r.Demo.Scan.Error);
+			};
+			list.SelectionChanged += (s, e) => SyncSelection();
+			list.Activated += (s, e) => Launch(); // double-click or Enter
+			list.HeaderClicked += column => {
+				if (settings.SortColumn == column) settings.SortDescending ^= 1;
+				else { settings.SortColumn = column; settings.SortDescending = 0; }
+				ApplyRows(true);
+			};
+
+			var card = new Card { Dock = DockStyle.Fill, Padding = new Padding(1) };
+			card.Controls.Add(list);
+			card.Controls.Add(top);
+			return card;
 		}
 
+		// The sign on the right: the run, its parts, the options, Launch.
 		Control BuildSide() {
-			title = TextLine(titleFont, SystemColors.ControlText, 0);
-			subtitle = TextLine(uiFont, SystemColors.GrayText, P(1));
-			playersLine = TextLine(uiFont, SystemColors.ControlText, P(3));
-			var partsCaption = new Label { Text = "Start from", AutoSize = true, Margin = new Padding(0, P(14), 0, P(4)) };
+			sign = new RunHeader(look) { Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = Padding.Empty };
+			var partsCaption = new Caption(look, "START FROM") { Margin = Padding.Empty, Height = P(20) };
 
-			parts = new ListViewEx { Dock = DockStyle.Fill, HeaderStyle = ColumnHeaderStyle.Nonclickable, Margin = Padding.Empty };
-			parts.Columns.Add("#", P(32));
-			parts.Columns.Add("Time", P(100));
-			parts.Columns.Add("Part", P(200));
-			parts.Resize += (s, e) => FitColumnsSoon();
-			parts.SelectedIndexChanged += (s, e) => {
-				if (building || applying || selected == null || parts.SelectedItems.Count == 0) return;
+			parts = new PartsList(look) { Dock = DockStyle.Fill, Margin = Padding.Empty };
+			parts.RowTip = i => parts.Describe(i);
+			parts.SelectionChanged += (s, e) => {
+				if (selected == null) return;
 				partRun = selected.Key;
-				partChosen = (int)parts.SelectedItems[0].Tag;
+				partChosen = parts.Part(parts.Selected);
+				sign.Start = parts.Selected;
+				sign.Invalidate();
 			};
-			parts.ItemActivate += (s, e) => Launch();
+			parts.Activated += (s, e) => Launch();
 
-			notes = new Label { AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right, ForeColor = SystemColors.GrayText, UseMnemonic = false,
-				Margin = new Padding(0, P(5), 0, 0), MaximumSize = new Size(0, uiFont.Height * 2 + P(2)), AutoEllipsis = true, Visible = false };
+			notes = new Words(look, "", look.Small, Theme.Grey) { Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, P(5), 0, 0), Visible = false,
+				Wrap = true, Align = ContentAlignment.TopLeft, Height = look.Small.Height * 2 + P(2) }; // (room for two lines; the rest is in the tooltip)
 
-			// the options: a caption column and the controls
-			var opt = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, ColumnCount = 2,
-				Margin = new Padding(0, P(12), 0, 0) };
-			opt.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+			// the options: captions in a column, pictogram choices beside them
+			var opt = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty, BackColor = Theme.Panel };
+			opt.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, P(116)));
 			opt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-			practise = Radio("Practise", "Play it yourself: the record runs up to the part you chose, then you take over.");
-			watch = Radio("Watch the run", "Ride along with the recorded run from the part you chose.");
-			AddOption(opt, Caption("Mode"), Across(practise, watch));
+			practice = Choice("Practice", "play", true, "Play it yourself: the record runs up to the part you chose, then you take over.");
+			watch = Choice("Watch the run", "eye", true, "Ride along with the recorded run from the part you chose.");
+			AddOption(opt, new Caption(look, "MODE"), Across(practice, watch));
 
-			blue = Radio("Blue (ATLAS)", null);
-			orange = Radio("Orange (P-body)", null);
-			AddOption(opt, roleCaption = Caption("Play as"), Across(blue, orange));
+			blue = Choice("Blue (ATLAS)", "atlas", true, null);
+			blue.Lit = Theme.Blue;
+			orange = Choice("Orange (P-body)", "pbody", true, null);
+			orange.Lit = Theme.Orange;
+			AddOption(opt, roleCaption = new Caption(look, "PLAY AS"), Across(blue, orange));
 
-			bot = Radio("Bot plays the other robot (split screen, alone)", "Starts the map in split screen; the other robot is played from the record.");
-			real = Radio("A real partner (I host the map myself)", "Starts the game with the run loaded and armed. Host the map with your partner as usual and it begins there.");
-			var partner = Down(bot, real);
-			AddOption(opt, partnerCaption = CaptionBeside("Partner", bot, partner), partner);
+			bot = Choice("Bot plays the other robot (split screen, alone)", "bot", true, "Starts the map in split screen; the other robot is played from the record.");
+			real = Choice("A real partner (I host the map myself)", "people", true, "Starts the game with the run loaded and armed. Host the map with your partner as usual and it begins there.");
+			AddOption(opt, partnerCaption = new Caption(look, "PARTNER"), Down(bot, real));
 
-			ghost = Check("Ghost", "The recorded players, shown in the level.");
-			clock = Check("On-screen clock", "The run's clock and how far ahead or behind you are.");
-			keys = Check("Record's keys", "The keys the record holds at each moment.");
-			line = Check("Route line", "The record's route and portal shots, drawn in the level.");
+			ghost = Choice("Ghost", "ghost", false, "The recorded players, shown in the level.");
+			clock = Choice("On-screen clock", "clock", false, "The run's clock and how far ahead or behind you are.");
+			keys = Choice("Record's keys", "keys", false, "The keys the record holds at each moment.");
+			line = Choice("Route line", "line", false, "The record's route and portal shots, drawn in the level.");
 			var show = Across(ghost, clock);
 			show.RowCount = 2;
 			show.Controls.Add(keys, 0, 1);
 			show.Controls.Add(line, 1, 1);
-			AddOption(opt, CaptionBeside("Show", ghost, show), show);
+			AddOption(opt, new Caption(look, "SHOW"), show);
 
-			leadIn = Number(Options.MinLeadIn, Options.MaxLeadIn, 0.5, 1, "Seconds of the record that play before you take over.");
-			AddOption(opt, Caption("Lead-in"), Across(leadIn, Dim("seconds")));
-			speed = Number(Options.MinSpeed, Options.MaxSpeed, 0.05, 2, "How fast the game runs while you practise. 1 is normal speed, 0.5 is half speed.");
-			AddOption(opt, Caption("Game speed"), Across(speed, Dim("(1 = normal)")));
-			loop = Check("Start again automatically after the finish", null);
-			AddOption(opt, Caption(""), Across(loop));
+			leadIn = new Stepper(look, Options.MinLeadIn, Options.MaxLeadIn, 0.5, 1) { Margin = Padding.Empty };
+			leadIn.Tip(tips, "Lead-in: seconds of the record that play before you take over.");
+			speed = new Stepper(look, Options.MinSpeed, Options.MaxSpeed, 0.05, 2) { Margin = Padding.Empty };
+			speed.Tip(tips, "Game speed while you practice: 1 is normal, 0.5 is half speed.");
+			AddOption(opt, new Caption(look, "LEAD-IN"), Across(leadIn, Aside("s"), new Caption(look, "SPEED") { Margin = new Padding(P(22), 0, P(10), 0) }, speed, Aside("×")));
+			loop = Choice("Start again automatically after the finish", "loop", false, null);
+			AddOption(opt, new Caption(look, "AFTER"), Across(loop));
+			foreach (Control c in opt.Controls) if (c is Caption) c.Height = P(26);
 
-			extra = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, P(4), 0, 0) };
-			Native.SetPrompt(extra, "Added to the game's command line");
-			tips.SetToolTip(extra, "Your own launch options, added after the launcher's, for example  -vulkan +exec mycfg");
-			var extraCaption = Caption("Launch options");
-			extraCaption.Margin = new Padding(0, P(4), P(14), 0);
+			extra = new TextField(look, null, "Added to the game's command line") { Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, P(2), 0, 0), Height = P(26) };
+			tips.SetToolTip(extra.Box, "Your own launch options, added after the launcher's, for example  -vulkan +exec mycfg");
+			var extraCaption = new Caption(look, "LAUNCH OPTIONS");
+			extraCaption.Margin = new Padding(0, P(2), 0, 0);
 			AddOption(opt, extraCaption, extra);
 
-			var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Margin = Padding.Empty };
+			var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Margin = Padding.Empty, BackColor = Theme.Panel };
 			grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-			foreach (var c in new Control[] { title, subtitle, playersLine, partsCaption, parts, notes, opt }) {
+			foreach (var c in new Control[] { sign, Rule(P(7), P(4)), partsCaption, parts, notes, Rule(P(7), P(6)), opt }) {
 				grid.RowStyles.Add(c == parts ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.AutoSize));
 				grid.Controls.Add(c, 0, grid.RowStyles.Count - 1);
 			}
 
-			launch = new Button { Text = "Launch", Dock = DockStyle.Fill, Font = launchFont, UseVisualStyleBackColor = true };
-			if (!SystemInformation.HighContrast) { // the one button that matters, in the accent colour
-				launch.FlatStyle = FlatStyle.Flat;
-				launch.FlatAppearance.BorderSize = 0;
-				launch.FlatAppearance.MouseOverBackColor = Color.FromArgb(26, 118, 201);
-				launch.FlatAppearance.MouseDownBackColor = Color.FromArgb(0, 84, 160);
-				launch.ForeColor = Color.White;
-				launch.EnabledChanged += (s, e) => launch.BackColor = launch.Enabled ? Accent : Color.FromArgb(196, 199, 204);
-				launch.BackColor = Accent;
-			}
+			launch = new SignButton(look, "LAUNCH") { Primary = true, Dock = DockStyle.Fill };
 			launch.Click += (s, e) => Launch();
-			var launchRow = new Panel { Dock = DockStyle.Bottom, Height = P(58), Padding = new Padding(0, P(14), 0, 0) };
+			var launchRow = new Panel { Dock = DockStyle.Bottom, Height = P(60), Padding = new Padding(0, P(12), 0, 0), BackColor = Theme.Panel };
 			launchRow.Controls.Add(launch);
 
-			// when the window is too low for everything (a small screen at a high scale) the part above Launch scrolls
-			var scroller = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-			scroller.Controls.Add(grid);
-			grid.Layout += (s, e) => {
-				int needed = grid.Height - parts.Height + P(84); // everything but the parts list, and a few of its rows
-				if (scroller.AutoScrollMinSize.Height != needed) scroller.AutoScrollMinSize = new Size(0, needed);
-			};
+			// when the window is too low for everything (a laptop screen at a high scale) the part above Launch
+			// keeps its least height and scrolls
+			grid.Dock = DockStyle.None;
+			var scroller = new ScrollBox(look, grid) { Dock = DockStyle.Fill };
+			// its least height: everything but the parts list, and two of that list's rows. (Worked out whenever the
+			// layout has just given the parts list a new height: what is left of the grid is the rest.)
+			parts.SizeChanged += (s, e) => scroller.Least = grid.Height - parts.Height + P(70);
+			scroller.FollowFocus();
 
-			var panel = new Panel { Dock = DockStyle.Right, Width = P(SideWidth), Padding = new Padding(P(14), P(10), P(14), P(14)) };
-			panel.Controls.Add(scroller);
-			panel.Controls.Add(launchRow);
-			return panel;
+			var card = new Card { Dock = DockStyle.Right, Width = P(SideWidth), Padding = new Padding(P(20), P(14), P(20), P(18)) };
+			card.Controls.Add(scroller);
+			card.Controls.Add(launchRow);
+			return card;
 		}
 
 		Control BuildStatusBar() {
-			status = new Label { AutoSize = false, Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, UseMnemonic = false, Margin = Padding.Empty };
-			progress = new ProgressBar { Width = P(130), Height = P(12), Anchor = AnchorStyles.None, Margin = new Padding(P(12), 0, 0, 0), Visible = false };
+			status = new Words(look, "", look.Body, Theme.Ink) { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Field, Lamp = true };
+			progress = new TickBar(look) { Anchor = AnchorStyles.None, Margin = new Padding(P(12), 0, 0, 0), Visible = false, BackColor = Theme.Field };
 			progressShown = false;
-			libraryLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Right, ForeColor = SystemColors.GrayText, UseMnemonic = false, Margin = new Padding(P(12), 0, 0, 0) };
-			var bar = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = P(28), ColumnCount = 3, RowCount = 1, Padding = new Padding(P(10), P(1), P(10), 0) };
+			libraryLabel = new Words(look, "", look.Body, Theme.Grey) { Anchor = AnchorStyles.Right, Margin = new Padding(P(14), 0, 0, 0), BackColor = Theme.Field, Align = ContentAlignment.MiddleRight };
+			var bar = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = P(30), ColumnCount = 3, RowCount = 1, Padding = new Padding(P(14), 0, P(14), P(2)), BackColor = Theme.Field };
 			bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 			bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 			bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -267,22 +306,7 @@ namespace P2Practice {
 			bar.Controls.Add(status, 0, 0);
 			bar.Controls.Add(progress, 1, 0);
 			bar.Controls.Add(libraryLabel, 2, 0);
-			bar.Paint += (s, e) => { using (var pen = new Pen(RuleColor)) e.Graphics.DrawLine(pen, 0, 0, bar.Width, 0); };
 			return bar;
-		}
-
-		MenuStrip BuildMenu() {
-			var m = new MenuStrip { Font = uiFont, Dock = DockStyle.Top, Padding = new Padding(P(4), P(2), 0, P(2)), ShowItemToolTips = false };
-			demosMenu = new ToolStripMenuItem("&Demos");
-			gameMenu = new ToolStripMenuItem("&Game");
-			// (filled again whenever they open: the folders and the game folder change)
-			demosMenu.DropDownOpening += (s, e) => FillDemosMenu();
-			gameMenu.DropDownOpening += (s, e) => FillGameMenu();
-			m.Items.Add(demosMenu);
-			m.Items.Add(gameMenu);
-			FillDemosMenu();
-			FillGameMenu();
-			return m;
 		}
 
 		void FillDemosMenu() {
@@ -298,10 +322,12 @@ namespace P2Practice {
 				var item = new ToolStripMenuItem(folder.Replace("&", "&&") + (there ? "" : "   (not there)"));
 				item.DropDownItems.Add(new ToolStripMenuItem("Remove from the list", null, (s, e) => RemoveFolder(folder)));
 				item.DropDownItems.Add(new ToolStripMenuItem("Show in Explorer", null, (s, e) => ShowInExplorer(folder)) { Enabled = there });
+				Dress(item);
 				items.Add(item);
 			}
 			items.Add(new ToolStripSeparator());
 			items.Add(new ToolStripMenuItem("E&xit", null, (s, e) => Close()));
+			Dress(demosMenu);
 		}
 
 		void FillGameMenu() {
@@ -313,61 +339,46 @@ namespace P2Practice {
 			items.Add(new ToolStripMenuItem("&Find it through Steam", null, (s, e) => FindGame()));
 			items.Add(new ToolStripSeparator());
 			items.Add(new ToolStripMenuItem("&Remove plugin from game", null, (s, e) => RemovePlugin()) { Enabled = found });
+			Dress(gameMenu);
+		}
+
+		// a drop-down in the window's face, without the empty strip menus keep for pictures
+		void Dress(ToolStripMenuItem owner) {
+			var drop = owner.DropDown as ToolStripDropDownMenu;
+			if (drop == null) return;
+			drop.Font = look.Body;
+			drop.ShowImageMargin = false;
+			drop.BackColor = Theme.Panel;
 		}
 
 		// ---- small builders ----
 
-		// one line of text that ends in "…" when the panel is too narrow for it
-		Label TextLine(Font font, Color color, int above) {
-			return new Label { AutoSize = false, Anchor = AnchorStyles.Left | AnchorStyles.Right, Height = font.Height + P(1), Font = font, ForeColor = color,
-				AutoEllipsis = true, UseMnemonic = false, Margin = new Padding(0, above, 0, 0) };
-		}
-
-		Label Caption(string text) {
-			return new Label { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, P(14), 0) };
-		}
-
-		// the caption of a group that is two lines high: level with the first line, not the middle
-		Label CaptionBeside(string text, Control firstLine, Control group) {
-			var c = Caption(text);
-			c.Anchor = AnchorStyles.Left | AnchorStyles.Top;
-			c.Margin = new Padding(0, group.Margin.Top + firstLine.Margin.Top + Math.Max(0, (firstLine.PreferredSize.Height - c.PreferredSize.Height) / 2), P(14), 0);
-			return c;
+		// a pictogram choice: one of a group (radio) or on its own (a switch)
+		Option Choice(string text, string icon, bool radio, string tip) {
+			var o = new Option(look, text, icon, radio) { Margin = new Padding(0, 0, P(8), 0) };
+			o.CheckedChanged += (s, e) => { if (!building) EnableOptions(); };
+			if (tip != null) tips.SetToolTip(o, tip);
+			return o;
 		}
 
 		// a few grey words after a control
-		Label Dim(string text) {
-			return new Label { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(P(6), 0, 0, 0), ForeColor = SystemColors.GrayText };
+		Words Aside(string text) {
+			return new Words(look, text, look.Body, Theme.Grey) { Anchor = AnchorStyles.Left, Margin = new Padding(P(8), 0, 0, 0) };
 		}
 
-		RadioButton Radio(string text, string tip) {
-			var r = new RadioButton { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, P(1), P(18), P(1)), UseMnemonic = false };
-			r.CheckedChanged += (s, e) => OptionChanged();
-			if (tip != null) tips.SetToolTip(r, tip);
-			return r;
-		}
-
-		CheckBox Check(string text, string tip) {
-			var c = new CheckBox { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, P(1), P(18), P(1)), UseMnemonic = false };
-			c.CheckedChanged += (s, e) => OptionChanged();
-			if (tip != null) tips.SetToolTip(c, tip);
-			return c;
-		}
-
-		NumericUpDown Number(double min, double max, double step, int decimals, string tip) {
-			var n = new NumericUpDown { Minimum = (decimal)min, Maximum = (decimal)max, Increment = (decimal)step, DecimalPlaces = decimals, Width = P(62),
-				Anchor = AnchorStyles.Left, Margin = new Padding(0, P(2), 0, P(2)), TextAlign = HorizontalAlignment.Right };
-			tips.SetToolTip(n, tip);
-			return n;
+		// a thin black rule across the sign
+		Control Rule(int above, int below) {
+			return new Panel { Height = Math.Max(1, P(1)), BackColor = Theme.Ink, Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, above, 0, below) };
 		}
 
 		// controls side by side (each in its own column, so they line up by their middles); also what makes a
-		// set of radio buttons one group
+		// set of radio choices one group
 		TableLayoutPanel Across(params Control[] controls) {
 			var p = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Anchor = AnchorStyles.Left, Margin = new Padding(0, P(2), 0, P(2)),
-				ColumnCount = controls.Length, RowCount = 1 };
+				ColumnCount = controls.Length, RowCount = 1, BackColor = Theme.Panel };
 			for (int i = 0; i < controls.Length; i++) {
 				p.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+				controls[i].Anchor = AnchorStyles.Left;
 				p.Controls.Add(controls[i], i, 0);
 			}
 			return p;
@@ -375,14 +386,17 @@ namespace P2Practice {
 
 		TableLayoutPanel Down(params Control[] controls) {
 			var p = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Anchor = AnchorStyles.Left, Margin = new Padding(0, P(2), 0, P(2)),
-				ColumnCount = 1, RowCount = controls.Length };
+				ColumnCount = 1, RowCount = controls.Length, BackColor = Theme.Panel };
 			for (int i = 0; i < controls.Length; i++) p.Controls.Add(controls[i], 0, i);
 			return p;
 		}
 
-		static void AddOption(TableLayoutPanel grid, Control caption, Control control) {
+		// a row of the options: the caption level with the first line of what it names
+		void AddOption(TableLayoutPanel grid, Control caption, Control control) {
 			grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 			int row = grid.RowStyles.Count - 1;
+			caption.Anchor = AnchorStyles.Left | AnchorStyles.Top;
+			if (caption.Margin == Padding.Empty || caption.Margin == new Padding(3)) caption.Margin = new Padding(0, control.Margin.Top, 0, 0);
 			grid.Controls.Add(caption, 0, row);
 			grid.Controls.Add(control, 1, row);
 		}
@@ -395,7 +409,7 @@ namespace P2Practice {
 			// where it was left; the first time, on the monitor the mouse is on
 			var screen = remembered ? Screen.FromRectangle(new Rectangle(settings.Left, settings.Top, size.Width, size.Height)) : Screen.FromPoint(Cursor.Position);
 			if (App.Headless) { // a screenshot: the size asked for, as on the main monitor
-				if (!App.Size.IsEmpty) size = new Size(P(App.Size.Width), P(App.Size.Height));
+				size = new Size(P(App.Size.IsEmpty ? DefaultWidth : App.Size.Width), P(App.Size.IsEmpty ? DefaultHeight : App.Size.Height));
 				screen = Screen.PrimaryScreen;
 			}
 			var area = screen.WorkingArea;
@@ -436,7 +450,7 @@ namespace P2Practice {
 			if (Math.Abs(scale - S) < 0.01f) { if (WindowState == FormWindowState.Normal) Bounds = bounds; return; }
 			ReadOptions();
 			var oldControls = Controls.Cast<Control>().ToList();
-			var oldFonts = new[] { uiFont, titleFont, launchFont };
+			var oldLook = look;
 			var oldTips = tips;
 			S = scale;
 			SuspendLayout();
@@ -447,53 +461,9 @@ namespace P2Practice {
 			if (WindowState == FormWindowState.Normal) Bounds = bounds;
 			ResumeLayout(true);
 			foreach (var c in oldControls) c.Dispose();
-			foreach (var f in oldFonts) f.Dispose();
 			oldTips.Dispose();
-			if (selected != null) SelectInList(rows.FindIndex(r => r.Key == selected.Key), true); // (in view again, now that the list has its size)
-		}
-
-		// The list's columns share its width: Map and Players give way when the window is narrow and grow a little
-		// when it is wide; File takes what is left.
-		void FitColumns() {
-			if (list == null || parts == null || building || fitting) return;
-			fitting = true; // (a column's new width can change the room inside the list, which comes back here)
-			try {
-				int width = list.ClientSize.Width;
-				var widths = new int[list.Columns.Count];
-				for (int i = 0; i < widths.Length; i++) widths[i] = list.Columns[i].Width;
-				if (width != fittedWidth) { // (only when the width changes: in between, the columns are the player's to drag)
-					fittedWidth = width;
-					double f = Math.Max(0.5, Math.Min(1.2, (width - P(TimeColumn + ModeColumn)) / (double)P(MapColumn + PlayersColumn + FileColumn)));
-					widths[0] = (int)(P(MapColumn) * f);
-					widths[1] = P(TimeColumn);
-					widths[2] = (int)(P(PlayersColumn) * f);
-					widths[3] = P(ModeColumn);
-				}
-				SetWidths(list, widths, P(90));
-				SetWidths(parts, new[] { parts.Columns[0].Width, parts.Columns[1].Width, 0 }, P(80));
-			} finally { fitting = false; }
-		}
-
-		// After a list changed size. Not at once: the size also changes while the list is working out its scroll
-		// bars (one appears, the room inside shrinks), and new column widths in the middle of that leave it with
-		// a scroll bar for the old ones.
-		void FitColumnsSoon() {
-			if (fitQueued || !IsHandleCreated) return; // (before the window exists, the first Poll does it)
-			fitQueued = true;
-			BeginInvoke((Action)(() => { fitQueued = false; FitColumns(); }));
-		}
-
-		// gives the columns these widths; the last one takes what the others leave
-		static void SetWidths(ListView view, int[] widths, int least) {
-			int last = widths.Length - 1, others = 0;
-			for (int i = 0; i < last; i++) others += widths[i];
-			widths[last] = Math.Max(least, view.ClientSize.Width - others);
-			bool same = true;
-			for (int i = 0; i <= last; i++) same &= view.Columns[i].Width == widths[i];
-			if (same) return;
-			view.BeginUpdate(); // (the list works its scroll bars out once, for the final widths)
-			for (int i = 0; i <= last; i++) view.Columns[i].Width = widths[i];
-			view.EndUpdate();
+			oldLook.Dispose();
+			if (selected != null) list.SelectRow(rows.FindIndex(r => r.Key == selected.Key), true); // (in view again, now that the list has its size)
 		}
 
 		protected override void OnFormClosing(FormClosingEventArgs e) {
@@ -514,7 +484,7 @@ namespace P2Practice {
 			switch (keyData) {
 				case Keys.F5: Rescan(); return true;
 				case Keys.Control | Keys.O: AddFolder(); return true;
-				case Keys.Control | Keys.F: search.Focus(); search.SelectAll(); return true;
+				case Keys.Control | Keys.F: search.TakeFocus(); return true;
 			}
 			return base.ProcessCmdKey(ref msg, keyData);
 		}
@@ -539,7 +509,6 @@ namespace P2Practice {
 			string problem = library.TakeProblem();
 			if (problem != null) Say(problem, true);
 			ShowProgress();
-			FitColumns();
 		}
 
 		// Filters and sorts the runs into the list, keeping the selection on the same run.
@@ -555,13 +524,11 @@ namespace P2Practice {
 				// (a co-op demo listed alone becomes a pair when its partner's demo has been read)
 				if (index < 0) index = shown.FindIndex(r => r.Demo.Path == path || (r.Partner != null && r.Partner.Path == path));
 			}
-			applying = true;
 			rows = shown;
-			list.VirtualListSize = rows.Count;
-			applying = false;
-			SelectInList(index, reveal);
-			list.Invalidate();
-			list.ShowSortArrow(settings.SortColumn, settings.SortDescending != 0);
+			list.Count = rows.Count;
+			list.SortColumn = settings.SortColumn;
+			list.SortDescending = settings.SortDescending != 0;
+			list.SelectRow(index, reveal);
 
 			var now = index >= 0 ? rows[index] : null;
 			if (now == null || selected == null || now.Key != selected.Key) ShowRun(now);
@@ -582,33 +549,12 @@ namespace P2Practice {
 			foreach (var r in allRuns) { demos += r.Partner != null ? 2 : 1; if (!r.Ok) unread++; }
 			libraryLabel.Text = allRuns.Count == 0 ? "" : (allRuns.Count - unread) + (allRuns.Count - unread == 1 ? " run" : " runs") + " from " + demos + (demos == 1 ? " demo" : " demos")
 				+ (unread > 0 ? ", " + unread + " can't be read" : "");
-			FitColumns();
-		}
-
-		// puts the list's selection on a row (-1: none) without that counting as the player choosing it
-		void SelectInList(int index, bool reveal) {
-			if (!list.IsHandleCreated) return;
-			applying = true;
-			list.SelectedIndices.Clear();
-			if (index >= 0 && index < rows.Count) {
-				list.SelectedIndices.Add(index);
-				if (reveal) list.EnsureVisible(index);
-			}
-			applying = false;
-		}
-
-		ListViewItem ItemFor(int index) {
-			if (index < 0 || index >= rows.Count) return new ListViewItem(new[] { "", "", "", "", "" });
-			var r = rows[index];
-			var item = new ListViewItem(new[] { r.MapName, r.TimeText, r.Players, r.Mode, r.Files });
-			if (!r.Ok) item.ForeColor = SystemColors.GrayText;
-			item.ToolTipText = r.Demo.Path + (r.Partner != null ? "\n" + r.Partner.Path : "") + (r.Ok ? "" : "\n" + r.Demo.Scan.Error);
-			return item;
+			libraryLabel.Fit();
 		}
 
 		void SyncSelection() {
-			if (building || applying) return;
-			int i = list.SelectedIndices.Count > 0 ? list.SelectedIndices[0] : -1;
+			if (building) return;
+			int i = list.Selected;
 			var r = i >= 0 && i < rows.Count ? rows[i] : null;
 			if (r == null ? selected != null : selected == null || r.Key != selected.Key) ShowRun(r);
 		}
@@ -618,8 +564,7 @@ namespace P2Practice {
 			library.Progress(out done, out total);
 			bool show = library.Busy && total > 0;
 			if (show) {
-				progress.Maximum = total;
-				progress.Value = Math.Min(done, total);
+				progress.Set(done, total);
 				if (message.Length == 0) status.Text = "Reading demos: " + done + " of " + total;
 			}
 			if (show != progressShown) {
@@ -633,29 +578,39 @@ namespace P2Practice {
 
 		void ShowRun(Run r) {
 			selected = r;
-			applying = true;
-			parts.Items.Clear();
-			applying = false;
+			parts.SetParts(null, -1);
 			parts.Hint = "";
 			notes.Visible = false;
+			sign.Parts = new List<RoutePart>();
+			sign.Start = -1;
+			sign.Players.Clear();
+			sign.Problem = null;
+			sign.Empty = r == null || !r.Ok;
+			sign.Time = "";
 			if (r == null) {
-				title.Text = "No run selected";
-				subtitle.Text = rows.Count > 0 ? "Choose a run in the list." : "";
-				playersLine.Text = "";
+				sign.Title = "NO RUN SELECTED";
+				sign.Sub = rows.Count > 0 ? "CHOOSE A RUN IN THE LIST" : "";
 			} else if (!r.Ok) {
-				title.Text = r.Demo.Name + ".dem";
-				subtitle.Text = "This demo can't be read";
-				playersLine.Text = r.Demo.Scan.Error ?? "";
+				sign.Title = r.Demo.Name + ".dem";
+				sign.Sub = "THIS DEMO CAN'T BE READ";
+				sign.Problem = r.Demo.Scan.Error ?? "";
 			} else {
 				var s = r.Demo.Scan;
-				title.Text = r.MapName;
-				subtitle.Text = s.Map + "   ·   " + (s.Coop ? "Co-op" : "Single player") + "   ·   " + (r.TimeText.Length > 0 ? r.TimeText : "no time") + (s.HasTime || s.Time <= 0 ? "" : " (demo length; no run time)");
-				if (!s.Coop) playersLine.Text = s.Player;
-				else if (r.Partner != null) playersLine.Text = "Blue: " + s.Player + "      Orange: " + r.Partner.Scan.Player;
-				else playersLine.Text = (s.Host ? "Blue: " : "Orange: ") + s.Player + "      (the partner's demo isn't in the folders)";
+				sign.Time = r.TimeText;
+				sign.Title = r.MapName.ToUpper();
+				sign.Sub = s.Map.ToUpper() + "   ·   " + (s.Coop ? "CO-OP" : "SINGLE PLAYER") + (s.HasTime ? "" : s.Time > 0 ? "   ·   DEMO LENGTH" : "   ·   NO TIME");
+				if (!s.Coop) sign.Players.Add(new RunHeader.Player { Name = s.Player });
+				else if (r.Partner != null) {
+					sign.Players.Add(new RunHeader.Player { Chip = Theme.Blue, Name = s.Player });
+					sign.Players.Add(new RunHeader.Player { Chip = Theme.Orange, Name = r.Partner.Scan.Player });
+				} else {
+					sign.Players.Add(new RunHeader.Player { Chip = s.Host ? Theme.Blue : Theme.Orange, Name = s.Player });
+					sign.Players.Add(new RunHeader.Player { Name = "the partner's demo isn't in the folders", Aside = true });
+				}
 				WantInfo(r);
 			}
-			tips.SetToolTip(title, r != null ? r.Demo.Path + (r.Partner != null ? "\n" + r.Partner.Path : "") : null);
+			sign.Invalidate();
+			tips.SetToolTip(sign, r != null ? r.Demo.Path + (r.Partner != null ? "\n" + r.Partner.Path : "") : null);
 			EnableOptions();
 		}
 
@@ -684,47 +639,36 @@ namespace P2Practice {
 		}
 
 		void ShowInfo(Run r, RouteInfo info) {
-			applying = true;
-			parts.BeginUpdate();
-			parts.Items.Clear();
-			if (!info.Ok) parts.Hint = "The run's parts couldn't be read (" + info.Error + ").\nIt can still be started from the beginning.";
-			else if (info.Parts.Count == 0) parts.Hint = "This run isn't split into parts: it starts from the beginning.";
+			if (!info.Ok) { parts.SetParts(null, -1); parts.Hint = "The run's parts couldn't be read (" + info.Error + ").\nIt can still be started from the beginning."; }
+			else if (info.Parts.Count == 0) { parts.SetParts(null, -1); parts.Hint = "This run isn't split into parts: it starts from the beginning."; }
 			else {
 				parts.Hint = "";
-				int want = partRun == r.Key ? partChosen : info.Parts[0].Index;
-				foreach (var p in info.Parts) {
-					var item = new ListViewItem(new[] { p.Index.ToString(), RouteCli.FormatTime(p.Start) + " – " + RouteCli.FormatTime(p.End), p.Name }) { Tag = p.Index };
-					parts.Items.Add(item);
-					if (p.Index == want) item.Selected = true;
-				}
-				if (parts.SelectedItems.Count == 0) parts.Items[0].Selected = true;
-				if (parts.IsHandleCreated) parts.EnsureVisible(parts.SelectedIndices[0]);
+				int row = partRun == r.Key ? info.Parts.FindIndex(p => p.Index == partChosen) : 0;
+				parts.SetParts(info.Parts, Math.Max(0, row));
 			}
-			parts.EndUpdate();
-			applying = false;
+			sign.Parts = info.Ok ? info.Parts : new List<RoutePart>();
+			sign.Start = parts.Selected;
 
 			if (info.Ok && info.Players.Count > 0) {
-				var names = new List<string>();
-				foreach (var p in info.Players) {
-					string team = p.Team == "blue" ? "Blue: " : p.Team == "orange" ? "Orange: " : "";
-					names.Add(team + p.Name + (p.HasInputs ? "" : " (not recorded)"));
-				}
-				playersLine.Text = string.Join("      ", names);
+				sign.Players.Clear();
+				foreach (var p in info.Players)
+					sign.Players.Add(new RunHeader.Player { Chip = p.Team == "blue" ? Theme.Blue : p.Team == "orange" ? Theme.Orange : Color.Empty,
+						Name = p.Name + (p.HasInputs ? "" : " (not recorded)") });
 			}
+			sign.Invalidate();
 			notes.Text = info.Ok ? string.Join("  ", info.Notes) : "";
 			notes.Visible = notes.Text.Length > 0;
 			tips.SetToolTip(notes, info.Ok && info.Notes.Count > 0 ? string.Join("\n", info.Notes) : null);
-			FitColumns();
 		}
 
-		int SelectedPart { get { return parts.SelectedItems.Count > 0 ? (int)parts.SelectedItems[0].Tag : 1; } }
+		int SelectedPart { get { return parts.Part(parts.Selected); } }
 
 		// ---- options ----
 
 		void ShowOptions() {
 			var o = settings.Options;
 			building = true;
-			(o.Watch ? watch : practise).Checked = true;
+			(o.Watch ? watch : practice).Checked = true;
 			(o.Orange ? orange : blue).Checked = true;
 			(o.RealPartner ? real : bot).Checked = true;
 			ghost.Checked = o.Ghost;
@@ -732,9 +676,9 @@ namespace P2Practice {
 			keys.Checked = o.Keys;
 			line.Checked = o.Line;
 			loop.Checked = o.Loop;
-			leadIn.Value = (decimal)Math.Max(Options.MinLeadIn, Math.Min(Options.MaxLeadIn, o.LeadIn));
-			speed.Value = (decimal)Math.Max(Options.MinSpeed, Math.Min(Options.MaxSpeed, o.Speed));
-			extra.Text = o.Extra;
+			leadIn.Value = o.LeadIn;
+			speed.Value = o.Speed;
+			extra.Box.Text = o.Extra;
 			building = false;
 			EnableOptions();
 		}
@@ -749,22 +693,27 @@ namespace P2Practice {
 			o.Keys = keys.Checked;
 			o.Line = line.Checked;
 			o.Loop = loop.Checked;
-			o.LeadIn = (double)leadIn.Value;
-			o.Speed = (double)speed.Value;
-			o.Extra = extra.Text.Trim();
+			leadIn.Bump(0); // (takes a number still being typed)
+			speed.Bump(0);
+			o.LeadIn = leadIn.Value;
+			o.Speed = speed.Value;
+			o.Extra = extra.Box.Text.Trim();
 		}
 
-		void OptionChanged() {
-			if (!building) EnableOptions();
-		}
-
-		// the co-op choices only mean something for a co-op run, and the robot only when a bot plays the other one
+		// The co-op choices only mean something for a co-op run, and the robot only when a bot plays the other
+		// one. The portal colour everything is marked with follows: orange when the player is about to be
+		// P-body, blue otherwise (ATLAS, or single player).
 		void EnableOptions() {
 			if (building || launch == null) return;
 			bool ok = selected != null && selected.Ok, coop = ok && selected.Coop;
 			partnerCaption.Enabled = bot.Enabled = real.Enabled = coop;
 			roleCaption.Enabled = blue.Enabled = orange.Enabled = coop && bot.Checked;
 			launch.Enabled = ok;
+			var accent = coop && bot.Checked && orange.Checked ? Theme.Orange : Theme.Blue;
+			if (look.Accent != accent) {
+				look.Accent = accent;
+				foreach (var c in new Control[] { list, parts, sign, launch }) c.Invalidate();
+			}
 		}
 
 		// ---- launching ----
@@ -878,8 +827,8 @@ namespace P2Practice {
 
 		void ShowStatus() {
 			if (status == null) return;
-			status.ForeColor = messageIsError && message.Length > 0 ? ErrorText : SystemColors.ControlText;
-			status.Text = message.Length > 0 ? message : "Choose a run, how to practise it, then Launch.";
+			status.ForeColor = messageIsError && message.Length > 0 ? Theme.Alert : Theme.Ink;
+			status.Text = message.Length > 0 ? message : "Choose a run, how to practice it, then Launch.";
 			tips.SetToolTip(status, message.Length > 0 ? message : null); // the whole text, should it not fit
 		}
 
@@ -899,9 +848,7 @@ namespace P2Practice {
 
 		public void SelectRow(int index) {
 			if (index < 0 || index >= rows.Count) return;
-			SelectInList(index, true);
-			selectDelay.Stop();
-			SyncSelection();
+			list.Pick(index);
 		}
 
 		// as if the window had been dragged to a monitor with this scale
@@ -912,12 +859,68 @@ namespace P2Practice {
 		}
 
 		public void SelectPart(int number) {
-			foreach (ListViewItem item in parts.Items) if ((int)item.Tag == number) { item.Selected = true; item.EnsureVisible(); }
+			int row = parts.RowOf(number);
+			if (row >= 0) parts.Pick(row);
+		}
+
+		// Does what the player's mouse and keys would do, by calling the controls' own handlers (the real mouse
+		// and keyboard are never touched), and writes what happened to the log.
+		public void SelfTest() {
+			Action<string> say = text => App.Log("self-test: " + text);
+			Func<string> where = () => "row " + list.Selected + (selected != null ? " (" + selected.MapName + ", " + selected.TimeText + ")" : "");
+			Func<string> accent = () => look.Accent == Theme.Orange ? "orange" : "blue";
+
+			// the selected run's parts and the options first (its parts are read by now)
+			say(where() + ": " + parts.Count + " parts, start part " + SelectedPart + ", accent " + accent());
+			parts.Key(Keys.Down); say("Down in the parts -> start part " + SelectedPart + ", sign shows " + (sign.Start + 1));
+			parts.ClickAt(new Point(P(60), P(31) * 3 + P(5))); say("click on the fourth part -> start part " + SelectedPart);
+			parts.Key(Keys.Home); say("Home -> start part " + SelectedPart);
+			watch.Press(); say("Watch pressed -> watch " + watch.Checked + ", practice " + practice.Checked);
+			practice.Press(); say("Practice pressed -> watch " + watch.Checked + ", practice " + practice.Checked);
+			orange.Press(); say("Orange pressed -> orange " + orange.Checked + ", blue " + blue.Checked + ", accent " + accent());
+			real.Press(); say("Real partner pressed -> role can be chosen: " + blue.Enabled + ", accent " + accent());
+			bot.Press(); say("Bot pressed -> role can be chosen: " + blue.Enabled + ", accent " + accent());
+			blue.Press(); say("Blue pressed -> accent " + accent());
+			ghost.Press(); say("Ghost pressed -> " + ghost.Checked);
+			ghost.Press(); say("again -> " + ghost.Checked);
+			leadIn.Bump(1); say("lead-in + -> " + leadIn.Value);
+			leadIn.Bump(-1); leadIn.Bump(-1); say("lead-in -, - -> " + leadIn.Value);
+			speed.Bump(-1); say("speed - -> " + speed.Value);
+			speed.Value = 99; say("speed set to 99 -> " + speed.Value);
+			speed.Value = 1; leadIn.Value = 1.5;
+
+			// then the list
+			say("list has " + list.Count + " rows");
+			list.Key(Keys.Home); say("Home -> " + where());
+			list.Key(Keys.Down); list.Key(Keys.Down); say("Down, Down -> " + where());
+			list.Key(Keys.End); say("End -> " + where());
+			list.Key(Keys.Up); say("Up -> " + where());
+			list.ScrollBy(-100000);
+			list.ClickAt(new Point(P(60), P(30) + P(25) * 3 + P(4))); say("click on the fourth row -> " + where() + "; co-op choices enabled: " + bot.Enabled);
+			list.ClickAt(new Point(list.Width - P(40), P(10))); say("click on the File column head -> sorted by column " + settings.SortColumn + (settings.SortDescending != 0 ? " descending" : "") + "; " + where());
+			list.ClickAt(new Point(list.Width - P(40), P(10))); say("again -> column " + settings.SortColumn + (settings.SortDescending != 0 ? " descending" : "") + "; " + where());
+			list.ClickAt(new Point(P(20), P(10))); say("click on the Map column head -> column " + settings.SortColumn + (settings.SortDescending != 0 ? " descending" : "") + "; " + where());
+
+			// and, for the picture: the progress strip as it is while demos are being read
+			progress.Set(3, 8);
+			progress.Visible = true;
+		}
+
+		// A picture of a menu's drop-down, laid out and drawn without being opened.
+		public void SaveMenuPicture(string file) {
+			var drop = demosMenu.DropDown;
+			var create = typeof(Control).GetMethod("CreateControl", BindingFlags.Instance | BindingFlags.NonPublic, null, new[] { typeof(bool) }, null);
+			create.Invoke(drop, new object[] { true });
+			drop.Size = drop.GetPreferredSize(Size.Empty);
+			drop.PerformLayout();
+			using (var picture = new Bitmap(drop.Width, drop.Height, PixelFormat.Format24bppRgb)) {
+				drop.DrawToBitmap(picture, new Rectangle(0, 0, drop.Width, drop.Height));
+				picture.Save(file, ImageFormat.Png);
+			}
 		}
 
 		public void SavePicture(string file) {
 			CreateHidden(); // (controls added since)
-			FitColumns();
 			Application.DoEvents();
 			using (var whole = new Bitmap(Width, Height, PixelFormat.Format24bppRgb)) { // (no alpha: what GDI draws has none)
 				DrawToBitmap(whole, new Rectangle(0, 0, Width, Height));
@@ -935,9 +938,8 @@ namespace P2Practice {
 		protected override void Dispose(bool disposing) {
 			if (disposing) {
 				poll.Dispose();
-				selectDelay.Dispose();
 				if (tips != null) tips.Dispose();
-				foreach (var f in new[] { uiFont, titleFont, launchFont }) if (f != null) f.Dispose();
+				if (look != null) look.Dispose();
 			}
 			base.Dispose(disposing);
 		}

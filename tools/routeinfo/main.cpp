@@ -105,7 +105,8 @@ int Info(const std::vector<std::string> &paths, bool text) {
 		for (const auto &event : route.events) printf("  %6s  %s\n", route::FormatTime(route.TimeAt(event.tick)).c_str(), event.label.c_str());
 		return 0;
 	}
-	std::string out = "{\"ok\":true,\"map\":" + Json(route.map) + ",\"coop\":" + (route.coop ? "true" : "false");
+	std::string out = "{\"ok\":true,\"map\":" + Json(route.map) + ",\"name\":" + Json(route.name) + ",\"coop\":" + (route.coop ? "true" : "false") +
+	                  ",\"challenge\":" + (route.challenge ? "true" : "false");
 	char number[96];
 	snprintf(number, sizeof(number), ",\"ticks\":%d,\"time\":%.4f,\"timeText\":", route.timerEnd - route.timerStart, route.RunTime());
 	out += number + Json(route::FormatTime(route.RunTime())) + ",\"players\":[";

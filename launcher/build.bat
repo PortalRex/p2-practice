@@ -13,7 +13,7 @@ if not exist bin mkdir bin
 "%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /utf8output /warn:4 ^
   /out:bin\P2Practice.exe /win32icon:src\app.ico /win32manifest:src\app.manifest ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll ^
-  src\Program.cs src\Settings.cs src\Maps.cs src\RouteCli.cs src\DemoLibrary.cs src\GameLauncher.cs src\Controls.cs src\MainForm.cs
+  src\Program.cs src\Settings.cs src\Maps.cs src\RouteCli.cs src\DemoLibrary.cs src\GameLauncher.cs src\Theme.cs src\Controls.cs src\MainForm.cs
 if errorlevel 1 exit /b 1
 echo Built bin\P2Practice.exe
 

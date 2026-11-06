@@ -158,7 +158,8 @@ void WalkPacket(ByteSpan packet, StringTables &tables, int classBits, NetHandler
 			br.skip(1);
 			break;
 		case NET_TICK:
-			br.skip(64);
+			handler.onServerTick(static_cast<int>(br.u(32)));
+			br.skip(32);  // frame time and its deviation
 			break;
 		case NET_STRINGCMD:
 			br.skipCString();
