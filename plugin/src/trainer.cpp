@@ -10,11 +10,13 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "engine.h"
 #include "helper_nut.h"
+#include "ghostmodel.h"
 #include "route.h"
 
 namespace trainer {
@@ -30,9 +32,12 @@ using route::Sample;
 
 enum ResetMode { kResetAuto, kResetSoft, kResetReload };
 
+enum GhostStyle { kGhostSolid = 0, kGhostWire = 1, kGhostWireLow = 2 };
+
 struct Settings {
 	float leadIn = 1.5f;     // seconds the run plays itself before the players take over
 	bool ghost = true;       // show the recorded players
+	int ghostStyle = 2;      // how: kGhostSolid, kGhostWire, kGhostWireLow
 	bool hud = true;         // on-screen clock, delta, part
 	bool path = true;        // draw the route and its portal shots in the world (seen by the host)
 	bool keys = true;        // show the keys the recorded player holds
@@ -115,11 +120,16 @@ struct Session {
 	bool botPartner = false;      // a split-screen bot plays the other robot: the person's view fills the screen
 	int waitTicks = 0;
 	std::vector<Ghost> ghosts;  // one per robot of the run
+	std::set<std::string> registeredModels;  // ghost models registered with the game in this map load
 	std::string recordNext;  // development: a demo name to start recording under when the next attempt begins
 	// Challenge Mode's leaderboard screens (see ExpectGameScreen)
 	std::chrono::steady_clock::time_point closeScreensUntil{};
 	int pausedFrames = 0;
 	bool startScreenClosed = false;  // this level's start board has been closed
+	bool ranSinceLoad = false;       // the level has simulated a frame since it was loaded
+	bool catapultMade = false;       // this level has the trainer's catapult (see MakeCatapult)
+	bool flagsUp = false;            // the Challenge Mode finish flags stood when the attempt began (see WatchFlags)
+	bool flagsGone = false;          // a finish took them: the next attempt needs a fresh level
 	int doneTicks = 0;
 	int attempts = 0;
 	std::vector<int> objectLastDriven;  // per route object: the last tick a driven player carried it
@@ -198,7 +208,9 @@ bool GameScreenDue() {
 }
 
 void OnPausedFrame() {
-	if (!GameScreenDue()) return;
+	// (a level being loaded doesn't simulate either, before anything ran in it: no board is up then, and
+	// taking those frames for one would count the start board as closed before it comes)
+	if (!g.ranSinceLoad || !GameScreenDue()) return;
 	int frame = g.pausedFrames++;
 	if (frame % 20 != 0) return;
 	// (the level-start board closes on its own command; the finish board is a menu window)
@@ -209,6 +221,7 @@ void OnRunningFrame() {
 	// (in co-op the finish board comes up without pausing the game: it is closed on running frames)
 	if (engine::MaxClients() > 1 && std::chrono::steady_clock::now() <= g.closeScreensUntil && engine::TickCount() % 15 == 0)
 		engine::Execute("gameui_allowescape; gameui_hide");
+	g.ranSinceLoad = true;
 	if (g.pausedFrames == 0) return;
 	// The screen came and went: any later pause is the player's
 	g.pausedFrames = 0;
@@ -476,12 +489,55 @@ void ClearGhosts() {
 	g.ghosts.clear();
 }
 
+// Whether a person other than the host is playing: somebody over the network, whose game doesn't have the
+// plugin's own model files (a model a game can't load is drawn as a red ERROR sign)
+bool RemotePerson() {
+	static bool said = false;
+	for (int i = 2; i <= engine::MaxClients(); i++) {
+		engine::PlayerState p;
+		if (!engine::GetPlayer(i, p) || p.bot) continue;
+		if (!said && g_set.ghostStyle != kGhostSolid) engine::Print("A partner over the network sees the game's own models: ghosts are shown solid.\n");
+		said = true;
+		return true;
+	}
+	return false;
+}
+
+// The model a ghost of `team`'s robot is drawn with: the wireframe copy when the style asks for one, it could
+// be made and everybody playing has the files (they are made on this computer), else the game's own model
+std::string GhostModel(int team) {
+	if (g_set.ghostStyle != kGhostSolid && !RemotePerson()) {
+		std::string wire = ghostmodel::Wireframe(team, g_set.ghostStyle == kGhostWireLow);
+		if (!wire.empty()) return wire;
+	}
+	return TeamModel(team);
+}
+
+// A model the game hasn't seen in this level has to be registered ("precached") before anything may wear it,
+// and the plugin's wireframe copies never are. The game's own prop_dynamic_create command registers the model
+// of what it makes (a prop on the wall the player looks at); the helper script removes that prop when it
+// makes the ghost, and falls back to the game's own model if the registration didn't happen (the player was
+// looking at nothing).
+void RegisterGhostModels() {
+	if (g_set.ghostStyle == kGhostSolid) return;
+	for (size_t a = 0; a < g.route.actors.size(); a++) {
+		if (!HasGhost(a)) continue;
+		std::string model = GhostModel(g.route.actors[a].team);
+		if (model != TeamModel(g.route.actors[a].team) && !g.registeredModels.count(model)) {
+			// (the command puts "models/" in front itself)
+			engine::Execute("prop_dynamic_create %s", model.compare(0, 7, "models/") == 0 ? model.c_str() + 7 : model.c_str());
+			g.registeredModels.insert(model);
+		}
+	}
+}
+
 void CreateGhosts() {
 	g.ghosts.assign(g.route.actors.size(), Ghost{});
 	for (size_t a = 0; a < g.route.actors.size(); a++) {
 		if (!HasGhost(a)) continue;
 		Rgb c = TeamColor(g.route.actors[a].team);
-		engine::Script("::PP.Ghost(%d,\"%s\",%d,%d,%d)", static_cast<int>(a), TeamModel(g.route.actors[a].team), c.r, c.g, c.b);
+		engine::Script("::PP.Ghost(%d,\"%s\",\"%s\",%d,%d,%d)", static_cast<int>(a), GhostModel(g.route.actors[a].team).c_str(),
+		               TeamModel(g.route.actors[a].team), c.r, c.g, c.b);
 	}
 }
 
@@ -782,6 +838,7 @@ void Flash(float seconds, const std::string &text) {
 // ---------------------------------------------------------------------------------------------------------------
 
 void MoveObjects(bool all);
+void MakeCatapult();
 void ShieldPlayers(bool onlyDriven);
 void ReleaseUseKeys();
 void DropCarried(const Slot &slot);
@@ -802,6 +859,7 @@ bool MapMatches() {
 // kNoClock in co-op (there the level waits for both players before it starts, a different wait every time)
 // and for demos that don't carry the count.
 constexpr int kNoClock = INT_MIN;
+constexpr const char *kEndNode = "challenge_mode_end_node";  // the Challenge Mode flags
 int LevelClock() {
 	const Route &driver = Driver();
 	if (driver.coop || driver.levelTickAtZero == p2demo::Demo::kNoServerTick) return kNoClock;
@@ -958,7 +1016,10 @@ void Approach() {
 	if (g.botPartner) engine::Execute("ss_force_primary_fullscreen 1");
 	ShieldPlayers(false);
 	ClearGhosts();
+	RegisterGhostModels();
 	CreateGhosts();
+	MakeCatapult();
+	g.flagsUp = g.route.challenge && engine::EntityExists(kEndNode);
 	for (const Slot &slot : g.slots)
 		if (ShowsHud(slot)) SetupHud(slot.entIndex);
 
@@ -1041,7 +1102,7 @@ void Start(int handover, bool watch) {
 	// (the level's own clock can't be turned back either: past the attempt's start, only a fresh level has it right)
 	int clock = LevelClock();
 	bool late = clock != kNoClock && clock > g.handover - kShortestLeadTicks;
-	if (g_set.reset == kResetReload || WrongLevelMode() || (g_set.reset == kResetAuto && (past || late))) {
+	if (g_set.reset == kResetReload || WrongLevelMode() || g.flagsGone || (g_set.reset == kResetAuto && (past || late))) {
 		ReloadLevel();
 		return;
 	}
@@ -1145,6 +1206,21 @@ void DriveSlots() {
 	}
 }
 
+// Whether an object can be given a speed: the physics props (cubes, balls, boxes). A turret is a character
+// with a physics shadow, which the game's catapult doesn't launch.
+bool Launchable(const std::string &className) {
+	return className.compare(0, 5, "prop_") == 0;
+}
+
+// One catapult per level, for giving objects a speed (the helper's Launch): made with the game's own
+// ent_create, which spawns it (wherever the host looks; the helper moves it onto an object when needed).
+void MakeCatapult() {
+	if (g.catapultMade) return;
+	g.catapultMade = true;
+	engine::Execute("ent_create trigger_catapult");
+	engine::Script("::PP.gravity <- %g;::PP.Catapult()", engine::CvarFloat("sv_gravity", 600));
+}
+
 // Whether the trainer moves a recorded object this tick. While the run plays itself, all of them. Once a
 // person is in control, only what a driven player (the bot partner) carries or has let go of: the rest is the
 // person's to move.
@@ -1165,13 +1241,16 @@ bool LooksAfterObject(size_t index, int tick) {
 // - What a player carries in the run is put on its recorded spot every tick, with the recorded turn and speed
 //   (driven players hold nothing themselves): a laser cube points exactly where it pointed.
 // - What moves on its own in the run (thrown, rolling, riding a funnel, settling on a button) is the game's to
-//   move, here as there; it is put back on the recorded path only when it has strayed from it. Buttons, ball
-//   sockets and catapults keep hold of an object that is left alone.
+//   move, here as there; it is put back on the recorded path only when it has strayed from it, and given the
+//   run's speed again (a prop; the game can't be told a turret's speed). What a player lets go of is put on
+//   its way at once: the throw is the game's from there. Buttons, ball sockets and catapults keep hold of an
+//   object that is left alone.
 // - What lies still in the run is looked at now and then, and put back if something has pushed it away.
 // With `all` (the start of a replayed stretch) every object is tied and put in place.
 void MoveObjects(bool all) {
 	constexpr float kSlack = 4;            // how far an object moving on its own may be from the run's path
 	constexpr int kLookAtResting = 30;     // ticks between looks at an object that lies still
+	constexpr float kMovingSpeed = 30;     // slower than this, an object is left to settle on its own
 	const Route &driver = Driver();
 	int tick = DriverTick(g.cursor);
 	if (g.objectLastDriven.size() != driver.movers.size()) g.objectLastDriven.assign(driver.movers.size(), -1);
@@ -1193,23 +1272,27 @@ void MoveObjects(bool all) {
 			engine::Script("::PP.Claim(%d,\"%s\",%.1f,%.1f,%.1f)", id, mover.className.c_str(), pos.x, pos.y, pos.z);
 		if (!LooksAfterObject(i, tick)) continue;
 
-		bool carried = false;
-		for (size_t a = 0; a < driver.actors.size(); a++)
+		bool carried = false, carriedBefore = false;
+		for (size_t a = 0; a < driver.actors.size(); a++) {
 			if (driver.At(static_cast<int>(a), tick).held == mover.entIndex) carried = true;
+			if (driver.At(static_cast<int>(a), tick - 1).held == mover.entIndex) carriedBefore = true;
+		}
+		bool released = carriedBefore && !carried;
 		Vec3 before = pos, beforeAng = ang, after = pos, afterAng = ang;
 		bool existed = mover.At(tick - 1, before, beforeAng);
 		bool moving = !existed || Distance(before, pos) > 0.01f;
 		bool turning = !existed || Distance(beforeAng, ang) > 0.5f;
-		if (!all && !carried && !moving && !turning && tick % kLookAtResting != 0) continue;
+		if (!all && !carried && !released && !moving && !turning && tick % kLookAtResting != 0) continue;
 
 		// (its speed: where it is a tick later; none across a trip through a portal)
 		constexpr float kPortalTrip = 64;
 		Vec3 velocity{};
 		if (mover.At(tick + 1, after, afterAng) && Distance(pos, after) < kPortalTrip) velocity = {(after.x - pos.x) / dt, (after.y - pos.y) / dt, (after.z - pos.z) / dt};
 		// (how an object lies matters once it has stopped turning: a rolling ball may roll its own way)
-		float slack = (all || carried) ? 0 : kSlack;
-		engine::Script("::PP.Pose(%d,\"%s\",%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.0f,%.0f,%.0f,%d,%d,%.0f,%d)", id, mover.className.c_str(), pos.x, pos.y, pos.z,
-		               ang.x, ang.y, ang.z, velocity.x, velocity.y, velocity.z, inHands[0], inHands[1], slack, turning ? 0 : 1);
+		float slack = (all || carried || released) ? 0 : kSlack;
+		bool launch = !carried && Launchable(mover.className) && Length(velocity) > kMovingSpeed;
+		engine::Script("::PP.Pose(%d,\"%s\",%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.0f,%.0f,%.0f,%d,%d,%.0f,%d,%d)", id, mover.className.c_str(), pos.x, pos.y, pos.z,
+		               ang.x, ang.y, ang.z, velocity.x, velocity.y, velocity.z, inHands[0], inHands[1], slack, turning ? 0 : 1, launch ? 1 : 0);
 	}
 }
 
@@ -1324,9 +1407,11 @@ void TrackPlayers() {
 			slot.partStart = g.cursor;
 		}
 
+		// (while the Challenge Mode flags stand, they are the finish: see WatchFlags)
 		const Sample &end = g.route.At(static_cast<int>(a), g.route.timerEnd);
 		float toEnd = Distance(state.origin, end.pos);
-		bool arrived = g.replaying ? g.cursor >= LastDrivenTick() : (toEnd < kFinishRadius || (slot.progress >= g.route.timerEnd - 2 && toEnd < 2 * kFinishRadius));
+		bool arrived = g.replaying ? g.cursor >= LastDrivenTick()
+		                           : !g.flagsUp && (toEnd < kFinishRadius || (slot.progress >= g.route.timerEnd - 2 && toEnd < 2 * kFinishRadius));
 		if (arrived) {
 			slot.finished = true;
 			slot.finishCursor = g.cursor;
@@ -1335,7 +1420,9 @@ void TrackPlayers() {
 	}
 }
 
-void Finish() {
+// The attempt is over: the time it would have made, next to the run's. From a part, the run's time up to the
+// handover counts as the person's own (what the clock has been showing all along).
+void Finish(bool atFlags) {
 	const float dt = g.route.tickInterval;
 	int finish = 0;
 	for (const Slot &slot : g.slots)
@@ -1345,14 +1432,37 @@ void Finish() {
 	bool best = false;
 	if (!g.replaying) RecordBest(g.bestFromPart, g.segment, ticks, best);
 	char text[160];
-	snprintf(text, sizeof(text), "FINISH  %s  (%s)%s", route::FormatTime(g.route.TimeAt(finish)).c_str(), SignedTime((ticks - record) * dt).c_str(),
-	         best && g.attempts > 1 ? "   personal best" : "");
+	snprintf(text, sizeof(text), "%s  %s  (%s)%s", atFlags ? "FLAGS" : "FINISH", route::FormatTime(g.route.TimeAt(finish)).c_str(),
+	         SignedTime((ticks - record) * dt).c_str(), best && g.attempts > 1 ? "   personal best" : "");
 	Flash(4, text);
-	engine::Print("%s from part %d: %s, record %s (%s)\n", g.replaying ? "Replayed run" : "Attempt", g.segment + 1,
-	              route::FormatTime(g.route.TimeAt(finish)).c_str(), route::FormatTime(g.route.RunTime()).c_str(), SignedTime((ticks - record) * dt).c_str());
+	engine::Print("%s from part %d: %s%s, record %s (%s)\n", g.replaying ? "Replayed run" : "Attempt", g.segment + 1,
+	              route::FormatTime(g.route.TimeAt(finish)).c_str(), atFlags ? " at the flags" : "", route::FormatTime(g.route.RunTime()).c_str(),
+	              SignedTime((ticks - record) * dt).c_str());
 	g.mode = Mode::Done;
 	g.doneTicks = 0;
 	ExpectFinishScreen();
+}
+
+// In Challenge Mode the level's finish is its flags: the game puts an end node at the exit, ends the timer when
+// a player touches it (in co-op, when both have), and removes it. With cheats on the game shows no time, so
+// the attempt's own is shown instead: what the flags would have said. The node is watched for its removal (the
+// touch was in the tick just simulated); a finish takes the flags away for good, so the next attempt reloads.
+bool WatchFlags() {
+	if (!g.flagsUp || engine::EntityExists(kEndNode)) return false;
+	g.flagsUp = false;
+	g.flagsGone = true;
+	return true;
+}
+
+void FinishAtFlags() {
+	for (Slot &slot : g.slots) {
+		if (!slot.entIndex || !slot.human || slot.finished) continue;
+		slot.finished = true;
+		slot.finishCursor = g.cursor - 1;
+		slot.progress = g.route.timerEnd;
+	}
+	UpdateHud();
+	Finish(true);
 }
 
 bool AllTrackedFinished() {
@@ -1399,6 +1509,7 @@ void TickLeadIn() {
 
 void TickWatch() {
 	TakeSnapshotIfDue();
+	WatchFlags();
 	DriveSlots();
 	MoveObjects(false);
 	PlacePortals();
@@ -1439,9 +1550,13 @@ void TickRun() {
 	MarkWorld();
 	TrackPlayers();
 	if (g.cursor % kHudInterval == 0) UpdateHud();
+	if (WatchFlags() && !g.replaying) {
+		FinishAtFlags();
+		return;
+	}
 	if (AllTrackedFinished()) {
 		UpdateHud();
-		Finish();
+		Finish(false);
 		return;
 	}
 	if (g_set.autoReset > 0 && !g.replaying) {
@@ -1716,6 +1831,8 @@ void PrintSettings() {
 	engine::Print("prac_set <name> <value>:\n");
 	engine::Print("  leadin %.1f      seconds the run plays itself before you take over\n", g_set.leadIn);
 	engine::Print("  ghost %d         show the recorded players\n", g_set.ghost);
+	engine::Print("  ghoststyle %s  how: wirelow (wireframe, few lines), wire (wireframe, every edge) or solid\n",
+	              g_set.ghostStyle == kGhostSolid ? "solid" : g_set.ghostStyle == kGhostWire ? "wire" : "wirelow");
 	engine::Print("  hud %d           clock, delta and part on screen\n", g_set.hud);
 	engine::Print("  keys %d          show the keys the record holds\n", g_set.keys);
 	engine::Print("  path %d          draw the route and portal shots in the level (host only)\n", g_set.path);
@@ -1737,6 +1854,7 @@ void CmdSet(const sdk::CCommand &args) {
 	bool on = number != 0;
 	if (name == "leadin") g_set.leadIn = std::clamp(number, 0.0f, 10.0f);
 	else if (name == "ghost") g_set.ghost = on;
+	else if (name == "ghoststyle") g_set.ghostStyle = value == "solid" ? kGhostSolid : value == "wire" ? kGhostWire : kGhostWireLow;
 	else if (name == "hud") g_set.hud = on;
 	else if (name == "keys") g_set.keys = on;
 	else if (name == "path") g_set.path = on;
@@ -1759,6 +1877,11 @@ void CmdSet(const sdk::CCommand &args) {
 
 // Development aid: what the plugin reads from the game right now
 void CmdDebug(const sdk::CCommand &args) {
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "exec")) {
+		// (development: a console line run as the player, from a console that has no player of its own)
+		engine::Execute("%s", args.ArgS() + strlen("exec "));
+		return;
+	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "parity")) {
 		g_frameStartParity = atoi(args.Arg(2)) & 1;
 		return;
@@ -1863,6 +1986,11 @@ void OnLevelInit(const char *mapName) {
 	g.helperLoaded = false;
 	g.levelTouched = false;
 	g.startScreenClosed = false;
+	g.ranSinceLoad = false;
+	g.catapultMade = false;
+	g.flagsUp = false;
+	g.flagsGone = false;
+	g.registeredModels.clear();
 	g.slots.clear();
 	g.speedChanged = false;
 	if (g.hasRoute) g.worldReached = g.route.firstTick - 1;

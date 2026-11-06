@@ -3,8 +3,10 @@
 Practice a Portal 2 speedrun against a demo. Give it a run (a `.dem`, or both players' demos of a co-op run) and
 it puts you on that run's route, in the real game:
 
-- **Ghosts** of the recorded players run the route beside you, animated the way the game animates a player.
-- **A live clock** shows how far ahead of or behind the run you are, with a split for every part.
+- **Ghosts** of the recorded players run the route beside you, animated the way the game animates a player,
+  drawn as wireframes in their portal colours (or as solid robots, if you prefer).
+- **A live clock** shows how far ahead of or behind the run you are, with a split for every part. At the
+  Challenge Mode flags you get the time your run would have had.
 - **Parts.** The run is cut into parts at its portal shots, portal trips and doors. Start from any part, or from
   any time: the run plays itself up to that moment (you ride along and see the keys it holds), then hands you
   the player with the run's exact position, aim, speed and portals.
@@ -62,8 +64,14 @@ Co-op alone needs the level in split screen: `ss_map mp_coop_doors`. Single play
 Maps are shown by their chamber names (Doors, Laser Stairs); commands take the file names as always.
 
 Settings (`prac_set` alone lists them): `leadin` (seconds the run plays itself before you take over, 1.5),
-`ghost`, `hud`, `keys`, `path`, `partner` (the bot), `loop`, `autoreset` (retry when this far behind), `speed`
-(game speed), `reset` (`auto`, `soft`, `reload`), `snapshots`.
+`ghost`, `ghoststyle` (`wirelow`: a wireframe of the model's coarsest mesh; `wire`: of its full mesh; `solid`),
+`hud`, `keys`, `path`, `partner` (the bot), `loop`, `autoreset` (retry when this far behind), `speed` (game
+speed), `reset` (`auto`, `soft`, `reload`), `snapshots`.
+
+The wireframe ghosts are copies of the game's own player models that the plugin writes once, under the game
+folder (`models/p2practice/`, `materials/p2practice/ghost/`). Chell's model has one level of detail, so her
+`wirelow` ghost is the full mesh. A partner over the network doesn't have those files, so with one connected
+the ghosts are shown solid.
 
 Useful binds: `bind f5 prac_retry`, `bind f6 prac_next`, `bind f7 prac_prev`.
 
@@ -80,8 +88,9 @@ when the level's state changed (SAR's records) and what the level's clock showed
   are put where the run's player was when each game frame began and the game's own movement carries them
   through it, so they ride the lift and touch every trigger in the same frame the run did, tricks included (a
   button pressed and released within one frame, a trigger skipped at speed). What the run's players carried is
-  moved along the path it took; what moved on its own (thrown, rolling, in a funnel) is left to the game's
-  physics and put back only if it strays. Every button, door and laser ends up as the run had it.
+  moved along the path it took; what moved on its own (thrown, rolling, in a funnel) is thrown the same way
+  and left to the game's physics, put back on its path only if it strays. Every button, door and laser ends up
+  as the run had it.
 - A run made in Challenge Mode is practiced in Challenge Mode (the restart switches to it): the finish flags and
   the game's own timer are there, no saves are kept, and a death starts the level again. The leaderboard screens
   the game opens at the start and the finish of a Challenge Mode level are closed again by the plugin.
@@ -105,14 +114,17 @@ instead. This path is written but has not been tested yet.
 ## Limits
 
 - Objects: a demo holds an object's position about 20 times a second while the recording player can see it,
-  and nothing while they can't (the plugin then leaves the object alone). The game offers no way to give an
-  object a speed, only a place, so a thrown object is steered by placing it; a thin trigger in its path can be
-  missed that way. From the handover on, everything you touch follows the game's physics.
+  and nothing while they can't (the plugin then leaves the object alone). A prop (cube, ball, box) gets the
+  run's speed through a catapult trigger of the plugin's; a turret can only be placed. From the handover on,
+  everything you touch follows the game's physics.
 - Co-op: the game makes a robot that flies fast catch what it looks at (no key needed). Driven robots do the
   same, and let go when the run's robot did.
 - In co-op the level waits for both players before it starts, so there is no level clock to join: the run's
   clock starts when both robots stand in the level.
-- The finish is reached when you get to where the run finished, not by the level's own end trigger.
+- In a Challenge Mode run the finish is the level's own flags: touching them (both robots, in co-op) ends the
+  attempt and shows the time the flags would have shown. The game itself shows none with cheats on, and nothing
+  is saved or submitted. A run made outside Challenge Mode has no flags: the finish is where the run's player
+  finished.
 - A demo recorded on an altered copy of a map can't be followed on the real one (the level does different
   things); the plugin doesn't detect this, the run just won't line up.
 - The route line and portal marks are debug overlays: only the host sees them.

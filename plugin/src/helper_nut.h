@@ -12,6 +12,7 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 ::PP <- {
 	players = {}
 	ghosts = {}
+	registered = {}
 	texts = {}
 }
 
@@ -161,13 +162,62 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	return d > 180 ? 360 - d : d
 }
 
+)nut"
+// (the compiler takes a string literal of at most 16 KB at a time: the script continues in a second piece)
+R"nut(
+// ---- giving an object a speed ----
+// A script can place a physics object but not set its speed (SetVelocity writes a field the physics engine
+// doesn't read), and an object put somewhere stays asleep there, even in mid-air, until something wakes it. The
+// game's catapult triggers can set a speed: one launches whatever enters it towards a target point at a set
+// speed, with the velocity v = D*s/|D| + (0, 0, g*|D|/(2s)) for the offset D to the target, the speed s and the
+// gravity g. With s = 2|D| that is v = 2D + (0, 0, g/4), so the target for a wanted v is D = (v - (0, 0, g/4))/2.
+// (A direction launch is no use: for objects the game takes the speed itself as the upward velocity.)
+// The plugin makes one catapult per level with the game's own ent_create (a script can't spawn an entity);
+// it is found here, set up and kept disabled, and moved onto an object for the moment of a launch.
+::PP.catapult <- null
+::PP.target <- null
+::PP.gravity <- 600.0  // (sv_gravity; the plugin keeps this current)
+::PP.Catapult <- function() {
+	if (catapult != null && catapult.IsValid()) return catapult
+	local e = null
+	while (e = Entities.FindByClassname(e, "trigger_catapult")) if (e.GetName() == "") catapult = e
+	if (catapult == null) return null
+	catapult.__KeyValueFromString("targetname", "p2practice_catapult")
+	catapult.__KeyValueFromInt("spawnflags", 8)  // physics objects only
+	catapult.__KeyValueFromInt("solid", 2)
+	catapult.__KeyValueFromInt("useThresholdCheck", 0)
+	catapult.__KeyValueFromInt("useExactVelocity", 0)
+	catapult.__KeyValueFromInt("applyAngularImpulse", 0)
+	catapult.SetSize(Vector(-40, -40, -40), Vector(40, 40, 40))
+	target = Entities.CreateByClassname("info_target")
+	target.__KeyValueFromString("targetname", "p2practice_catapult_target")
+	EntFireByHandle(catapult, "SetLaunchTarget", "p2practice_catapult_target", 0, null, null)
+	EntFireByHandle(catapult, "Disable", "", 0, null, null)
+	return catapult
+}
+
+::PP.Launch <- function(e, vx, vy, vz) {
+	local c = Catapult()
+	if (c == null || target == null || !target.IsValid()) return
+	local at = e.GetOrigin()
+	local d = Vector(vx * 0.5, vy * 0.5, (vz - gravity * 0.25) * 0.5)
+	if (d.Length() < 1) return
+	target.SetOrigin(at + d)
+	c.SetOrigin(at)
+	EntFireByHandle(c, "SetPhysicsSpeed", (d.Length() * 2).tostring(), 0, null, null)
+	EntFireByHandle(c, "Enable", "", 0, null, null)
+	EntFireByHandle(e, "Wake", "", 0, null, null)  // (the catapult takes what moves into it)
+	EntFireByHandle(c, "Disable", "", 0.05, null, null)
+}
+
 // One of the run's objects is put where the run had it this tick, moving as it moved. With `slack` above zero
 // it is left alone while it is within that distance of the spot (and, with `turnMatters`, turned the same way
 // to within a few degrees): an object the game's physics is already carrying along the run's path is not
 // disturbed, which matters to buttons and catapults that have hold of it. `held1` and `held2` are the entity
 // numbers of what the people in the game have in their hands (-1: nothing): those are never touched, since
-// moving an object out of a player's hands breaks the game's physics.
-::PP.Pose <- function(id, classname, x, y, z, pitch, yaw, roll, vx, vy, vz, held1, held2, slack, turnMatters) {
+// moving an object out of a player's hands breaks the game's physics. With `launch`, an object that is put
+// in place is given the run's speed too (the physics carries it on from there).
+::PP.Pose <- function(id, classname, x, y, z, pitch, yaw, roll, vx, vy, vz, held1, held2, slack, turnMatters, launch) {
 	local e = Claim(id, classname, x, y, z)
 	if (e == null) return
 	local index = e.entindex()
@@ -180,7 +230,7 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	}
 	e.SetOrigin(spot)
 	e.SetAngles(pitch, yaw, roll)
-	e.SetVelocity(Vector(vx, vy, vz))
+	if (launch) Launch(e, vx, vy, vz)
 }
 
 // The player picks up (uses) the live counterpart of one of the run's objects
@@ -235,8 +285,20 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 // A copy of a player model, in one flat colour, that the trainer moves along the recorded run. It is never
 // spawned as a prop, so it has no collision: players, portals and lasers pass through it. The plugin is told
 // the prop's entity number (it sets the model's pose there, which no script function does).
-::PP.Ghost <- function(id, model, r, g, b) {
+::PP.Ghost <- function(id, model, fallback, r, g, b) {
 	if (id in ghosts && ghosts[id] != null && ghosts[id].IsValid()) return
+	// A model of the plugin's own is only usable once something in the level wears it (see the plugin's
+	// RegisterGhostModels); that something is removed here. Without it, the game's own model is used.
+	if (model != fallback && !(model in registered)) {
+		local worn = null
+		local e = null
+		while (e = Entities.FindByModel(e, model)) if (e.GetName() == "") worn = e
+		if (worn == null) model = fallback
+		else {
+			worn.Destroy()
+			registered[model] <- true
+		}
+	}
 	local e = CreateProp("prop_dynamic", Vector(0, 0, -16000), model, 1)
 	e.__KeyValueFromString("targetname", "p2practice_ghost" + id)
 	e.__KeyValueFromString("rendercolor", r + " " + g + " " + b)

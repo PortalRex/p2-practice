@@ -1,0 +1,5 @@
+add_executable(ghosttest main.cpp ../../plugin/src/ghostmodel.cpp)
+target_compile_features(ghosttest PRIVATE cxx_std_17)
+target_include_directories(ghosttest PRIVATE ../../plugin/src)
+target_link_libraries(ghosttest PRIVATE p2route_lib)
+target_compile_definitions(ghosttest PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)

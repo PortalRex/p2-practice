@@ -400,6 +400,18 @@ static const char *EntityFromHandle(const char *owner, int handleOffset, int *in
 	return static_cast<const char *>(edict.unknown);
 }
 
+bool EntityExists(const char *className) {
+	constexpr int kGetClassName = 3;  // IServerNetworkable
+	if (!g_globals || !g_globals->edicts) return false;
+	for (int i = g_globals->maxClients + 1; i < g_globals->maxEntities && i < kMaxEdicts; i++) {
+		const sdk::Edict &edict = g_globals->edicts[i];
+		if (!edict.InUse() || !edict.networkable) continue;
+		const char *name = CallVirtual<const char *>(edict.networkable, kGetClassName);
+		if (name && !strcmp(name, className)) return true;
+	}
+	return false;
+}
+
 void SetGodMode(int entIndex, bool on) {
 	constexpr int kFlagGodMode = 1 << 14;  // FL_GODMODE in Portal 2 (checked against what "god" toggles)
 	if (!g_globals || !g_globals->edicts || entIndex < 1 || entIndex > g_globals->maxClients) return;

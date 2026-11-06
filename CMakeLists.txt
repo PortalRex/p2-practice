@@ -26,3 +26,4 @@ add_subdirectory(tools/demostress)
 # The route builder and the Portal 2 plugin (the plugin itself only in 32-bit builds), and the launcher's helper
 add_subdirectory(plugin)
 add_subdirectory(tools/routeinfo)
+add_subdirectory(tools/ghosttest)

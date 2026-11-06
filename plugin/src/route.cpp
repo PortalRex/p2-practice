@@ -423,9 +423,11 @@ void FindEvents(Route &route, const Demo &primary) {
 
 	for (const PortalChange &p : route.portals) {
 		if (!p.active || p.tick <= control || p.tick >= route.timerEnd) continue;
-		std::string who = p.actor >= 0 ? TeamName(route.actors[p.actor].team) : "A";
 		const char *which = p.portal2 ? "second" : "first";
-		AddEvent(route, p.tick, EventKind::Portal, p.actor, who + std::string(" places ") + which + " portal on the " + SurfaceName(p.ang));
+		// (a portal nobody shot is the level's own: the single-portal chambers open the other one themselves)
+		std::string label = p.actor >= 0 ? TeamName(route.actors[p.actor].team) + std::string(" places ") + which + " portal on the "
+		                                 : std::string("The level opens a portal on the ");
+		AddEvent(route, p.tick, EventKind::Portal, p.actor, label + SurfaceName(p.ang));
 	}
 	for (size_t a = 0; a < route.actors.size(); a++) {
 		const auto &samples = route.actors[a].samples;

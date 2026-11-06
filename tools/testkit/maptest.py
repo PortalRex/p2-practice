@@ -374,8 +374,11 @@ def run_case(console, case, state):
         if not handed:
             problems.append(f'practice from part {part} never reached the handover' + ('' if console.alive else ' (the game went away)'))
         else:
+            # (the check is taken a frame after the handover, so the speed holds one frame of the person's own
+            # input against the run's: where the run's player was braking or turning hard just then, that alone
+            # is tens of u/s. A wrong handover is hundreds.)
             worst = max(result['handover'], key=lambda h: h['units'])
-            if worst['units'] > 24 or worst['speed'] > 80:
+            if worst['units'] > 24 or worst['speed'] > 150:
                 problems.append(f"handover off by {worst['units']:.1f} units, {worst['speed']:.0f} u/s")
         time.sleep(2)
         console.send('prac_stop')

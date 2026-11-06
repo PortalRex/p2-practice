@@ -17,6 +17,7 @@ endif()
 
 add_library(p2practice SHARED
 	src/engine.cpp
+	src/ghostmodel.cpp
 	src/plugin.cpp
 	src/trainer.cpp
 )

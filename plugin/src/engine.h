@@ -64,6 +64,9 @@ struct PlayerState {
 // False when no player holds that entity index (1-based).
 bool GetPlayer(int entIndex, PlayerState &out);
 
+// Whether the level holds an entity of this class (the map's class name, as "challenge_mode_end_node")
+bool EntityExists(const char *className);
+
 // Turns the game's god mode on or off for a player: the flag its own "god" command sets, which that command
 // can only set for the player typing it. This is the one place the plugin writes into the game's memory.
 void SetGodMode(int entIndex, bool on);
