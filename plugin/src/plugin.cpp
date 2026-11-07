@@ -13,7 +13,11 @@ class Plugin final : public sdk::IServerPluginCallbacks {
 public:
 	bool Load(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn gameServerFactory) override {
 		if (loaded_) {
-			engine::Warn("P2 Practice is already loaded.\n");
+			// A second plugin_load (a cfg that starts with one, with the plugin already up): refused, and the
+			// engine answers a refusal with Unload on this same object, which must then leave the loaded
+			// plugin alone
+			engine::Print("P2 Practice is already loaded.\n");
+			refused_ = true;
 			return false;
 		}
 		if (!engine::Init(interfaceFactory, gameServerFactory)) return false;
@@ -24,6 +28,10 @@ public:
 	}
 
 	void Unload() override {
+		if (refused_) {
+			refused_ = false;
+			return;
+		}
 		if (!loaded_) return;
 		trainer::Shutdown();
 		engine::Shutdown();
@@ -66,6 +74,7 @@ public:
 
 private:
 	bool loaded_ = false;
+	bool refused_ = false;  // a plugin_load was just refused: the Unload that follows it is not for the loaded plugin
 };
 
 Plugin g_plugin;

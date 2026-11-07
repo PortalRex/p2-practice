@@ -29,6 +29,8 @@ namespace P2Practice {
 		public static string Search;          // --search <text>: typed into the search box
 		public static Size Size;              // --size <width>x<height>: window size in the screenshot (at 100%)
 		public static bool PressLaunch;       // --launch: press Launch before the screenshot (always a dry run)
+		public static string SaveCfgName;     // --save-cfg <name>: press Save as cfg with this name before the screenshot
+		public static double TakeOver = -1;   // --take-over <seconds>: type this take-over second before the screenshot
 		public static int RescaleTo;          // --rescale <percent>: then rebuild the window for this scale, as moving it to another monitor does
 		public static bool SaveSettings;      // --save: the screenshot run remembers settings like a real one (otherwise it leaves them alone)
 		public static bool RemovePlugin;      // --remove-plugin: choose Game > Remove plugin from game before the screenshot
@@ -63,6 +65,12 @@ namespace P2Practice {
 					case "--select": if (int.TryParse(next, out n)) { Select = n; i++; } break;
 					case "--dpi": if (int.TryParse(next, out n)) { Dpi = Math.Max(50, Math.Min(400, n)); i++; } break;
 					case "--part": if (int.TryParse(next, out n)) { Part = n; i++; } break;
+					case "--save-cfg": if (next != null) { SaveCfgName = next; i++; } break;
+					case "--take-over": {
+						double d;
+						if (double.TryParse(next, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out d)) { TakeOver = d; i++; }
+						break;
+					}
 					case "--game-running": if (next != null) { GameLauncher.GameRunningOverride = IsYes(next); i++; } break;
 					case "--steam-running": if (next != null) { GameLauncher.SteamRunningOverride = IsYes(next); i++; } break;
 					case "--size":
@@ -138,6 +146,8 @@ namespace P2Practice {
 							else if (step == 1 && form.RunReady) {
 								if (App.SelfTest) form.SelfTest();
 								if (App.Part > 0) form.SelectPart(App.Part);
+								if (App.TakeOver >= 0) form.SetTakeOver(App.TakeOver);
+								if (App.SaveCfgName != null) form.SaveCfgAs(App.SaveCfgName);
 								if (App.PressLaunch) form.Launch();
 								if (App.RemovePlugin) form.RemovePlugin();
 								if (App.RescaleTo > 0) form.RescaleTo(App.RescaleTo);

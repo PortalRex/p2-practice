@@ -51,7 +51,11 @@ namespace P2Practice {
 		Option practice, watch, blue, orange, bot, real, ghost, clock, speedo, line, loop, resetAuto, resetInstant, resetRestart;
 		ColorPick ghostColor;
 		Stepper ghostOpacity;
-		Stepper leadIn, speed;
+		Stepper leadIn, speed, takeOver;
+		Words takeOverNote;                   // "instead of part n's start (time)" once the player typed their own second
+		TextField cfgName;                    // SAVE AS CFG: the name to save the session under
+		SignButton saveCfg;
+		bool takeOverEdited, syncingTakeOver; // the take-over second was typed (rather than following the part); it is being set to the part's
 		SignButton launch;
 		TickBar progress;
 
@@ -432,8 +436,17 @@ namespace P2Practice {
 				partChosen = parts.Part(parts.Selected);
 				sign.Start = parts.Selected;
 				sign.Invalidate();
+				SyncTakeOver();
 			};
 			parts.Activated += (s, e) => Launch();
+
+			// the second of the run to take over at: the chosen part's start, until the player types another
+			takeOver = new Stepper(look, 0, 3600, 0.1, 2) { Margin = Padding.Empty };
+			takeOver.Tip(tips, "The second of the run you take over at: the chosen part's start, or any moment you type here (the run plays itself up to it).");
+			takeOver.ValueChanged += (s, e) => { if (!syncingTakeOver && !building) TakeOverEdited(); };
+			takeOverNote = new Words(look, "", look.Small, Theme.Grey) { Anchor = AnchorStyles.Left, Margin = new Padding(P(10), 0, 0, 0) };
+			var takeRow = Across(new Caption(look, "TAKE OVER AT") { Margin = new Padding(0, 0, P(10), 0) }, takeOver, Aside("s"), takeOverNote);
+			takeRow.Margin = new Padding(0, P(6), 0, 0);
 
 			notes = new Words(look, "", look.Small, Theme.Grey) { Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, P(5), 0, 0), Visible = false,
 				Wrap = true, Align = ContentAlignment.TopLeft, Height = look.Small.Height * 2 + P(2) }; // (room for two lines; the rest is in the tooltip)
@@ -493,9 +506,19 @@ namespace P2Practice {
 			extraCaption.Margin = new Padding(0, P(2), 0, 0);
 			AddOption(opt, extraCaption, extra);
 
+			// the session saved under a name, for "exec <name>" in the game later
+			cfgName = new TextField(look, null, "a name, then exec it in the game") { Width = P(230), Height = P(26), Margin = Padding.Empty };
+			tips.SetToolTip(cfgName.Box, "Saves this run, where you take over and these options as cfg\\<name>.cfg in the game folder. Later,  exec <name>  in the game's console starts the same practice without the launcher.");
+			cfgName.Box.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { SaveCfg(); e.Handled = e.SuppressKeyPress = true; } };
+			saveCfg = new SignButton(look, "SAVE") { Margin = new Padding(P(8), 0, 0, 0) };
+			saveCfg.Click += (s, e) => SaveCfg();
+			var saveCaption = new Caption(look, "SAVE AS CFG");
+			saveCaption.Margin = new Padding(0, P(2), 0, 0);
+			AddOption(opt, saveCaption, Across(cfgName, saveCfg));
+
 			var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Margin = Padding.Empty, BackColor = Theme.Panel };
 			grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-			foreach (var c in new Control[] { sign, Rule(P(7), P(4)), partsCaption, parts, notes, Rule(P(7), P(6)), opt }) {
+			foreach (var c in new Control[] { sign, Rule(P(7), P(4)), partsCaption, parts, takeRow, notes, Rule(P(7), P(6)), opt }) {
 				grid.RowStyles.Add(c == parts ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.AutoSize));
 				grid.Controls.Add(c, 0, grid.RowStyles.Count - 1);
 			}
@@ -911,6 +934,7 @@ namespace P2Practice {
 			}
 			sign.Parts = info.Ok ? info.Parts : new List<RoutePart>();
 			sign.Start = parts.Selected;
+			SyncTakeOver();
 
 			if (info.Ok && info.Players.Count > 0) {
 				sign.Players.Clear();
@@ -988,6 +1012,7 @@ namespace P2Practice {
 			roleCaption.Enabled = blue.Enabled = orange.Enabled = coop && bot.Checked;
 			ghostColor.Enabled = ghostOpacity.Enabled = ghost.Checked;
 			launch.Enabled = ok;
+			if (saveCfg != null) saveCfg.Enabled = cfgName.Enabled = takeOver.Enabled = ok;
 			var accent = coop && bot.Checked && orange.Checked ? Theme.Orange : Theme.Blue;
 			if (look.Accent != accent) {
 				look.Accent = accent;
@@ -997,17 +1022,61 @@ namespace P2Practice {
 
 		// ---- launching ----
 
-		public void Launch() {
-			if (selected == null || !selected.Ok) return;
+		// The take-over second follows the chosen part until the player types their own
+		void SyncTakeOver() {
+			if (takeOver == null) return;
+			syncingTakeOver = true;
+			takeOver.Value = selected != null && parts.Selected >= 0 ? parts.StartOf(parts.Selected) : 0;
+			syncingTakeOver = false;
+			takeOverEdited = false;
+			takeOverNote.Text = "";
+			takeOverNote.Fit();
+		}
+
+		void TakeOverEdited() {
+			double start = selected != null && parts.Selected >= 0 ? parts.StartOf(parts.Selected) : 0;
+			takeOverEdited = Math.Abs(takeOver.Value - start) >= 0.005;
+			takeOverNote.Text = takeOverEdited ? "instead of part " + SelectedPart + "'s start, " + RouteCli.FormatTime(start) : "";
+			takeOverNote.Fit();
+		}
+
+		// the second typed, or -1 for the part's own start
+		double TakeOverSeconds {
+			get {
+				takeOver.Bump(0); // (takes a number still being typed)
+				TakeOverEdited();
+				return takeOverEdited ? takeOver.Value : -1;
+			}
+		}
+
+		// the session as chosen on the sign, with the options read and saved
+		LaunchRequest Request() {
 			ReadOptions();
 			settings.Save();
-			var request = new LaunchRequest {
+			return new LaunchRequest {
 				GameDir = settings.GameDir, Demo = selected.Demo.Path, Partner = selected.Partner != null ? selected.Partner.Path : null,
-				Map = selected.Map, MapName = selected.MapName, Coop = selected.Coop, Part = SelectedPart, Options = settings.Options,
+				Map = selected.Map, MapName = selected.MapName, Coop = selected.Coop, Part = SelectedPart, TakeOver = TakeOverSeconds, Options = settings.Options,
 			};
+		}
+
+		public void Launch() {
+			if (selected == null || !selected.Ok) return;
+			var request = Request();
 			Cursor = Cursors.WaitCursor;
 			LaunchResult result;
 			try { result = GameLauncher.Launch(request); } finally { Cursor = Cursors.Default; }
+			Say(result.Message, !result.Ok);
+		}
+
+		// for tests and screenshots: the take-over second typed, and Save as cfg pressed with a name
+		public void SetTakeOver(double seconds) { takeOver.Value = seconds; TakeOverEdited(); }
+		public void SaveCfgAs(string name) { cfgName.Box.Text = name; SaveCfg(); }
+
+		void SaveCfg() {
+			if (selected == null || !selected.Ok) { Say("Pick a run first.", true); return; }
+			string name = cfgName.Box.Text.Trim();
+			if (name.Length == 0) { Say("Give the cfg a name first (letters, digits, _ or -).", true); cfgName.Box.Focus(); return; }
+			var result = GameLauncher.SaveCfg(Request(), name);
 			Say(result.Message, !result.Ok);
 		}
 

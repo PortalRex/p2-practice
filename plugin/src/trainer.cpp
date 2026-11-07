@@ -143,6 +143,7 @@ struct Session {
 	std::vector<int> objectLastDriven;  // per route object: the last tick a driven player carried it
 	std::vector<int> useKeyDown;        // players (entity indices) whose use key the trainer is holding this tick
 	int autoPart = -1;   // prac_auto: start this part by itself once the route's map is up (-1 = not armed)
+	float autoSeconds = -1;  // prac_auto at <seconds>: that moment of the run instead of a part's start (-1 = the part)
 	bool autoWatch = false;
 	std::map<int, int> bestFromPart;  // part an attempt started from -> best ticks to the finish
 	std::map<int, int> bestPart;      // part -> best ticks through it
@@ -196,6 +197,7 @@ bool ChallengeMode();
 bool WatchFlags();
 void FinishAtFlags();
 void TellBoard();
+int TickAtSeconds(float seconds);
 
 // In Challenge Mode the game opens its leaderboard a few seconds into every level load, and pauses for it until
 // a button is pressed. That one would stall the run playing itself up to the part, so while an attempt is being
@@ -1635,9 +1637,12 @@ void TickAutoStart() {
 	}
 	if (++g.waitTicks < 90) return;
 	int part = g.autoPart;
+	float seconds = g.autoSeconds;
 	g.autoPart = -1;
+	g.autoSeconds = -1;
 	g.replaying = false;
-	StartPart(part, g.autoWatch);
+	if (seconds >= 0) Start(TickAtSeconds(seconds), g.autoWatch);
+	else StartPart(part, g.autoWatch);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1729,13 +1734,30 @@ void CmdWatch(const sdk::CCommand &args) {
 	StartPart(PartArgument(args, 0), true);
 }
 
+// The run's tick at `seconds` of its time
+int TickAtSeconds(float seconds) {
+	return g.route.timerStart + static_cast<int>(std::lround(seconds / g.route.tickInterval));
+}
+
 void CmdGoto(const sdk::CCommand &args) {
 	if (args.ArgC() < 2 || !g.hasRoute) {
 		engine::Print("prac_goto <seconds> - practice from that time of the run\n");
 		return;
 	}
 	g.replaying = false;
-	Start(g.route.timerStart + static_cast<int>(atof(args.Arg(1)) / g.route.tickInterval + 0.5f), false);
+	Start(TickAtSeconds(static_cast<float>(atof(args.Arg(1)))), false);
+}
+
+// The same attempt, taking over a little later (or earlier) in the run: for a pair of binds that move the
+// handover while practicing
+void CmdNudge(const sdk::CCommand &args) {
+	if (args.ArgC() < 2 || !g.hasRoute) {
+		engine::Print("prac_nudge <seconds> - take over this many seconds later in the run (negative: earlier) and start again\n");
+		return;
+	}
+	int from = g.attempts ? g.handover : g.route.segments[0].startTick;
+	g.replaying = false;
+	Start(from + static_cast<int>(std::lround(atof(args.Arg(1)) / g.route.tickInterval)), g.watch);
 }
 
 void CmdRetry(const sdk::CCommand &) {
@@ -1760,13 +1782,20 @@ void CmdAuto(const sdk::CCommand &args) {
 	std::string first = args.ArgC() >= 2 ? args.Arg(1) : "";
 	if (first.empty() || first == "off") {
 		g.autoPart = -1;
-		engine::Print("prac_auto <part> | watch <part> | off - start by itself when the route's map is up (now: off)\n");
+		g.autoSeconds = -1;
+		engine::Print("prac_auto [watch] <part> | [watch] at <seconds> | off - start by itself when the route's map is up (now: off)\n");
 		return;
 	}
 	g.autoWatch = first == "watch";
-	g.autoPart = std::max(0, atoi(g.autoWatch ? args.Arg(2) : args.Arg(1)) - 1);
+	int where = g.autoWatch ? 2 : 1;  // the argument that says where: a part number, or "at" and a time
+	std::string what = args.ArgC() > where ? args.Arg(where) : "";
+	bool bySeconds = what == "at";
+	float seconds = bySeconds && args.ArgC() > where + 1 ? static_cast<float>(atof(args.Arg(where + 1))) : 0;
+	g.autoPart = bySeconds ? 0 : std::max(0, atoi(what.c_str()) - 1);
+	g.autoSeconds = bySeconds ? std::max(0.0f, seconds) : -1;
 	g.waitTicks = 0;
-	engine::Print("Will %s from part %d as soon as the map is running.\n", g.autoWatch ? "watch" : "practice", g.autoPart + 1);
+	if (bySeconds) engine::Print("Will %s from %.2f s of the run as soon as the map is running.\n", g.autoWatch ? "watch" : "practice", g.autoSeconds);
+	else engine::Print("Will %s from part %d as soon as the map is running.\n", g.autoWatch ? "watch" : "practice", g.autoPart + 1);
 }
 
 void CmdReplay(const sdk::CCommand &args) {
@@ -1983,13 +2012,14 @@ void CmdHelp(const sdk::CCommand &) {
 	engine::Print("  prac_info                           its parts and events\n");
 	engine::Print("  prac_start [part]                   practice from a part (the run plays itself up to it, then you take over)\n");
 	engine::Print("  prac_goto <seconds>                 practice from any time of the run\n");
+	engine::Print("  prac_nudge <seconds>                take over this many seconds later in the run (negative: earlier)\n");
 	engine::Print("  prac_retry / prac_next / prac_prev  again, next part, previous part\n");
 	engine::Print("  prac_watch [part]                   ride along with the recorded run\n");
 	engine::Print("  prac_role <blue|orange|auto>        co-op alone: which robot you play; a bot plays the other\n");
 	engine::Print("  prac_replay <demo> [partner's]      play another run in the level against the loaded one\n");
 	engine::Print("  prac_compare <demo> [partner's]     part-by-part times of another run against the loaded one\n");
 	engine::Print("  prac_set [name value]               settings\n");
-	engine::Print("  prac_auto <part> | watch <part>     start by itself when the route's map is up (the launcher uses this)\n");
+	engine::Print("  prac_auto [watch] <part> | at <s>   start by itself when the route's map is up (the launcher uses this)\n");
 	engine::Print("  prac_stop                           stop\n");
 }
 
@@ -2005,12 +2035,13 @@ const Command kCommands[] = {
 	{"prac_info", CmdInfo, "prac_info - the loaded run's parts and events", true},
 	{"prac_start", CmdStart, "prac_start [part] - practice from a part of the run", true},
 	{"prac_goto", CmdGoto, "prac_goto <seconds> - practice from a time of the run", true},
+	{"prac_nudge", CmdNudge, "prac_nudge <seconds> - take over this many seconds later in the run (negative: earlier)", true},
 	{"prac_retry", CmdRetry, "prac_retry - the same attempt again", true},
 	{"prac_next", CmdNext, "prac_next - practice the next part", true},
 	{"prac_prev", CmdPrev, "prac_prev - practice the previous part", true},
 	{"prac_watch", CmdWatch, "prac_watch [part] - ride along with the recorded run", true},
 	{"prac_stop", CmdStop, "prac_stop - stop practicing", true},
-	{"prac_auto", CmdAuto, "prac_auto <part> | watch <part> | off - start by itself when the route's map is up", false},
+	{"prac_auto", CmdAuto, "prac_auto [watch] <part> | [watch] at <seconds> | off - start by itself when the route's map is up", false},
 	{"prac_role", CmdRole, "prac_role <blue|orange|auto> - the robot you play when alone in co-op", false},
 	{"prac_replay", CmdReplay, "prac_replay <demo> [partner's demo] - play another run against the loaded one", false},
 	{"prac_compare", CmdCompare, "prac_compare <demo> [partner's demo] - part-by-part comparison with the loaded run", false},

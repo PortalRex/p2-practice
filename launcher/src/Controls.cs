@@ -944,6 +944,7 @@ namespace P2Practice {
 		}
 
 		public int Part(int row) { return row >= 0 && row < parts.Count ? parts[row].Index : 1; }
+		public double StartOf(int row) { return row >= 0 && row < parts.Count ? parts[row].Start : 0; }  // seconds of the run
 		public int RowOf(int part) { return parts.FindIndex(p => p.Index == part); }
 		public string Describe(int row) {
 			return row >= 0 && row < parts.Count ? parts[row].Index + ". " + parts[row].Name + "\n" + RouteCli.FormatTime(parts[row].Start) + " – " + RouteCli.FormatTime(parts[row].End) : null;

@@ -84,6 +84,7 @@ namespace P2Practice {
 		public string Map, MapName;
 		public bool Coop;
 		public int Part = 1;           // the part to start from
+		public double TakeOver = -1;   // the second of the run to take over at instead of the part's start (-1: the part's)
 		public Options Options;
 	}
 
@@ -209,11 +210,61 @@ namespace P2Practice {
 			// with a real partner the host is ATLAS and the client P-body, as always: nothing to choose
 			c.Add("prac_role " + (bot ? (o.Orange ? "orange" : "blue") : "auto"));
 			c.Add("prac_load \"" + demo + "\"" + (partner != null ? " \"" + partner + "\"" : ""));
-			c.Add("prac_auto " + (o.Watch ? "watch " : "") + Math.Max(1, r.Part));
+			c.Add("prac_auto " + (o.Watch ? "watch " : "") + (r.TakeOver >= 0 ? "at " + Options.Num(r.TakeOver) : Math.Max(1, r.Part).ToString()));
 			// with a real partner the player hosts the map as usual: the route is loaded and armed, and starts there
 			if (!r.Coop) c.Add("map " + r.Map);
 			else if (bot) c.Add("ss_map " + r.Map);
 			return c;
+		}
+
+		// Writes the session as a cfg under the player's own name, for "exec <name>" in the game whenever they like:
+		// the same commands a launch runs, with the demo where it is (a launch's staged copies come and go, so a
+		// demo the game can't read in place gets a lasting copy of its own).
+		public static LaunchResult SaveCfg(LaunchRequest r, string name) {
+			if (!Regex.IsMatch(name ?? "", @"^[A-Za-z0-9_\-]{1,40}$")) return Fail("Name the cfg with letters, digits, _ or - only: it becomes cfg\\<name>.cfg.");
+			if (!GameLocator.IsGameDir(r.GameDir)) return Fail("Portal 2 wasn't found. Choose its folder under Game > Choose Portal 2 folder.");
+			if (!Regex.IsMatch(r.Map ?? "", @"^[A-Za-z0-9_][A-Za-z0-9_\-./]*$")) return Fail("This demo's map name (" + r.Map + ") can't be given to the game.");
+			if (!File.Exists(r.Demo)) return Fail("The demo is no longer there: " + r.Demo);
+			if (r.Partner != null && !File.Exists(r.Partner)) return Fail("The partner's demo is no longer there: " + r.Partner);
+			bool writes = !App.DryRun || App.ApplyFiles;
+			var notes = new List<string>();
+			string other;
+			bool running = FindGame(r.GameDir, out other) == GameState.Running;
+
+			string demo = r.Demo, partner = r.Partner;
+			bool tooLong = ("prac_load \"" + demo + "\"" + (partner != null ? " \"" + partner + "\"" : "")).Length > MaxConsoleCommand;
+			if (tooLong || !SafeForGame(demo) || (partner != null && !SafeForGame(partner))) {
+				string dir = Path.Combine(r.GameDir, "portal2", "demos", "p2practice", "saved");
+				if (!SafeForGame(dir)) return Fail("This demo's path has characters Portal 2 can't read (like ; or letters outside this PC's language). Move the demo to a plainly named folder.");
+				try {
+					demo = Stage(r.Demo, dir, writes, notes);
+					if (partner != null) partner = Stage(r.Partner, dir, writes, notes);
+				} catch (Exception ex) {
+					if (!(ex is IOException || ex is UnauthorizedAccessException)) throw;
+					return Fail("A copy of the demo couldn't be made in " + dir + ": " + ex.Message);
+				}
+			}
+			string error;
+			if (!InstallPlugin(r.GameDir, running, writes, notes, out error)) return Fail(error);
+
+			var lines = new List<string>(Commands(r, demo, partner));
+			lines.AddRange(ExtraCommands(Regex.Replace(r.Options.Extra ?? "", @"\s+", " ").Trim()));
+			string cfg = Path.Combine(r.GameDir, "portal2", "cfg", name + ".cfg");
+			if (App.DryRun) {
+				App.Log("save cfg: " + (writes ? "wrote " : "would write ") + cfg + ":");
+				foreach (var l in lines) App.Log("  " + l);
+			}
+			if (writes) {
+				try {
+					Directory.CreateDirectory(Path.GetDirectoryName(cfg));
+					File.WriteAllLines(cfg, lines, Encoding.Default);
+				} catch (Exception ex) {
+					if (!(ex is IOException || ex is UnauthorizedAccessException)) throw;
+					return Fail("Couldn't write " + cfg + ": " + ex.Message);
+				}
+			}
+			string tail = notes.Count > 0 ? "  " + string.Join(" ", notes) : "";
+			return Done((writes ? "Saved " : "Would save ") + "cfg\\" + name + ".cfg. In the game's console,  exec " + name + "  starts this practice again (from the menu or inside a level)." + tail);
 		}
 
 		// The "+command arguments" among the player's own launch options, for the cfg ("-switches" only mean

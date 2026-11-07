@@ -40,9 +40,14 @@ the game honours only one `+plugin_load` on its command line.
 
 `P2Practice.exe` lists the demos in the folders you add (co-op pairs are shown as one run), shows the selected
 run's parts, and starts the game with everything set up: which robot you play, bot or real partner, which part
-to start from, practice or watch, what is shown and in which colour and opacity the ghosts are drawn. If the
-game is already running it writes `cfg/p2practice_launch.cfg` and puts `exec p2practice_launch` on the
-clipboard for you to paste into the console.
+to start from (or any second of the run: TAKE OVER AT), practice or watch, what is shown and in which colour
+and opacity the ghosts are drawn. If the game is already running it writes `cfg/p2practice_launch.cfg` and
+puts `exec p2practice_launch` on the clipboard for you to paste into the console.
+
+**SAVE AS CFG** writes the same session under a name of your own (`cfg/<name>.cfg` in the game folder): later,
+`exec <name>` in the game's console starts that practice again without the launcher, from the menu or inside
+a level. The demo is used where it is (copied under `demos/p2practice/saved` only when the game can't read its
+path). The cfg's first line loads the plugin; when it is already loaded that line just says so.
 
 **BOARDS** shows the Challenge Mode leaderboards from [board.portal2.sr](https://board.portal2.sr): pick a
 chamber, and every run on its board is listed with its time, players, date and whether a demo is there. Enter or
@@ -61,13 +66,14 @@ The window follows Windows' light or dark mode; Game > Light / Dark sets it.
 | `prac_info` | its parts and events |
 | `prac_start [part]` | practice from a part |
 | `prac_goto <seconds>` | practice from any time of the run |
+| `prac_nudge <seconds>` | take over this many seconds later in the run (negative: earlier) and start again |
 | `prac_retry`, `prac_next`, `prac_prev` | again, next part, previous part |
 | `prac_watch [part]` | ride along with the run |
 | `prac_role <blue\|orange\|auto>` | co-op alone: the robot you play |
 | `prac_replay <demo> [partner's demo]` | play another run in the level against the loaded one |
 | `prac_compare <demo> [partner's demo]` | part-by-part times of another run against the loaded one |
 | `prac_set [name value]` | settings (below) |
-| `prac_auto <part> \| watch <part> \| off` | start by itself once the run's map is up (the launcher uses this) |
+| `prac_auto [watch] <part> \| [watch] at <seconds> \| off` | start by itself once the run's map is up (the launcher uses this) |
 | `prac_stop` | stop |
 
 Co-op alone needs the level in split screen: `ss_map mp_coop_doors`. Single player: `map sp_a2_laser_stairs`.
@@ -86,7 +92,8 @@ folder (`models/p2practice/`, `materials/p2practice/ghost/`). Chell's model has 
 shows her from outside), so her ghost is always the full mesh. A partner over the network doesn't have those
 files, so with one connected the ghosts are shown solid.
 
-Useful binds: `bind f5 prac_retry`, `bind f6 prac_next`, `bind f7 prac_prev`.
+Useful binds: `bind f5 prac_retry`, `bind f6 prac_next`, `bind f7 prac_prev`, `bind f8 "prac_nudge -1"`,
+`bind f9 "prac_nudge 1"` (take over a second earlier or later).
 
 ## How a part starts
 
