@@ -67,6 +67,10 @@ bool GetPlayer(int entIndex, PlayerState &out);
 // Whether the level holds an entity of this class (the map's class name, as "challenge_mode_end_node")
 bool EntityExists(const char *className);
 
+// Puts a time (in hundredths of a second; -1 for none) and a portal count on the game's Challenge Mode finish
+// board, which otherwise shows "-" for a run it didn't record. False when the game offers no way.
+bool SendScoreboard(int portals, int hundredths);
+
 // Turns the game's god mode on or off for a player: the flag its own "god" command sets, which that command
 // can only set for the player typing it. This is the one place the plugin writes into the game's memory.
 void SetGodMode(int entIndex, bool on);
@@ -86,5 +90,7 @@ bool SetPoseParameters(int entIndex, const float values[kPoseParameters]);
 
 // Development aid: the raw pointers and offsets GetPlayer works from, printed without following them.
 void PrintRawState();
+void PrintUserMessages();
+bool SendTestChat(const char *text);
 
 }  // namespace engine

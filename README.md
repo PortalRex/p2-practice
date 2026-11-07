@@ -78,7 +78,7 @@ Settings (`prac_set` alone lists them): `leadin` (seconds the run plays itself b
 `wirelow`: that mesh whole; `wire`: the full mesh; `solid`), `ghostcolor` (`team` for the robots' own colours, or
 three numbers 0-255), `ghostopacity` (percent; below 100 the ghosts are see-through),
 `hud`, `keys`, `path`, `partner` (the bot), `loop`, `autoreset` (retry when this far behind), `speed` (game
-speed), `reset` (`auto`, `soft`, `reload`), `snapshots`.
+speed), `reset` (`auto`, `soft`, `reload`), `challenge` (practice every run in Challenge Mode, 1), `snapshots`.
 
 The wireframe ghosts are copies of the game's own player models that the plugin writes once, under the game
 folder (`models/p2practice/`, `materials/p2practice/ghost/`). Chell's model has no coarser mesh (the game never
@@ -93,8 +93,9 @@ Getting back to the start of a part means getting the level back too: doors, pan
 level does on its own clock (the lift you arrive in, droppers, timed doors). The plugin knows from the demo
 when the level's state changed (SAR's records) and what the level's clock showed when the recording began.
 
-- If your last attempt didn't get past a change of the level, and the level's clock hasn't run past the part's
-  start, a retry is instant: players, objects and portals are put back.
+- If the run records no change of the level (a door, a button, a panel) between the lead-in's start and where
+  your last attempt got, and the level's own clock hasn't run past the part's start (in single player it always
+  has after an attempt), a retry is instant: players, objects and portals are put back.
 - Otherwise the level restarts and the run is replayed quickly from the level's first tick up to the part
   ("setting up the level..."). The real players stand in for the run's players, on the level's own clock. They
   are put where the run's player was when each game frame began and the game's own movement carries them
@@ -106,12 +107,20 @@ when the level's state changed (SAR's records) and what the level's clock showed
 - Every run is practiced in Challenge Mode (the restart switches to it), whether or not it was made in it: the
   finish flags and the game's own timer are there, no saves are kept, and a death starts the level again. The
   leaderboard the game opens a few seconds into the level (which would stall the run playing itself) is closed
-  by the plugin; the one at the flags comes up as it always does, and the plugin's time shows once it is
-  closed. `prac_set challenge 0` keeps a run's own mode instead.
+  by the plugin; the one at the flags comes up as it always does, with the attempt's time in its Final box (the
+  game itself shows "-" there with cheats on), and the plugin's time next to the record's shows once it is
+  closed. In single player a death restarts the level and the attempt starts again by itself (in co-op a robot
+  just respawns). `prac_set challenge 0` keeps a run's own mode instead.
 - At the handover you get the run's exact position, aim, speed and portals, and whatever the run was carrying
   at that moment is put in your hands.
 
-`prac_set reset soft` never restarts, `reload` always.
+The launcher's RETRY row picks between these: Auto (as above), Instant (`prac_set reset soft`: no restart for
+the level's sake; buttons, doors and panels stay as the last attempt left them while what the run carried or
+threw is put back, so only for parts where that doesn't matter) and Restart the level (`prac_set reset reload`:
+always). Whatever the choice, the level restarts after a finish at the flags (they are gone) and when it isn't
+in the run's mode. In co-op the driven partner keeps acting the run out after the handover, so with Auto most
+retries of a part with buttons or doors in it restart the level; in single player the level's clock is past the
+part after any attempt, so there Auto restarts every time.
 
 With [ChocolateLoading](https://github.com/Blenderiste09/ChocolateLoading) running (started through its
 `chocoload.exe`) and `prac_set snapshots 1`, the plugin stores a memory snapshot a moment into each lead-in and a
@@ -139,8 +148,8 @@ default.
 - In co-op the level waits for both players before it starts, so there is no level clock to join: the run's
   clock starts when both robots stand in the level.
 - The finish is the level's own Challenge Mode flags: touching them (both robots, in co-op) ends the attempt and
-  shows the time the flags would have shown. The game itself shows none with cheats on, and nothing is saved or
-  submitted. Where a level has no flags (or `prac_set challenge 0` keeps a run out of Challenge Mode), the
+  shows the time the flags would have shown, on the game's own finish board too (with cheats on the game would
+  show "-" there); nothing is saved or submitted. Where a level has no flags (or `prac_set challenge 0` keeps a run out of Challenge Mode), the
   finish is where the run's player finished.
 - A demo recorded on an altered copy of a map can't be followed on the real one (the level does different
   things); the plugin doesn't detect this, the run just won't line up.

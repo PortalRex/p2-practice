@@ -24,6 +24,7 @@ constexpr const char *kPluginCallbacks = "ISERVERPLUGINCALLBACKS003";
 constexpr const char *kCvar = "VEngineCvar007";
 constexpr const char *kEngineClient = "VEngineClient015";
 constexpr const char *kServerGameDLL = "ServerGameDLL005";
+constexpr const char *kEngineServer = "VEngineServer022";
 constexpr const char *kPlayerInfoManager = "PlayerInfoManager002";
 
 // ---- vtable slots (Windows) ----
@@ -37,6 +38,10 @@ constexpr int GetGameDirectory = 35;
 constexpr int ExecuteClientCmd = 104;
 // IServerGameDLL (SAR)
 constexpr int GetAllServerClasses = 10;
+constexpr int GetUserMessageInfo = 28;   // (the engine's MessageEnd calls it through this slot)
+// IVEngineServer (the engine's vtable: slots 44 and 45 start and end a user message)
+constexpr int UserMessageBegin = 44;
+constexpr int MessageEnd = 45;
 // IPlayerInfoManager
 constexpr int GetPlayerInfo = 0;
 constexpr int GetGlobalVars = 1;

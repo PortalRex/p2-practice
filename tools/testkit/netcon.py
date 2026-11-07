@@ -24,7 +24,26 @@ def main() -> int:
     ap.add_argument('--gap', type=float, default=0.0, help='seconds between commands')
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('commands', nargs='*')
-    args = ap.parse_args()
+    # (a key release such as "-forward" looks like an option: anything that isn't one of the options above is a
+    # command, in the order given)
+    args, _ = ap.parse_known_args()
+    valued = {'--port', '--password', '--wait', '--until', '--timeout', '--connect-timeout', '--gap'}
+    args.commands = []
+    tokens = sys.argv[1:]
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == '--':
+            args.commands += tokens[i + 1:]
+            break
+        if token in valued:
+            i += 2
+            continue
+        if token.split('=', 1)[0] in valued or token == '--quiet':
+            i += 1
+            continue
+        args.commands.append(token)
+        i += 1
 
     deadline = time.time() + args.connect_timeout
     sock = None

@@ -321,6 +321,22 @@ R"nut(
 	EntFireByHandle(ghosts[id], "SetAnimation", sequence, 0, null, null)
 }
 
+// The screen black (the run is being replayed quickly to the part) or back: the game's own screen fade,
+// through a fade entity of the plugin's. `on`: fade out at once and stay; else fade in from black.
+::PP.fade <- null
+::PP.Dim <- function(on) {
+	if (fade == null || !fade.IsValid()) {
+		fade = Entities.CreateByClassname("env_fade")
+		fade.__KeyValueFromString("targetname", "p2practice_fade")
+		fade.__KeyValueFromString("rendercolor", "0 0 0")
+		fade.__KeyValueFromInt("renderamt", 255)
+	}
+	fade.__KeyValueFromFloat("duration", on ? 0.08 : 0.5)
+	fade.__KeyValueFromFloat("holdtime", 0)
+	fade.__KeyValueFromInt("spawnflags", on ? 8 : 1)
+	EntFireByHandle(fade, "Fade", "", 0, null, null)
+}
+
 // A ghost's colour and opacity (0-255; below 255 it is drawn see-through, in the game's translucent pass)
 ::PP.Gc <- function(id, r, g, b, a) {
 	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return

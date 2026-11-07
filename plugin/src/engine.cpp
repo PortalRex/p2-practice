@@ -17,6 +17,8 @@ void *g_cvar = nullptr;
 void *g_engineClient = nullptr;
 void *g_playerInfoManager = nullptr;
 void *g_serverGame = nullptr;
+void *g_engineServer = nullptr;
+int g_scoreboardMessage = -1;  // the index of the ScoreboardTempUpdate user message, -2 when it isn't there
 sdk::GlobalVars *g_globals = nullptr;
 
 void *g_commandVtable = nullptr;  // an engine ConCommand's vtable, shared by ours
@@ -209,6 +211,7 @@ bool Init(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn server
 	}
 	g_cvar = interfaceFactory(sdk::kCvar, nullptr);
 	g_engineClient = interfaceFactory(sdk::kEngineClient, nullptr);
+	g_engineServer = interfaceFactory(sdk::kEngineServer, nullptr);  // (optional: without it the finish board keeps its "-")
 	void *serverGame = g_serverGame = serverFactory(sdk::kServerGameDLL, nullptr);
 	g_playerInfoManager = serverFactory(sdk::kPlayerInfoManager, nullptr);
 	if (!g_cvar || !g_engineClient || !serverGame || !g_playerInfoManager) {
@@ -398,6 +401,93 @@ static const char *EntityFromHandle(const char *owner, int handleOffset, int *in
 	if (!edict.InUse()) return nullptr;
 	if (index) *index = entIndex;
 	return static_cast<const char *>(edict.unknown);
+}
+
+// The game's own finish board shows the time of a run it has just recorded, which with cheats on is never:
+// the board then says "-". The time it shows comes to the client in a user message, ScoreboardTempUpdate
+// (two 32-bit numbers: portals placed, time in hundredths; -1 shows "-"), which the plugin sends itself with
+// the time the attempt would have made. Sent through the engine's own user message interface, before the
+// board opens (it reads the numbers as it opens).
+namespace {
+// what the engine asks of a recipient filter (after a destructor in the first slot): reliable, not an init
+// message, these players
+// (Its layout is IRecipientFilter's under the MSVC x86 ABI the game is built with, as every vtable slot number in
+// sdk.h is: the plugin is for that one toolchain.)
+struct EveryoneFilter {
+	virtual ~EveryoneFilter() {}
+	virtual bool IsReliable() { return true; }
+	virtual bool IsInitMessage() { return false; }
+	virtual int GetRecipientCount() { return count; }
+	virtual int GetRecipientIndex(int slot) { return slot >= 0 && slot < count ? players[slot] : 0; }
+	int count = 0;
+	int players[4] = {};
+};
+
+struct BitWriter {  // the engine's bf_write, as far as the message needs it
+	unsigned char *data;
+	int dataBytes, dataBits, curBit;
+};
+
+int FindScoreboardMessage() {
+	if (g_scoreboardMessage != -1 || !g_serverGame) return g_scoreboardMessage;
+	g_scoreboardMessage = -2;
+	for (int i = 0; i < 200; i++) {
+		char name[256] = "";
+		int size = 0;
+		if (!CallVirtual<bool, int, char *, int, int &>(g_serverGame, sdk::slot::GetUserMessageInfo, i, name, sizeof(name), size)) break;
+		if (!strcmp(name, "ScoreboardTempUpdate")) {
+			g_scoreboardMessage = i;
+			break;
+		}
+	}
+	return g_scoreboardMessage;
+}
+}  // namespace
+
+// Development aid: the user messages the game registers, and whether the scoreboard one can be sent
+void PrintUserMessages() {
+	Print("engine server %p, scoreboard message %d\n", g_engineServer, FindScoreboardMessage());
+	for (int i = 0; i < 80 && g_serverGame; i++) {
+		char name[256] = "";
+		int size = 0;
+		if (!CallVirtual<bool, int, char *, int, int &>(g_serverGame, sdk::slot::GetUserMessageInfo, i, name, sizeof(name), size)) break;
+		Print("  %d %s (%d)\n", i, name, size);
+	}
+}
+
+// Sends a user message of `type` with these bytes to every person in the game, reliably
+static bool SendUserMessage(int type, const char *name, const void *bytes, int count) {
+	if (type < 0 || !g_engineServer || !g_globals) return false;
+	EveryoneFilter filter;
+	for (int i = 1; i <= g_globals->maxClients && filter.count < 4; i++) {
+		PlayerState p;
+		if (GetPlayer(i, p) && !p.bot) filter.players[filter.count++] = i;
+	}
+	if (filter.count == 0) return false;
+	auto *bits = CallVirtual<BitWriter *, void *, int, const char *>(g_engineServer, sdk::slot::UserMessageBegin, &filter, type, name);
+	if (!bits || !bits->data || bits->curBit % 8 != 0 || bits->curBit / 8 + count > bits->dataBytes) {
+		if (bits) CallVirtual<void>(g_engineServer, sdk::slot::MessageEnd);
+		return false;
+	}
+	memcpy(bits->data + bits->curBit / 8, bytes, static_cast<size_t>(count));
+	bits->curBit += count * 8;
+	CallVirtual<void>(g_engineServer, sdk::slot::MessageEnd);
+	return true;
+}
+
+bool SendScoreboard(int portals, int hundredths) {
+	int payload[2] = {portals, hundredths};
+	return SendUserMessage(FindScoreboardMessage(), "ScoreboardTempUpdate", payload, 8);
+}
+
+// Development aid: a chat line (SayText: sender's entity index, the text, whether it is chat), to see that
+// messages sent this way reach the client
+bool SendTestChat(const char *text) {
+	std::vector<char> payload;
+	payload.push_back(1);
+	payload.insert(payload.end(), text, text + strlen(text) + 1);
+	payload.push_back(1);
+	return SendUserMessage(3, "SayText", payload.data(), static_cast<int>(payload.size()));
 }
 
 bool EntityExists(const char *className) {

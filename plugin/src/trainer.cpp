@@ -123,6 +123,8 @@ struct Session {
 	bool savesOff = false;        // the game's saving was switched off for practice (and is switched back on at the end)
 	bool levelTouched = false;    // the trainer has worked in this map load: nothing done in it may count as a run
 	bool resumeAfterLoad = false; // the level went away in the middle of an attempt: start it again when it is back
+	std::chrono::steady_clock::time_point levelWentAt{};  // when it went (a restart brings it back within seconds)
+	bool humanDead = false;       // a person was dead at the last frame (in Challenge Mode the level restarts for it)
 	bool botPartner = false;      // a split-screen bot plays the other robot: the person's view fills the screen
 	int waitTicks = 0;
 	std::vector<Ghost> ghosts;  // one per robot of the run
@@ -135,6 +137,7 @@ struct Session {
 	bool catapultMade = false;       // this level has the trainer's catapult (see MakeCatapult)
 	bool flagsUp = false;            // the Challenge Mode finish flags stood when the attempt began (see WatchFlags)
 	bool flagsGone = false;          // a finish took them: the next attempt needs a fresh level
+	bool dimmed = false;             // the screen is black for a catch-up (::PP.Dim)
 	int doneTicks = 0;
 	int attempts = 0;
 	std::vector<int> objectLastDriven;  // per route object: the last tick a driven player carried it
@@ -189,6 +192,7 @@ void EnsureCheats() {
 bool ChallengeMode();
 bool WatchFlags();
 void FinishAtFlags();
+void TellBoard();
 
 // In Challenge Mode the game opens its leaderboard a few seconds into every level load, and pauses for it until
 // a button is pressed. That one would stall the run playing itself up to the part, so while an attempt is being
@@ -909,6 +913,13 @@ void SetSpeed(float scale) {
 	g.speedChanged = scale != 1;
 }
 
+// Takes the catch-up's black screen away again (a fade back in), where there is one
+void Undim() {
+	if (!g.dimmed) return;
+	engine::Script("::PP.Dim(0)");
+	g.dimmed = false;
+}
+
 void ClearScene() {
 	if (!g.helperLoaded) return;
 	for (const Slot &slot : g.slots)
@@ -917,6 +928,7 @@ void ClearScene() {
 			engine::SetGodMode(slot.entIndex, false);
 		}
 	ClearGhosts();
+	Undim();
 	engine::Script("::PP.ClearTexts()");
 	engine::FlushScript();
 	engine::Execute("clear_debug_overlays");
@@ -1000,6 +1012,7 @@ void BeginLeadIn() {
 	MoveObjects(true);
 	g.mode = g.watch ? Mode::Watch : Mode::LeadIn;
 	SetSpeed(g_set.speed);
+	Undim();
 	for (Slot &slot : g.slots) {
 		slot.progress = g.handover;
 		slot.partStart = g.handover;
@@ -1060,6 +1073,8 @@ void Approach() {
 		MoveObjects(true);
 		g.mode = Mode::CatchUp;
 		SetSpeed(8);
+		engine::Script("::PP.Dim(1)");  // (the fast-forward is better not watched: the lead-in fades in from black)
+		g.dimmed = true;
 		return;
 	}
 	BeginLeadIn();
@@ -1487,7 +1502,17 @@ void FinishAtFlags() {
 		slot.progress = g.route.timerEnd;
 	}
 	UpdateHud();
+	TellBoard();
 	Finish(true);
+}
+
+// The game's finish board shows the time of the run it recorded, so "-" here: at a finish at the flags it is
+// told the attempt's time instead. Once, at the finish only: the board also keeps the best value it was ever
+// told as the player's own entry in its list, so a running time sent earlier would stand there in its place.
+void TellBoard() {
+	if (!ChallengeMode() || g.replaying) return;
+	// The time of the tick just simulated (the finish's own), in hundredths cut off as the board shows them
+	engine::SendScoreboard(-1, static_cast<int>(g.route.TimeAt(g.cursor - 1) * 100 + 0.001f));
 }
 
 bool AllTrackedFinished() {
@@ -1955,6 +1980,12 @@ void CmdDebug(const sdk::CCommand &args) {
 		g.recordNext = args.Arg(2);
 		return;
 	}
+	if (args.ArgC() >= 2 && !strcmp(args.Arg(1), "messages")) {
+		engine::PrintUserMessages();
+		if (args.ArgC() >= 3) engine::Print("sent: %d\n", engine::SendScoreboard(-1, atoi(args.Arg(2))));
+		if (args.ArgC() >= 4) engine::Print("chat sent: %d\n", engine::SendTestChat(args.Arg(3)));
+		return;
+	}
 	if (args.ArgC() >= 2 && !strcmp(args.Arg(1), "raw")) {
 		engine::PrintRawState();
 		return;
@@ -2049,6 +2080,8 @@ void OnLevelInit(const char *mapName) {
 	g.catapultMade = false;
 	g.flagsUp = false;
 	g.flagsGone = false;
+	g.dimmed = false;  // (the game clears the screen fade with the level)
+	g.humanDead = false;
 	g.registeredModels.clear();
 	g.slots.clear();
 	g.speedChanged = false;
@@ -2056,7 +2089,10 @@ void OnLevelInit(const char *mapName) {
 	// The restart we asked for, or the same level coming back by itself in the middle of an attempt (the player
 	// died, or the level restarted itself): the attempt starts again as soon as everyone is in.
 	bool sameMap = g.hasRoute && mapName && _stricmp(mapName, g.route.map.c_str()) == 0;
-	if (sameMap && (g.mode == Mode::Reloading || g.resumeAfterLoad)) {
+	// (a level that comes back much later was loaded by the person, not restarted by the game)
+	constexpr auto kRestartWithin = std::chrono::seconds(90);
+	bool soon = std::chrono::steady_clock::now() - g.levelWentAt < kRestartWithin;
+	if (sameMap && (g.mode == Mode::Reloading || (g.resumeAfterLoad && soon))) {
 		if (g.resumeAfterLoad) engine::Print("The level restarted during the attempt: starting it again.\n");
 		g.mode = Mode::WaitForPlayers;
 		g.waitTicks = 0;
@@ -2067,10 +2103,29 @@ void OnLevelInit(const char *mapName) {
 }
 
 void OnLevelShutdown() {
-	g.resumeAfterLoad = g.mode == Mode::CatchUp || g.mode == Mode::LeadIn || g.mode == Mode::Run || g.mode == Mode::Watch;
+	// The level ending in the middle of an attempt with a person dead is Challenge Mode restarting it for the
+	// death: the attempt waits for the level to come back. Alive, the person left for the menu (or another
+	// map) themselves, and the attempt is over. (The game calls this more than once for one level change: what
+	// the first call found stands.)
+	bool active = g.mode == Mode::CatchUp || g.mode == Mode::LeadIn || g.mode == Mode::Run || g.mode == Mode::Watch;
+	if (active && g.humanDead) {
+		g.resumeAfterLoad = true;
+		g.levelWentAt = std::chrono::steady_clock::now();
+	}
 	if (g.mode != Mode::Reloading) g.mode = Mode::Idle;
 	g.helperLoaded = false;
 	g.slots.clear();
+}
+
+// Whether a person in the attempt is dead right now (read every running frame, for OnLevelShutdown, which comes
+// when the level's entities may already be gone)
+void NoteDeaths() {
+	bool dead = false;
+	for (const Slot &slot : g.slots) {
+		engine::PlayerState state;
+		if (slot.entIndex && slot.human && engine::GetPlayer(slot.entIndex, state) && !state.alive) dead = true;
+	}
+	g.humanDead = dead;
 }
 
 void OnFrame(bool simulating) {
@@ -2088,6 +2143,7 @@ void OnFrame(bool simulating) {
 	}
 	OnRunningFrame();
 	KeepCheatsOn();
+	NoteDeaths();
 	if (g.mode == Mode::Reloading) return;
 	if (g.mode == Mode::Idle) {
 		if (g.hasRoute && g.autoPart >= 0) {
