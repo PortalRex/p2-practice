@@ -1,0 +1,101 @@
+From fb801de5afd3892423823d4ea880c2f37d062c51 Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 10:49:50 -0600
+Subject: [PATCH 2/2] callsite: let a reservation through the Steam overlay's
+ detour count
+
+With the overlay enabled, gameoverlayrenderer.dll detours kernel32 and
+kernelbase functions, VirtualAlloc among them, so every reservation the
+game makes has an overlay frame between kernelbase and the game module.
+The walk stopped at that frame and rejected the call, so the engine's
+hunk (the CMemoryStack holding the entity table, ~48 MB) was never
+tracked: snapshots left it out and the game crashed shortly after a
+restore. It only happens with the overlay on, which is probably why it
+did not show up in your own testing.
+
+The overlay is now a "hook" class: a frame of it is skipped only when the
+frame below it is kernelbase/kernel32, i.e. the detour is forwarding the
+caller's call. A second overlay frame in a row is the overlay's own code
+calling through its own detour, and is still rejected, so the overlay's
+private memory and files stay out of the snapshot.
+
+Tested in Portal 2 with the overlay loaded (sp_a2_laser_stairs): the
+48 MB engine.dll hunk is tracked; during startup 35 overlay frames were
+skipped as forwarding and 20 overlay calls rejected as its own; save + 8
+restores fine.
+---
+ src/callsite.cpp | 16 +++++++++++++---
+ src/callsite.h   |  4 +++-
+ 2 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/src/callsite.cpp b/src/callsite.cpp
+index 316de82..2dd6681 100644
+--- a/src/callsite.cpp
++++ b/src/callsite.cpp
+@@ -9,7 +9,7 @@ namespace callsite {
+ 
+ namespace {
+ 
+-enum Cls { C_PASS = 1, C_SELF, C_GAME, C_OTHER };
++enum Cls { C_PASS = 1, C_SELF, C_GAME, C_OTHER, C_HOOK };
+ 
+ // Cache of classified modules (append-only; an entry becomes visible once `ready` is set).
+ struct ModEnt { uintptr_t base; int cls; char name[24]; volatile LONG ready; };
+@@ -53,6 +53,12 @@ bool is_passthrough(const char* n) {
+            !strcmp(n, "acgenral.dll") || !strcmp(n, "aclayers.dll") || !strcmp(n, "acspecfc.dll");
+ }
+ 
++bool is_api_hooker(const char* n) {
++    // Steam's overlay detours kernel32/kernelbase functions, VirtualAlloc among them, so while it is
++    // enabled it stands between the game and kernelbase on every reservation (the hunk included).
++    return !strcmp(n, "gameoverlayrenderer.dll");
++}
++
+ int classify(uintptr_t addr, const char** name) {
+     *name = "";
+     MEMORY_BASIC_INFORMATION mbi;
+@@ -65,7 +71,7 @@ int classify(uintptr_t addr, const char** name) {
+         if (g_mc[i].ready && g_mc[i].base == base) { *name = g_mc[i].name; return g_mc[i].cls; }
+     char nm[64];
+     export_name(base, nm, sizeof(nm));
+-    int cls = !nm[0] ? C_OTHER : is_passthrough(nm) ? C_PASS : in_modlist(nm) ? C_GAME : C_OTHER;
++    int cls = !nm[0] ? C_OTHER : is_passthrough(nm) ? C_PASS : is_api_hooker(nm) ? C_HOOK : in_modlist(nm) ? C_GAME : C_OTHER;
+     LONG idx = InterlockedIncrement(&g_mc_count) - 1;
+     if (idx < 256) {
+         g_mc[idx].base = base;
+@@ -107,12 +113,16 @@ __declspec(noinline) bool DirectGameCaller(char* owner, size_t olen) {
+     void* frames[24];
+     USHORT n = g_backtrace(0, 24, frames, nullptr);
+     bool leading = true;
++    int prev = 0;
+     for (USHORT i = 0; i < n; i++) {
+         const char* nm;
+         int c = classify((uintptr_t)frames[i], &nm);
+         if (c == C_SELF) { if (leading) continue; return false; }   // our own call
+         leading = false;
+-        if (c == C_PASS) continue;
++        if (c == C_PASS) { prev = c; continue; }
++        // A detour frame is skipped only when it called the API layer directly (it is forwarding the
++        // caller's call). Two in a row is the hooker's own code calling through its own detour.
++        if (c == C_HOOK) { if (prev != C_PASS) return false; prev = c; continue; }
+         if (c != C_GAME) return false;   // ntdll (heap growth), the driver, Steam, ...
+         if (owner && olen) { strncpy(owner, nm, olen - 1); owner[olen - 1] = 0; }
+         return true;
+diff --git a/src/callsite.h b/src/callsite.h
+index 7ee1d1f..49ece75 100644
+--- a/src/callsite.h
++++ b/src/callsite.h
+@@ -4,7 +4,9 @@
+ // heap growth in ntdll, the GPU driver, Steam, the overlay, our own code... Only the calls made by the
+ // game's modules concern a snapshot. Walking the call stack outward from the hook, our own frames and
+ // the thin API layers (kernelbase/kernel32 and the compatibility shims that wrap them) are skipped, and
+-// the first other frame decides: it must lie in one of the listed game modules.
++// the first other frame decides: it must lie in one of the listed game modules. The Steam overlay's
++// detours are skipped too, but only a frame that called kernelbase/kernel32 directly (one forwarding
++// the game's call); the overlay's own calls are still rejected.
+ //
+ // Classification is lock-free (VirtualQuery + the module's PE export name, cached), so it is safe in
+ // hooks that run while other threads are suspended.
+-- 
+2.43.0.windows.1
+

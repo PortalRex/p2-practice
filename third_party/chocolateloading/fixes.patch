@@ -1,8 +1,18 @@
 diff --git a/src/arena.cpp b/src/arena.cpp
-index e72b6d3..caa39e6 100644
+index e72b6d3..aed1490 100644
 --- a/src/arena.cpp
 +++ b/src/arena.cpp
-@@ -18,7 +18,9 @@ uintptr_t g_lo = 1, g_hi = 1;   // [g_lo, g_hi) = heap span used by Contains()
+@@ -1,7 +1,8 @@
+ #define _CRT_SECURE_NO_WARNINGS
+ // Snapshot-aware TLSF heap. See arena.h for the snapshot model.
+ //
+-// Block layout (all sizes are multiples of 8, header included):
++// Block layout (all sizes are multiples of 16, header included; every header sits 8 bytes before a 16-byte
++// boundary, so every payload is 16-byte aligned):
+ //   +0 prev_size  size of the previous physical block, valid only when F_PREVFREE is set
+ //   +4 sizef      size | flags
+ //   +8 payload    (free blocks: next/prev free-list links)
+@@ -18,7 +19,9 @@ uintptr_t g_lo = 1, g_hi = 1;   // [g_lo, g_hi) = heap span used by Contains()
  namespace {
  
  enum : uint32_t { F_FREE = 1, F_PREVFREE = 2, F_FROZEN = 4, F_MASK = 7 };
@@ -13,7 +23,7 @@ index e72b6d3..caa39e6 100644
  const uint32_t SL_LOG = 4, SL_COUNT = 1u << SL_LOG;
  const uint32_t FL_SHIFT = SL_LOG + 3;        // first FL class starts at 128 bytes
  const uint32_t SMALL = 1u << FL_SHIFT;
-@@ -152,7 +154,7 @@ bool grow(uint32_t need) {
+@@ -152,7 +155,7 @@ bool grow(uint32_t need) {
      uintptr_t delta = ((uintptr_t)need + GROW_MIN + 0xFFFF) & ~(uintptr_t)0xFFFF;
      uintptr_t new_top = old_top + delta;
      if (new_top + HDR > g_reserve_end) {
@@ -22,7 +32,7 @@ index e72b6d3..caa39e6 100644
          if (delta < need) return false;
          new_top = old_top + delta;
      }
-@@ -277,7 +279,7 @@ bool Init(size_t reserve_bytes) {
+@@ -277,7 +280,7 @@ bool Init(size_t reserve_bytes) {
      g_ctl = (Control*)g_base;
      memset(g_ctl, 0, sizeof(Control));
      g_ctl->magic = MAGIC;
@@ -31,80 +41,101 @@ index e72b6d3..caa39e6 100644
      // initial sentinel only; the first allocation grows the heap
      Hdr* s = (Hdr*)g_heap_start;
      s->prev_size = 0;
+@@ -392,6 +395,9 @@ bool Check(char* err, size_t errlen) {
+         if (s < MIN_BLOCK || (uintptr_t)h + s > (uintptr_t)top) {
+             snprintf(err, errlen, "bad block size %u at %p", s, h); ok = false; break;
+         }
++        if ((s & (ALIGN - 1)) || (((uintptr_t)h + HDR) & (ALIGN - 1))) {
++            snprintf(err, errlen, "misaligned block (size %u) at %p", s, h); ok = false; break;
++        }
+         if (((h->sizef & F_PREVFREE) != 0) != prev_free) {
+             snprintf(err, errlen, "PREVFREE mismatch at %p", h); ok = false; break;
+         }
 diff --git a/src/callsite.cpp b/src/callsite.cpp
-index 316de82..859f547 100644
+index 316de82..2dd6681 100644
 --- a/src/callsite.cpp
 +++ b/src/callsite.cpp
-@@ -1,6 +1,7 @@
- #define _CRT_SECURE_NO_WARNINGS
- #include "callsite.h"
- #include <windows.h>
-+#include <stdio.h>
- #include <string.h>
+@@ -9,7 +9,7 @@ namespace callsite {
  
- extern "C" IMAGE_DOS_HEADER __ImageBase;   // this DLL's own base address
-@@ -48,9 +49,11 @@ bool in_modlist(const char* name) {
+ namespace {
  
- bool is_passthrough(const char* n) {
-     // Thin API layers between the game and ntdll (kernel32/kernelbase, and the application-
--    // compatibility shims that may wrap them).
-+    // compatibility shims that may wrap them), and Steam's overlay, which hooks VirtualAlloc and
-+    // therefore stands between the game and kernelbase on every reservation while it is enabled.
-     return !strcmp(n, "kernelbase.dll") || !strcmp(n, "kernel32.dll") || !strcmp(n, "apphelp.dll") ||
--           !strcmp(n, "acgenral.dll") || !strcmp(n, "aclayers.dll") || !strcmp(n, "acspecfc.dll");
-+           !strcmp(n, "acgenral.dll") || !strcmp(n, "aclayers.dll") || !strcmp(n, "acspecfc.dll") ||
-+           !strcmp(n, "gameoverlayrenderer.dll") || !strcmp(n, "gameoverlayrenderer64.dll");
+-enum Cls { C_PASS = 1, C_SELF, C_GAME, C_OTHER };
++enum Cls { C_PASS = 1, C_SELF, C_GAME, C_OTHER, C_HOOK };
+ 
+ // Cache of classified modules (append-only; an entry becomes visible once `ready` is set).
+ struct ModEnt { uintptr_t base; int cls; char name[24]; volatile LONG ready; };
+@@ -53,6 +53,12 @@ bool is_passthrough(const char* n) {
+            !strcmp(n, "acgenral.dll") || !strcmp(n, "aclayers.dll") || !strcmp(n, "acspecfc.dll");
  }
  
- int classify(uintptr_t addr, const char** name) {
-@@ -102,6 +105,21 @@ void SetGameModules(const char* module_list) {
-     if (strcmp(tmp, g_modlist) != 0) strcpy(g_modlist, tmp);
- }
- 
-+// Diagnostic: the modules of the frames on the stack, as " name:cls" entries (cls: P pass, S self, G game, O other)
-+__declspec(noinline) void DescribeStack(char* out, size_t cap) {
-+    out[0] = 0;
-+    if (!g_backtrace || cap < 8) return;
-+    void* frames[24];
-+    USHORT n = g_backtrace(0, 24, frames, nullptr);
-+    size_t used = 0;
-+    for (USHORT i = 0; i < n && used + 40 < cap; i++) {
-+        const char* nm;
-+        int c = classify((uintptr_t)frames[i], &nm);
-+        used += _snprintf_s(out + used, cap - used, _TRUNCATE, " %s+%x:%c", nm[0] ? nm : "?", (unsigned)((uintptr_t)frames[i] & 0xfffff),
-+                            c == C_PASS ? 'P' : c == C_SELF ? 'S' : c == C_GAME ? 'G' : 'O');
-+    }
++bool is_api_hooker(const char* n) {
++    // Steam's overlay detours kernel32/kernelbase functions, VirtualAlloc among them, so while it is
++    // enabled it stands between the game and kernelbase on every reservation (the hunk included).
++    return !strcmp(n, "gameoverlayrenderer.dll");
 +}
 +
- __declspec(noinline) bool DirectGameCaller(char* owner, size_t olen) {
-     if (!g_backtrace) return false;
+ int classify(uintptr_t addr, const char** name) {
+     *name = "";
+     MEMORY_BASIC_INFORMATION mbi;
+@@ -65,7 +71,7 @@ int classify(uintptr_t addr, const char** name) {
+         if (g_mc[i].ready && g_mc[i].base == base) { *name = g_mc[i].name; return g_mc[i].cls; }
+     char nm[64];
+     export_name(base, nm, sizeof(nm));
+-    int cls = !nm[0] ? C_OTHER : is_passthrough(nm) ? C_PASS : in_modlist(nm) ? C_GAME : C_OTHER;
++    int cls = !nm[0] ? C_OTHER : is_passthrough(nm) ? C_PASS : is_api_hooker(nm) ? C_HOOK : in_modlist(nm) ? C_GAME : C_OTHER;
+     LONG idx = InterlockedIncrement(&g_mc_count) - 1;
+     if (idx < 256) {
+         g_mc[idx].base = base;
+@@ -107,12 +113,16 @@ __declspec(noinline) bool DirectGameCaller(char* owner, size_t olen) {
      void* frames[24];
+     USHORT n = g_backtrace(0, 24, frames, nullptr);
+     bool leading = true;
++    int prev = 0;
+     for (USHORT i = 0; i < n; i++) {
+         const char* nm;
+         int c = classify((uintptr_t)frames[i], &nm);
+         if (c == C_SELF) { if (leading) continue; return false; }   // our own call
+         leading = false;
+-        if (c == C_PASS) continue;
++        if (c == C_PASS) { prev = c; continue; }
++        // A detour frame is skipped only when it called the API layer directly (it is forwarding the
++        // caller's call). Two in a row is the hooker's own code calling through its own detour.
++        if (c == C_HOOK) { if (prev != C_PASS) return false; prev = c; continue; }
+         if (c != C_GAME) return false;   // ntdll (heap growth), the driver, Steam, ...
+         if (owner && olen) { strncpy(owner, nm, olen - 1); owner[olen - 1] = 0; }
+         return true;
 diff --git a/src/callsite.h b/src/callsite.h
-index 7ee1d1f..ae21e1a 100644
+index 7ee1d1f..49ece75 100644
 --- a/src/callsite.h
 +++ b/src/callsite.h
-@@ -16,6 +16,7 @@ namespace callsite {
- // Sets the space separated list of game modules (e.g. "engine.dll client.dll"). Safe to call again;
- // the list is only rewritten when it changes, because hook threads read it concurrently.
- void SetGameModules(const char* module_list);
-+void DescribeStack(char* out, size_t cap);   // diagnostic: the stack's modules, " name+off:cls" entries
- 
- // True if the hooked function was called directly by a game module; `owner` (optional) receives the
- // module name. Must be called from the hook itself (frames of chocolateloading.dll at the top of the
-diff --git a/src/vatrack.cpp b/src/vatrack.cpp
-index f8211ad..4931def 100644
---- a/src/vatrack.cpp
-+++ b/src/vatrack.cpp
-@@ -70,6 +70,12 @@ LONG NTAPI H_NtAllocateVirtualMemory(HANDLE proc, PVOID* base, ULONG_PTR zero_bi
-     if (status >= 0 && (type & MEM_RESERVE) && proc == CURRENT_PROCESS && base && *base && size && *size >= MIN_RESERVE) {
-         char owner[24];
-         if (callsite::DirectGameCaller(owner, sizeof(owner))) add_region((uintptr_t)*base, *size, owner);
-+        else if (*size >= (1u << 20)) {
-+            // (diagnostic: a large reservation the walk did not attribute to game code, with its callers)
-+            char frames[400];
-+            callsite::DescribeStack(frames, sizeof(frames));
-+            util::Log("vatrack: not tracked: %u KB at %p, protect %08x, callers:%s", (unsigned)(*size >> 10), *base, (unsigned)protect, frames);
-+        }
-     }
-     return status;
- }
+@@ -4,7 +4,9 @@
+ // heap growth in ntdll, the GPU driver, Steam, the overlay, our own code... Only the calls made by the
+ // game's modules concern a snapshot. Walking the call stack outward from the hook, our own frames and
+ // the thin API layers (kernelbase/kernel32 and the compatibility shims that wrap them) are skipped, and
+-// the first other frame decides: it must lie in one of the listed game modules.
++// the first other frame decides: it must lie in one of the listed game modules. The Steam overlay's
++// detours are skipped too, but only a frame that called kernelbase/kernel32 directly (one forwarding
++// the game's call); the overlay's own calls are still rejected.
+ //
+ // Classification is lock-free (VirtualQuery + the module's PE export name, cached), so it is safe in
+ // hooks that run while other threads are suspended.
+diff --git a/tests/arena_test.cpp b/tests/arena_test.cpp
+index aa20b42..9401c82 100644
+--- a/tests/arena_test.cpp
++++ b/tests/arena_test.cpp
+@@ -53,6 +53,7 @@ static void random_ops(int n, std::vector<Obj>* outside, bool allow_outside) {
+             Obj o; o.size = rand_size(); o.seed = rnd();
+             o.p = (unsigned char*)arena::Alloc(o.size);
+             if (!o.p) { printf("alloc failed\n"); exit(1); }
++            if ((uintptr_t)o.p & 15) { printf("alloc not 16-byte aligned: %p\n", o.p); exit(1); }
+             fill(o);
+             if (allow_outside && outside && (rnd() % 20) == 0) outside->push_back(o);
+             else state_push(o);
+@@ -69,6 +70,7 @@ static void random_ops(int n, std::vector<Obj>* outside, bool allow_outside) {
+             uint32_t ns = o.size + rnd() % 3000;
+             unsigned char* np = (unsigned char*)arena::Realloc(o.p, ns);
+             if (!np) { printf("realloc failed\n"); exit(1); }
++            if ((uintptr_t)np & 15) { printf("realloc not 16-byte aligned: %p\n", np); exit(1); }
+             o.p = np;
+             for (uint32_t j = o.size; j < ns; j++) np[j] = (unsigned char)(o.seed + j * 31);
+             o.size = ns;
