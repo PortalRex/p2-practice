@@ -105,8 +105,9 @@ when the level's state changed (SAR's records) and what the level's clock showed
   as the run had it.
 - Every run is practiced in Challenge Mode (the restart switches to it), whether or not it was made in it: the
   finish flags and the game's own timer are there, no saves are kept, and a death starts the level again. The
-  leaderboard screens the game opens at the start and the finish of a Challenge Mode level are closed again by
-  the plugin. `prac_set challenge 0` keeps a run's own mode instead.
+  leaderboard the game opens a few seconds into the level (which would stall the run playing itself) is closed
+  by the plugin; the one at the flags comes up as it always does, and the plugin's time shows once it is
+  closed. `prac_set challenge 0` keeps a run's own mode instead.
 - At the handover you get the run's exact position, aim, speed and portals, and whatever the run was carrying
   at that moment is put in your hands.
 

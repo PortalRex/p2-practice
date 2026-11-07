@@ -129,7 +129,6 @@ struct Session {
 	std::set<std::string> registeredModels;  // ghost models registered with the game in this map load
 	std::string recordNext;  // development: a demo name to start recording under when the next attempt begins
 	// Challenge Mode's leaderboard screens (see ExpectGameScreen)
-	std::chrono::steady_clock::time_point closeScreensUntil{};
 	int pausedFrames = 0;
 	bool startScreenClosed = false;  // this level's start board has been closed
 	bool ranSinceLoad = false;       // the level has simulated a frame since it was loaded
@@ -188,52 +187,40 @@ void EnsureCheats() {
 }
 
 bool ChallengeMode();
+bool WatchFlags();
+void FinishAtFlags();
 
-// In Challenge Mode the game opens its leaderboard a few seconds into every level load and again at the finish
-// flags, and pauses for it until a button is pressed. During practice nobody is waiting to read those: around
-// the moments they come up, a pause is answered by closing them (what their own Continue button does, and SAR's
-// sar_disable_challenge_stats_hud). A pause at any other time is the player's own.
-void ExpectFinishScreen() {
-	if (!ChallengeMode()) return;
-	g.closeScreensUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-	g.pausedFrames = 0;
-}
-
+// In Challenge Mode the game opens its leaderboard a few seconds into every level load, and pauses for it until
+// a button is pressed. That one would stall the run playing itself up to the part, so while an attempt is being
+// set up, a pause in the level's first seconds is answered by closing the board (what its own Continue button
+// does, and SAR's sar_disable_challenge_stats_hud). The board at the finish flags is the game's own moment and
+// is left alone, as is any other pause: the menu is the player's.
 bool GameScreenDue() {
-	if (std::chrono::steady_clock::now() <= g.closeScreensUntil) return true;
-	if (g.mode == Mode::Idle || !ChallengeMode()) return false;
-	// The level-start board comes up once, some seconds into the level (three in most, ten in some) ...
+	if (!ChallengeMode() || g.startScreenClosed) return false;
+	if (g.mode == Mode::Idle || g.mode == Mode::Done || g.mode == Mode::Reloading) return false;
+	// (the board comes up once, some seconds into the level: three in most, ten in some)
 	constexpr float kStartScreenSeconds = 20;
-	if (!g.startScreenClosed && engine::TickCount() * engine::TickInterval() < kStartScreenSeconds) return true;
-	// ... and the finish board when somebody reaches the flags: about when the run did, or when a person has
-	// come nearly as far as the run went
-	constexpr int kNearFinishTicks = 90;
-	int nearFinish = g.route.timerEnd - kNearFinishTicks;
-	if (g.cursor >= nearFinish) return true;
-	for (const Slot &slot : g.slots)
-		if (slot.entIndex && slot.progress >= nearFinish) return true;
-	return false;
+	return engine::TickCount() * engine::TickInterval() < kStartScreenSeconds;
 }
 
 void OnPausedFrame() {
 	// (a level being loaded doesn't simulate either, before anything ran in it: no board is up then, and
 	// taking those frames for one would count the start board as closed before it comes)
-	if (!g.ranSinceLoad || !GameScreenDue()) return;
+	if (!g.ranSinceLoad) return;
+	// The finish board pauses the game the moment the flags are touched: the finish is noticed here, so that
+	// the time is worked out from that moment (it is shown when the game runs again)
+	if (g.mode == Mode::Run && !g.replaying && WatchFlags()) FinishAtFlags();
+	if (!GameScreenDue()) return;
 	int frame = g.pausedFrames++;
 	if (frame % 20 != 0) return;
-	// (the level-start board closes on its own command; the finish board is a menu window)
 	engine::Execute(frame % 40 == 0 ? "-leaderboard 4" : "gameui_allowescape; gameui_hide");
 }
 
 void OnRunningFrame() {
-	// (in co-op the finish board comes up without pausing the game: it is closed on running frames)
-	if (engine::MaxClients() > 1 && std::chrono::steady_clock::now() <= g.closeScreensUntil && engine::TickCount() % 15 == 0)
-		engine::Execute("gameui_allowescape; gameui_hide");
 	g.ranSinceLoad = true;
 	if (g.pausedFrames == 0) return;
-	// The screen came and went: any later pause is the player's
+	// The start board came and went: any later pause is the player's
 	g.pausedFrames = 0;
-	g.closeScreensUntil = {};
 	g.startScreenClosed = true;
 }
 
@@ -1091,6 +1078,7 @@ void ReloadLevel() {
 	g.mode = Mode::Reloading;
 	Flash(2, "restarting the level...");
 	engine::FlushScript();
+	engine::Execute("unpause");  // (the finish board may still be up: the level change needs the game running)
 	engine::Execute("sv_bonus_challenge %d", ChallengeMode() ? 1 : 0);
 	engine::Execute("changelevel %s", g.route.map.c_str());
 }
@@ -1478,7 +1466,6 @@ void Finish(bool atFlags) {
 	              SignedTime((ticks - record) * dt).c_str());
 	g.mode = Mode::Done;
 	g.doneTicks = 0;
-	ExpectFinishScreen();
 }
 
 // In Challenge Mode the level's finish is its flags: the game puts an end node at the exit, ends the timer when
@@ -1559,7 +1546,6 @@ void TickWatch() {
 		engine::Print("Watched the run to its end (%s).%c", route::FormatTime(g.route.RunTime()).c_str(), 10);
 		g.mode = Mode::Done;
 		g.doneTicks = 0;
-		ExpectFinishScreen();
 	}
 }
 
