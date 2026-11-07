@@ -122,6 +122,10 @@ struct Session {
 	bool snapshotLoading = false; // snap_load has been asked for: the level's tick count jumps back when it is done
 	std::chrono::steady_clock::time_point snapshotAskedAt{};
 	int lastTick = 0;
+	bool queuePinned = false;     // queued rendering switched off for save states (see SingleThreadedRendering)
+	int savedQueueMode = -1;      // mat_queue_mode as it was before
+	bool retryAsked = false;      // the game's own restart (the finish board's Replay Map) asked for a retry
+	bool closeScreensAfterRestore = false;  // that retry is a save state on its way: close the boards again when it lands
 	bool savesOff = false;        // the game's saving was switched off for practice (and is switched back on at the end)
 	bool levelTouched = false;    // the trainer has worked in this map load: nothing done in it may count as a run
 	bool resumeAfterLoad = false; // the level went away in the middle of an attempt: start it again when it is back
@@ -172,6 +176,22 @@ float Distance(Vec3 a, Vec3 b) { return Length(Sub(a, b)); }
 
 int LeadTicks() { return static_cast<int>(g_set.leadIn / g.route.tickInterval + 0.5f); }
 
+// The tick of the run the live game is at. The plugin is called before the game simulates the tick `cursor`, so
+// what it reads of the players (where they are, whether they touched the flags) is the outcome of the tick before.
+// Every time measured in the attempt is taken there: the run's own times are where its players were at the end of
+// a tick, and a person exactly on the run reads 0.00, not a tick slow.
+int LiveTick() { return g.cursor - 1; }
+
+// The run's tick of a finish at the flags, counted as the demos count it (SAR's flags record, the end of every
+// record's time). Measured, not derived: in co-op the plugin sees the flags gone one tick before the demos put
+// the touch (a record replayed through its flags, and a person handed the record's last tenth of a second who
+// then pressed nothing and went slower than the record, both read one tick ahead: Vertical Flings 13.70 against
+// 13.71; Bridge Repulsion the same), so the tick is added there. In single player, where the game simulates two
+// ticks in each frame, what the plugin sees is the demos' tick already (Triple Laser, Laser Stairs and Bridge
+// Intro replayed through their flags: exact). Counted like this, every one of those reads exactly the record.
+int FrameTicks();
+int FlagsTick() { return LiveTick() + (FrameTicks() == 1 ? 1 : 0); }
+
 // ---------------------------------------------------------------------------------------------------------------
 // Acting on the game (all through the helper script and console commands)
 // ---------------------------------------------------------------------------------------------------------------
@@ -199,10 +219,12 @@ void EnsureCheats() {
 }
 
 bool ChallengeMode();
+void RestoreRendering();
+void CloseGameScreens();
 bool WatchFlags();
 void FinishAtFlags();
 void TellBoard();
-bool HoldBoard(const char *command);
+engine::ClientCommandFate HoldBoard(const char *command);
 void ReleaseStaleBoard();
 int TickAtSeconds(float seconds);
 
@@ -334,14 +356,15 @@ int LivePortal(const route::PortalChange &change, const std::vector<int> &player
 // run replayed against it, whose robots are matched by team.
 std::vector<int> PlayersOf(const Route &route);
 
-void ApplyPortalChange(const Route &route, const route::PortalChange &change) {
+// `open`: the portal is open already (its previous change in the run opened it), so it is only moved
+void ApplyPortalChange(const Route &route, const route::PortalChange &change, bool open = false) {
 	const std::vector<int> players = PlayersOf(route);
 	int team = change.actor >= 0 ? route.actors[change.actor].team : 0;
 	if (int portal = LivePortal(change, players)) {
 		// the player's own portal: moved as if they had shot it there, so their next shot pairs with it
 		if (change.active)
-			engine::Script("::PP.PortalMove(%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d)", portal, change.pos.x, change.pos.y, change.pos.z, change.ang.x,
-			               change.ang.y, change.ang.z, team);
+			engine::Script("::PP.PortalMove(%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d)", portal, change.pos.x, change.pos.y, change.pos.z, change.ang.x,
+			               change.ang.y, change.ang.z, team, open ? 1 : 0);
 		else
 			engine::Script("::PP.PortalClose(%d)", portal);
 		return;
@@ -791,9 +814,16 @@ float GroundSpeed(const Route &route, int actor, int tick) {
 	return Length({velocity.x, velocity.y, 0});
 }
 
-std::string SignedTime(float seconds) {
+// The run's clock at `tick`, as shown (see Route::Show: level with the record reads exactly as the record does)
+std::string ShowAt(int tick) { return g.route.Show(tick - g.route.timerStart); }
+
+// The gap between two lengths of time: the difference of the two as shown, so a finish shown "+0.02" next to the
+// record is the difference of the two times on screen. (Counted in hundredths cut off, as the times are.)
+std::string Gap(int ticks, int recordTicks) {
+	int hundredths = route::Hundredths(ticks) - route::Hundredths(recordTicks);
 	char text[32];
-	snprintf(text, sizeof(text), "%+.2f", seconds);
+	int size = std::abs(hundredths);
+	snprintf(text, sizeof(text), "%c%d.%02d", hundredths < 0 ? '-' : '+', size / 100, size % 100);
 	return text;
 }
 
@@ -822,22 +852,21 @@ void UpdateHud(float hold = -1) {
 			else snprintf(text, sizeof(text), "you take over in %.1f", left);
 			SetDeltaColor(ent, true, false);
 			Say(ent, kChDelta, hold, text);
-			if (g.mode == Mode::LeadIn) Say(ent, kChClock, hold, route::FormatTime(std::max(0.0f, g.route.TimeAt(g.cursor))));
+			if (g.mode == Mode::LeadIn) Say(ent, kChClock, hold, ShowAt(std::max(g.cursor, g.route.timerStart)));
 			continue;
 		}
 		if (g.mode == Mode::Watch) {
-			Say(ent, kChClock, hold, route::FormatTime(g.route.TimeAt(std::min(g.cursor, g.route.timerEnd))));
+			Say(ent, kChClock, hold, ShowAt(std::min(g.cursor, g.route.timerEnd)));
 			SetDeltaColor(ent, true, false);
 			Say(ent, kChDelta, hold, "watching the record");
 			continue;
 		}
 
 		// Run (and the finish): the clock, and how far ahead of or behind the record this player is
-		int clock = slot.finished ? slot.finishCursor : g.cursor;
-		float delta = (clock - slot.progress) * dt;
-		Say(ent, kChClock, hold, route::FormatTime(g.route.TimeAt(clock)));
-		SetDeltaColor(ent, false, delta < 0);
-		Say(ent, kChDelta, hold, SignedTime(delta));
+		int clock = slot.finished ? slot.finishCursor : LiveTick();
+		Say(ent, kChClock, hold, ShowAt(clock));
+		SetDeltaColor(ent, false, clock < slot.progress);
+		Say(ent, kChDelta, hold, Gap(clock - g.route.timerStart, slot.progress - g.route.timerStart));
 
 		engine::PlayerState state;
 		if (g_set.speedometer && !slot.finished && engine::GetPlayer(ent, state)) {
@@ -946,6 +975,7 @@ void Stop(bool announce) {
 		g.savesOff = false;
 	}
 	RestoreSpeed();
+	RestoreRendering();
 	ClearScene();
 	if (announce && wasActive) engine::Print("Practice stopped.\n");
 }
@@ -971,6 +1001,24 @@ bool SnapshotsUsable() {
 	return g_set.snapshots && !g.replaying && !RemotePerson() && engine::CommandExists("snap_save") && engine::CommandExists("snap_load");
 }
 
+// ChocolateLoading switches the game's queued rendering off for every save and restore and back on after it. Each
+// switch stops or starts the render thread, which costs a stutter, and the game crashed on that thread a few
+// seconds after a restore ("pure virtual function call" in the queued render calls, mp_coop_laser_2). With save
+// states in use, rendering stays on the main thread for the whole session instead (the setting isn't saved; it is
+// put back when practice stops).
+void SingleThreadedRendering() {
+	if (g.queuePinned) return;
+	g.savedQueueMode = static_cast<int>(engine::CvarFloat("mat_queue_mode", -1));
+	g.queuePinned = true;
+	if (g.savedQueueMode != 0) engine::Execute("mat_queue_mode 0");
+}
+
+void RestoreRendering() {
+	if (!g.queuePinned) return;
+	g.queuePinned = false;
+	if (g.savedQueueMode != 0) engine::Execute("mat_queue_mode %d", g.savedQueueMode);
+}
+
 // Called every tick of a lead-in: takes the snapshot when it is due. The trainer's own bookkeeping is set before
 // the snapshot is stored, so that it holds the same values whether or not a restore brings this plugin's memory
 // back along with the game's.
@@ -986,6 +1034,7 @@ void TakeSnapshotIfDue() {
 	// on a worker, sp_a2_laser_stairs): with snapshots in use they are simulated on the main thread. The cvar is
 	// not saved, so the next game start has the default again.
 	engine::Execute("r_threaded_particles 0");
+	SingleThreadedRendering();
 	engine::Execute("snap_save %s", kSnapshotName);
 }
 
@@ -1007,6 +1056,7 @@ bool RestoreSnapshot(int handover, bool watch) {
 		slot.finished = false;
 	}
 	engine::FlushScript();
+	SingleThreadedRendering();
 	engine::Execute("snap_load %s", kSnapshotName);
 	g.snapshotLoading = true;
 	g.snapshotAskedAt = std::chrono::steady_clock::now();
@@ -1403,7 +1453,12 @@ void PlacePortals() {
 		if (g.mode == Mode::Run && !g.replaying && change.actor >= 0 && change.actor < static_cast<int>(g.slots.size()) &&
 		    g.slots[change.actor].human)
 			continue;
-		ApplyPortalChange(driver, change);
+		// (the run's previous change of this portal says whether it is open now: the attempt began with the
+		// run's portals as they were, and has followed the run's changes since)
+		bool open = false;
+		for (const auto &before : driver.portals)
+			if (before.tick < change.tick && before.portalEnt == change.portalEnt) open = before.active;
+		ApplyPortalChange(driver, change, open);
 	}
 }
 
@@ -1462,26 +1517,29 @@ void TrackPlayers() {
 		// Entering the next part: report this one
 		while (slot.part + 1 < static_cast<int>(g.route.segments.size()) && slot.progress >= g.route.segments[slot.part].endTick) {
 			const route::Segment &part = g.route.segments[slot.part];
-			int ticks = g.cursor - slot.partStart;
+			int ticks = LiveTick() - slot.partStart;
 			int record = part.endTick - std::max(part.startTick, g.handover);
 			bool best = false;
 			if (!g.replaying && part.startTick >= g.handover) RecordBest(g.bestPart, slot.part, ticks, best);
 			char text[128];
-			snprintf(text, sizeof(text), "PART %d%s%s%s%s%s", slot.part + 1, kDot, route::FormatTime(ticks * dt).c_str(), kDot,
-			         SignedTime((ticks - record) * dt).c_str(), best && g.attempts > 1 ? "  \xC2\xB7  BEST" : "");
+			snprintf(text, sizeof(text), "PART %d%s%s%s%s%s", slot.part + 1, kDot, route::FormatHundredths(route::Hundredths(ticks)).c_str(), kDot,
+			         Gap(ticks, record).c_str(), best && g.attempts > 1 ? "  \xC2\xB7  BEST" : "");
 			if (g_set.hud) Say(slot.entIndex, kChFlash, 2.5f, text);
 			slot.part++;
-			slot.partStart = g.cursor;
+			slot.partStart = LiveTick();
 		}
 
 		// (while the Challenge Mode flags stand, they are the finish: see WatchFlags)
 		const Sample &end = g.route.At(static_cast<int>(a), g.route.timerEnd);
 		float toEnd = Distance(state.origin, end.pos);
-		bool arrived = g.replaying ? g.cursor >= LastDrivenTick()
+		// (a replay runs on a few ticks past its end while the flags stand, to see when it touches them: NoteReplayAtFlags)
+		constexpr int kReplayFlagsTicks = 10;
+		bool arrived = g.replaying ? g.cursor >= LastDrivenTick() + (g.flagsUp ? kReplayFlagsTicks : 0)
 		                           : !g.flagsUp && (toEnd < kFinishRadius || (slot.progress >= g.route.timerEnd - 2 && toEnd < 2 * kFinishRadius));
 		if (arrived) {
 			slot.finished = true;
-			slot.finishCursor = g.cursor;
+			// (a replay ends where its run ends, by definition; a person where they were seen arriving)
+			slot.finishCursor = g.replaying ? LastDrivenTick() : LiveTick();
 			slot.progress = g.route.timerEnd;  // level with the run's finish: the gap shown is now the gap in time
 		}
 	}
@@ -1490,21 +1548,19 @@ void TrackPlayers() {
 // The attempt is over: the time it would have made, next to the run's. From a part, the run's time up to the
 // handover counts as the person's own (what the clock has been showing all along).
 void Finish(bool atFlags) {
-	const float dt = g.route.tickInterval;
 	int finish = 0;
 	for (const Slot &slot : g.slots)
 		if (slot.finished) finish = std::max(finish, slot.finishCursor);
 	int ticks = finish - g.handover;
-	int record = g.route.timerEnd - g.handover;
 	bool best = false;
 	if (!g.replaying) RecordBest(g.bestFromPart, g.segment, ticks, best);
 	// (the clock and the gap stay up with their final values; the flash says what ended the attempt)
 	UpdateHud(kLingerSeconds);
-	Flash(4, std::string(atFlags ? "FLAGS" : "FINISH") + kDot + route::FormatTime(g.route.TimeAt(finish)) +
+	Flash(4, std::string(atFlags ? "FLAGS" : "FINISH") + kDot + ShowAt(finish) +
 	             (best && g.attempts > 1 ? std::string(kDot) + "PERSONAL BEST" : ""));
 	engine::Print("%s from part %d: %s%s, record %s (%s)\n", g.replaying ? "Replayed run" : "Attempt", g.segment + 1,
-	              route::FormatTime(g.route.TimeAt(finish)).c_str(), atFlags ? " at the flags" : "", route::FormatTime(g.route.RunTime()).c_str(),
-	              SignedTime((ticks - record) * dt).c_str());
+	              ShowAt(finish).c_str(), atFlags ? " at the flags" : "", ShowAt(g.route.timerEnd).c_str(),
+	              Gap(finish - g.route.timerStart, g.route.timerEnd - g.route.timerStart).c_str());
 	g.mode = Mode::Done;
 	g.doneTicks = 0;
 }
@@ -1520,11 +1576,22 @@ bool WatchFlags() {
 	return true;
 }
 
+// A replayed run is carried through the flags by the trainer, as its players went: the game's flags then say when
+// it got there, measured exactly as an attempt's finish is. That time must be the replayed demo's own; this is the
+// check that the trainer's clock and the demos' agree (prac_replay of the loaded run itself: "0 ticks").
+void NoteReplayAtFlags() {
+	const Route &replayed = g.replay;
+	int tick = DriverTick(FlagsTick());
+	int off = tick - replayed.timerEnd;
+	engine::Print("Replayed run at the flags: %s (its demo: %s, %+d tick%s)\n", replayed.Show(tick - replayed.timerStart).c_str(),
+	              replayed.Show(replayed.timerEnd - replayed.timerStart).c_str(), off, off == 1 || off == -1 ? "" : "s");
+}
+
 void FinishAtFlags() {
 	for (Slot &slot : g.slots) {
 		if (!slot.entIndex || !slot.human || slot.finished) continue;
 		slot.finished = true;
-		slot.finishCursor = g.cursor - 1;
+		slot.finishCursor = FlagsTick();
 		slot.progress = g.route.timerEnd;
 	}
 	TellBoard();
@@ -1541,17 +1608,26 @@ void FinishAtFlags() {
 // right after the time.
 void TellBoard() {
 	if (ChallengeMode() && !g.replaying) {
-		// The time of the tick just simulated (the finish's own), in hundredths cut off as the board shows them
-		engine::SendScoreboard(-1, static_cast<int>(g.route.TimeAt(g.cursor - 1) * 100 + 0.001f));
+		// The time of the tick just simulated (the finish's own), in hundredths as the board shows times
+		engine::SendScoreboard(-1, g.route.ShownHundredths(FlagsTick() - g.route.timerStart));
 	}
 	engine::ReleaseClientCommands();
 	g.boardHeldFrames = 0;
 }
 
-// Whether a command the server sends to a player's console waits for TellBoard: the finish board's opening,
-// while an attempt of the person's own runs towards the flags
-bool HoldBoard(const char *command) {
-	return !strcmp(command, "leaderboard_open 1") && g.mode == Mode::Run && !g.replaying && ChallengeMode() && g.flagsUp;
+// What happens to a command the server sends to a player's console. The finish board's opening waits for
+// TellBoard while an attempt of the person's own runs towards the flags. The start board (the game sends
+// "+leaderboard 4" a few seconds into every Challenge Mode level) never opens during practice: it pauses the game
+// until closed, and an attempt taken over early in the level had that pause land around the handover. (The
+// trainer used to close it a frame later; now it doesn't come at all.)
+engine::ClientCommandFate HoldBoard(const char *command) {
+	if (!strcmp(command, "leaderboard_open 1") && g.mode == Mode::Run && !g.replaying && ChallengeMode() && g.flagsUp)
+		return engine::ClientCommandFate::Hold;
+	if (!strncmp(command, "+leaderboard", 12) && g.hasRoute && MapMatches() && ((g.mode != Mode::Idle && g.mode != Mode::Done) || g.autoPart >= 0)) {
+		g.startScreenClosed = true;
+		return engine::ClientCommandFate::Drop;
+	}
+	return engine::ClientCommandFate::Send;
 }
 
 // A held board that no finish came for (the flags went some other way) goes out after a few frames anyway
@@ -1598,6 +1674,7 @@ void TickLeadIn() {
 		// (the snapshot of this attempt, if one was stored, is for the handover as it is now: a retry asks for it)
 		if (g.snapshotHandover == g.handover) g.snapshotHandover = g.cursor - 1;
 		g.handover = g.cursor - 1;  // (in single player the handover falls on the tick before a frame)
+		for (Slot &slot : g.slots) slot.partStart = g.handover;  // (the first part's time counts from here)
 		g.mode = Mode::Run;
 		ShieldPlayers(true);  // the people are on their own again; bots stay protected
 		HandOverObjects();
@@ -1616,8 +1693,8 @@ void TickWatch() {
 	MarkWorld();
 	if (g.cursor % kHudInterval == 0) UpdateHud();
 	if (++g.cursor > g.route.timerEnd) {
-		Flash(3, "END OF THE RECORD" + std::string(kDot) + route::FormatTime(g.route.RunTime()));
-		engine::Print("Watched the run to its end (%s).%c", route::FormatTime(g.route.RunTime()).c_str(), 10);
+		Flash(3, "END OF THE RECORD" + std::string(kDot) + ShowAt(g.route.timerEnd));
+		engine::Print("Watched the run to its end (%s).%c", ShowAt(g.route.timerEnd).c_str(), 10);
 		g.mode = Mode::Done;
 		g.doneTicks = 0;
 	}
@@ -1639,8 +1716,28 @@ void CheckHandover() {
 	}
 }
 
+// Development: "prac_debug follow <ticks>" prints, for that many ticks after each handover, every person next to the
+// run's player at the same tick: position, velocity, speed. A person who presses nothing should stay on the run
+// for as long as its player pressed nothing either.
+int g_followTicks = 0;
+void FollowTrace() {
+	int since = LiveTick() - g.handover;
+	if (since < 1 || since > g_followTicks || g.replaying) return;
+	for (size_t a = 0; a < g.slots.size(); a++) {
+		const Slot &slot = g.slots[a];
+		engine::PlayerState state;
+		if (!slot.human || !engine::GetPlayer(slot.entIndex, state)) continue;
+		const Sample &s = g.route.At(static_cast<int>(a), LiveTick());
+		Vec3 v = VelocityAt(g.route, static_cast<int>(a), LiveTick());
+		engine::Print("[follow] +%d live %.1f %.1f %.1f v %.0f %.0f %.0f (%.0f) | run %.1f %.1f %.1f v %.0f %.0f %.0f (%.0f) | off %.1f keys %d\n", since,
+		              state.origin.x, state.origin.y, state.origin.z, state.velocity.x, state.velocity.y, state.velocity.z, Length(state.velocity),
+		              s.pos.x, s.pos.y, s.pos.z, v.x, v.y, v.z, Length(v), Distance(state.origin, s.pos), s.buttons);
+	}
+}
+
 void TickRun() {
 	if (g.cursor == g.handover + 2 && !g.replaying) CheckHandover();
+	FollowTrace();
 	DriveSlots();
 	MoveObjects(false);
 	PlacePortals();
@@ -1648,9 +1745,12 @@ void TickRun() {
 	MarkWorld();
 	TrackPlayers();
 	if (g.cursor % kHudInterval == 0) UpdateHud();
-	if (WatchFlags() && !g.replaying) {
-		FinishAtFlags();
-		return;
+	if (WatchFlags()) {
+		if (!g.replaying) {
+			FinishAtFlags();
+			return;
+		}
+		NoteReplayAtFlags();
 	}
 	if (AllTrackedFinished()) {
 		Finish(false);
@@ -1789,7 +1889,7 @@ void CmdInfo(const sdk::CCommand &) {
 	}
 	PrintLines(route::Describe(g.route));
 	for (const auto &event : g.route.events)
-		engine::Print("  %6s  %s\n", route::FormatTime(g.route.TimeAt(event.tick)).c_str(), event.label.c_str());
+		engine::Print("  %6s  %s\n", ShowAt(event.tick).c_str(), event.label.c_str());
 }
 
 int PartArgument(const sdk::CCommand &args, int fallback) {
@@ -1884,7 +1984,7 @@ void CmdReplay(const sdk::CCommand &args) {
 	g.replay = std::move(other);
 	g.replaying = true;
 	engine::Print("Replaying %s (%s) against the loaded run (%s).\n", g.replay.files.empty() ? "run" : g.replay.files[0].c_str(),
-	              route::FormatTime(g.replay.RunTime()).c_str(), route::FormatTime(g.route.RunTime()).c_str());
+	              g.replay.Show(g.replay.timerEnd - g.replay.timerStart).c_str(), ShowAt(g.route.timerEnd).c_str());
 	// The players are driven the whole way, so the "handover" is the end; the lead-in starts before the first part
 	g.worldReached = g.route.lastTick;  // unknown relation to this run's world: start from a fresh level
 	Start(g.route.segments[0].startTick, false);
@@ -1928,13 +2028,13 @@ void CmdCompare(const sdk::CCommand &args) {
 			}
 		}
 		int record = part.endTick - previousRecord, mine = reached - previous;
-		engine::Print("%-5d %-44.44s %8s %8s %8s\n", static_cast<int>(i) + 1, part.name.c_str(), route::FormatTime(record * dt).c_str(),
-		              route::FormatTime(mine * dt).c_str(), SignedTime((mine - record) * dt).c_str());
+		engine::Print("%-5d %-44.44s %8s %8s %8s\n", static_cast<int>(i) + 1, part.name.c_str(), route::FormatHundredths(route::Hundredths(record)).c_str(),
+		              route::FormatHundredths(route::Hundredths(mine)).c_str(), Gap(mine, record).c_str());
 		previous = reached;
 		previousRecord = part.endTick;
 	}
-	engine::Print("%-5s %-44s %8s %8s %8s\n", "total", "", route::FormatTime(g.route.RunTime()).c_str(), route::FormatTime(other.RunTime()).c_str(),
-	              SignedTime(other.RunTime() - g.route.RunTime()).c_str());
+	engine::Print("%-5s %-44s %8s %8s %8s\n", "total", "", ShowAt(g.route.timerEnd).c_str(), other.Show(other.timerEnd - other.timerStart).c_str(),
+	              Gap(other.timerEnd - other.timerStart, g.route.timerEnd - g.route.timerStart).c_str());
 }
 
 void CmdRole(const sdk::CCommand &args) {
@@ -2059,6 +2159,10 @@ void CmdDebug(const sdk::CCommand &args) {
 		g_noPose = atoi(args.Arg(2)) != 0;
 		return;
 	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "follow")) {
+		g_followTicks = std::max(0, atoi(args.Arg(2)));
+		return;
+	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "snapdelay")) {
 		g_snapshotDelayTicks = std::max(1, atoi(args.Arg(2)));
 		return;
@@ -2156,6 +2260,14 @@ void WriteHelperScript() {
 	if (!file) engine::Warn("Couldn't write %s; practice won't work.\n", path.u8string().c_str());
 }
 
+// Closes the Challenge Mode boards and any other game screen, and lets the game run
+void CloseGameScreens() {
+	if (ChallengeMode()) engine::Execute("-leaderboard 4");
+	engine::Execute("gameui_allowescape");
+	engine::Execute("gameui_hide");
+	engine::Execute("unpause");
+}
+
 }  // namespace
 
 void Init() {
@@ -2247,10 +2359,25 @@ void OnFrame(bool simulating) {
 		g.flagsUp = ChallengeMode() && engine::EntityExists(kEndNode);
 		g.flagsGone = false;
 		g.dimmed = false;
+		if (g.closeScreensAfterRestore) CloseGameScreens();
+		g.closeScreensAfterRestore = false;
 	}
 	if (g_scanEdicts) ScanEdicts(tick, restored);
 	g.lastTick = tick;
 	ReleaseStaleBoard();
+	if (g.retryAsked) {
+		// (the finish board's Replay Map, or the menu's Restart Level: the board pauses the game, so this runs
+		// whether or not the level is simulating)
+		g.retryAsked = false;
+		// (the board closes itself when its button is pressed; when it is still up for any reason, the person's
+		// game sends no movement while it is, and the attempt would start without them. A save state comes back
+		// a few frames later, so the closing is repeated once it has: CloseGameScreens)
+		CloseGameScreens();
+		CmdRetry(sdk::CCommand{});
+		g.closeScreensAfterRestore = g.snapshotLoading;
+		engine::FlushScript();
+		return;
+	}
 	if (!simulating) {
 		OnPausedFrame();
 		return;
@@ -2276,6 +2403,15 @@ void OnFrame(bool simulating) {
 	default: break;
 	}
 	engine::FlushScript();
+}
+
+// The game's own "restart the level" (the Challenge Mode finish board's Replay Map sends it, as does the pause
+// menu's Restart Level): while practicing in the route's level it is a retry of the attempt instead, which keeps
+// the lead-in, the save state and the bot. Out of practice the game restarts the level as usual.
+bool OnRestartCommand() {
+	if (!g.hasRoute || !MapMatches() || g.attempts == 0 || g.mode == Mode::Reloading || g.mode == Mode::WaitForPlayers) return false;
+	g.retryAsked = true;
+	return true;
 }
 
 bool OnClientCommand(const sdk::CCommand &args) {

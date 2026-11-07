@@ -116,11 +116,13 @@ when the level's state changed (SAR's records) and what the level's clock showed
   as the run had it.
 - Every run is practiced in Challenge Mode (the restart switches to it), whether or not it was made in it: the
   finish flags and the game's own timer are there, no saves are kept, and a death starts the level again. The
-  leaderboard the game opens a few seconds into the level (which would stall the run playing itself) is closed
-  by the plugin; the one at the flags comes up as it always does, with the attempt's time in its Final box (the
-  game itself shows "-" there with cheats on), and the plugin's time next to the record's shows once it is
-  closed. In single player a death restarts the level and the attempt starts again by itself (in co-op a robot
-  just respawns). `prac_set challenge 0` keeps a run's own mode instead.
+  leaderboard the game opens a few seconds into the level (which pauses the game: it would stall the run playing
+  itself, or land on an early handover) is kept from opening while practicing; the one at the flags comes up as
+  it always does, with the attempt's time in its Final box (the game itself shows "-" there with cheats on), and
+  the plugin's time next to the record's shows once it is closed. Its **Replay Map** button (and the menu's
+  Restart Level) starts the same attempt again, as `prac_retry` does, instead of restarting the level. In
+  single player a death restarts the level and the attempt starts again by itself (in co-op a robot just
+  respawns). `prac_set challenge 0` keeps a run's own mode instead.
 - At the handover you get the run's exact position, aim, speed and portals, and whatever the run was carrying
   at that moment is put in your hands.
 
@@ -154,6 +156,9 @@ restart the level as without save states. Each snapshot takes about 350 MB of me
 plugin keeps one, replaced at every new part. While save states are in use the plugin sets
 `r_threaded_particles 0` (particles simulated on the main thread): particles simulated on the job threads
 crashed the game a moment after some restores (seen on Laser Stairs). The setting lasts until the game closes.
+It also sets `mat_queue_mode 0` (rendering on the main thread) until practice stops: ChocolateLoading switches
+the render thread off and on around every save and restore, and the game crashed on that thread a few seconds
+after restores (Lasers).
 
 ## What a demo gives
 
@@ -162,6 +167,13 @@ crashed the game a moment after some restores (seen on Laser Stairs). The settin
 - Adding the **partner's own demo** gives their exact inputs and aim too.
 - A demo without SAR's data still works, but the clock starts at the spawn rather than the timer, and retries
   can't tell when the level changed (use `prac_set reset reload`).
+- **Times.** A run ends where its demo shows the flags touched, and lasts exactly its board time when the demo
+  has the boards' name (`<Chamber>_<hundredths>_<steam id>_<id>.dem`, as the launcher downloads them): the two
+  players' SAR timers are a tick off the board in about one run in twenty, and some demos have none. Without
+  a board time, the longer of the two SAR timers is used (the board's choice in every such pair checked).
+  Attempts are counted exactly as the demos count the record: a record replayed against itself
+  (`prac_replay` of the loaded demos) prints its time at the flags and "+0 ticks". Times show as the boards
+  show them, and a time level with the record reads exactly as the record does.
 
 ## Limits
 

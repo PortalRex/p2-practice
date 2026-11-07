@@ -64,6 +64,10 @@ public:
 	// Commands the partner types reach the host here (their own game doesn't know them and passes them on)
 	sdk::PluginResult ClientCommand(sdk::Edict *, const sdk::CCommand &args) override {
 		if (loaded_ && args.ArgC() > 0 && !strncmp(args.Arg(0), "prac_", 5) && trainer::OnClientCommand(args)) return sdk::kPluginStop;
+		// (the game's menus send these to the server, so they come through here too, from either player)
+		if (loaded_ && args.ArgC() > 0 && (!_stricmp(args.Arg(0), "restart_level") || !_stricmp(args.Arg(0), "mp_restart_level")) &&
+		    trainer::OnRestartCommand())
+			return sdk::kPluginStop;
 		return sdk::kPluginContinue;
 	}
 

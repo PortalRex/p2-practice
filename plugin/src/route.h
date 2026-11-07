@@ -107,7 +107,8 @@ struct Route {
 	// The server's tick count, counted from the map's load, at demo tick 0 (p2demo::Demo::kNoServerTick when the
 	// demo doesn't say). A level's lifts, doors and timers run on that count.
 	int levelTickAtZero = p2demo::Demo::kNoServerTick;
-	bool timerFromSar = false;          // timerStart comes from SAR's recorded time, not a guess
+	bool timerFromSar = false;          // timerStart comes from SAR's recorded time (or the board's), not a guess
+	int recordHundredths = 0;           // the run's time as its board shows it, when known (0: not known)
 	std::vector<Actor> actors;          // one in single player; co-op: blue first, then orange
 	std::vector<PortalChange> portals;  // in tick order
 	std::vector<Mover> movers;          // objects the run moved, with their recorded paths
@@ -124,12 +125,18 @@ struct Route {
 	const Sample &At(int actor, int tick) const { return actors[actor].samples[ClampTick(tick) - firstTick]; }
 	float RunTime() const { return (timerEnd - timerStart) * tickInterval; }
 	float TimeAt(int tick) const { return (tick - timerStart) * tickInterval; }
+	// A time of the run's clock (`ticks` from its start) as the trainer shows it: in hundredths, and anchored to the
+	// board's own time of the run where that is known, so that a time level with the record reads exactly as the
+	// record does and two times shown differ by the difference of what is shown (see BoardTicks)
+	int ShownHundredths(int ticks) const;
+	std::string Show(int ticks) const;
 	int SegmentAt(int tick) const;
 	int ActorForTeam(int team) const;  // -1 when the route has no such player
 };
 
-// `secondary` is the other player's demo of the same co-op run, or null.
-bool Build(const p2demo::Demo &primary, const p2demo::Demo *secondary, Route &out, std::string &error);
+// `secondary` is the other player's demo of the same co-op run, or null. `boardHundredths` is the run's time on the
+// boards when known (0 if not): the run is then taken to be exactly that long, ending where the demo shows it end.
+bool Build(const p2demo::Demo &primary, const p2demo::Demo *secondary, Route &out, std::string &error, int boardHundredths = 0);
 
 // Reads one or two demo files and builds their route.
 bool Load(const std::vector<std::string> &paths, Route &out, std::string &error);
@@ -139,5 +146,16 @@ std::string Describe(const Route &route);
 
 const char *TeamName(int team);       // "Blue", "Orange", or "Player"
 std::string FormatTime(float seconds);  // 6.46, 1:02.35
+std::string FormatHundredths(int hundredths);
+int Hundredths(int ticks);  // the hundredths below the exact time of `ticks` (60 a second)
+
+// The tick count a board time stands for (0 when none gives it). The boards show the hundredths below the exact
+// time, except that a time that is exactly a whole hundredth sometimes shows one less (the game's float clock
+// comes out a hair under): 633 ticks, 10.55 s, are 10.54 on one run's board entry and 537 ticks 8.95 on another's.
+// So a board time stands for exactly one tick count, but a tick count doesn't always give the same board time.
+int BoardTicks(int hundredths);
+// The board time a run of `name` (the boards' file name: <Chamber>_<hundredths>_<steam id>_<id>.dem) has, if it
+// is one of their demos of `map`; 0 otherwise
+int BoardTimeFromFileName(const std::string &path, const std::string &map);
 
 }  // namespace route

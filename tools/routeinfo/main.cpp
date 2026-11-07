@@ -103,14 +103,14 @@ int Info(const std::vector<std::string> &paths, bool text) {
 	if (!route::Load(paths, route, error)) return text ? (fprintf(stderr, "%s\n", error.c_str()), 1) : Fail(error);
 	if (text) {
 		fputs(route::Describe(route).c_str(), stdout);
-		for (const auto &event : route.events) printf("  %6s  %s\n", route::FormatTime(route.TimeAt(event.tick)).c_str(), event.label.c_str());
+		for (const auto &event : route.events) printf("  %6s  %s\n", route.Show(event.tick - route.timerStart).c_str(), event.label.c_str());
 		return 0;
 	}
 	std::string out = "{\"ok\":true,\"map\":" + Json(route.map) + ",\"name\":" + Json(route.name) + ",\"coop\":" + (route.coop ? "true" : "false") +
 	                  ",\"challenge\":" + (route.challenge ? "true" : "false");
 	char number[96];
 	snprintf(number, sizeof(number), ",\"ticks\":%d,\"time\":%.4f,\"timeText\":", route.timerEnd - route.timerStart, route.RunTime());
-	out += number + Json(route::FormatTime(route.RunTime())) + ",\"players\":[";
+	out += number + Json(route.Show(route.timerEnd - route.timerStart)) + ",\"players\":[";
 	for (size_t i = 0; i < route.actors.size(); i++) {
 		const route::Actor &actor = route.actors[i];
 		out += std::string(i ? "," : "") + "{\"team\":" + Json(TeamKey(actor.team)) + ",\"name\":" + Json(actor.name) + ",\"hasInputs\":" +

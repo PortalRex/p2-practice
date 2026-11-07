@@ -26,10 +26,20 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 }
 
 // Put a player somewhere: position, aim, velocity
+// The script SetOrigin is the game's Teleport, which also tells every screen not to smooth the move: something put
+// in place that way every tick moves in steps of a tick on screen (a robot or ghost driven along the run looked
+// laggy). SetAbsOrigin moves it and leaves the smoothing on. A real jump (a trip through a portal, a new attempt)
+// still goes through Teleport, or the screens would show it sliding across the room.
+::PP.jump <- 64.0
+::PP.Place <- function(e, to) {
+	if ((e.GetOrigin() - to).Length() > jump) e.SetOrigin(to)
+	else e.SetAbsOrigin(to)
+}
+
 ::PP.Mv <- function(index, x, y, z, pitch, yaw, vx, vy, vz) {
 	local p = Player(index)
 	if (p == null) return
-	p.SetOrigin(Vector(x, y, z))
+	Place(p, Vector(x, y, z))
 	p.SetAngles(pitch, yaw, 0)
 	p.SetVelocity(Vector(vx, vy, vz))
 }
@@ -319,7 +329,7 @@ R"nut(
 
 ::PP.Gm <- function(id, x, y, z, yaw) {
 	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return
-	ghosts[id].SetOrigin(Vector(x, y, z))
+	Place(ghosts[id], Vector(x, y, z))
 	ghosts[id].SetAngles(0, yaw, 0)
 }
 
@@ -413,12 +423,14 @@ R"nut(
 	return null
 }
 
-// Open one of a player's own portals somewhere, as if they had shot it there
-::PP.PortalMove <- function(index, x, y, z, pitch, yaw, roll, team) {
+// Open one of a player's own portals somewhere, as if they had shot it there. A portal that is open already is
+// only moved, as a shot moves it: activating it again (SetActivatedState) runs its whole opening once more, and a
+// player falling through the pair at that moment lost speed (100 u/s in the Vertical Flings record's fling).
+::PP.PortalMove <- function(index, x, y, z, pitch, yaw, roll, team, open) {
 	local portal = Portal(index)
 	if (portal == null) return
 	if (team != 0) portal.SetTeam(team)
-	EntFireByHandle(portal, "SetActivatedState", "1", 0, null, null)
+	if (!open) EntFireByHandle(portal, "SetActivatedState", "1", 0, null, null)
 	EntFireByHandle(portal, "NewLocation", x + " " + y + " " + z + " " + pitch + " " + yaw + " " + roll, 0, null, null)
 }
 

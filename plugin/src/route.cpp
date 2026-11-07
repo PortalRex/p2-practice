@@ -550,6 +550,36 @@ const char *TeamName(int team) {
 	return team == kTeamBlue ? "Blue" : team == kTeamOrange ? "Orange" : "Player";
 }
 
+int Hundredths(int ticks) {
+	return ticks < 0 ? -Hundredths(-ticks) : 5 * ticks / 3;
+}
+
+int BoardTicks(int hundredths) {
+	if (hundredths <= 0) return 0;
+	// the hundredths below the exact time; a time that is a whole hundredth can come out one less on the board
+	int ticks = (3 * hundredths + 4) / 5;  // the first tick count at or past the board time
+	return 5 * ticks <= 3 * (hundredths + 1) ? ticks : 0;
+}
+
+std::string FormatHundredths(int hundredths) {
+	char text[32];
+	bool negative = hundredths < 0;
+	if (negative) hundredths = -hundredths;
+	int minutes = hundredths / 6000;
+	if (minutes > 0) snprintf(text, sizeof(text), "%s%d:%02d.%02d", negative ? "-" : "", minutes, hundredths / 100 % 60, hundredths % 100);
+	else snprintf(text, sizeof(text), "%s%d.%02d", negative ? "-" : "", hundredths / 100, hundredths % 100);
+	return text;
+}
+
+int Route::ShownHundredths(int ticks) const {
+	int record = timerEnd - timerStart;
+	if (recordHundredths <= 0) return Hundredths(ticks);
+	int shown = recordHundredths + Hundredths(ticks) - Hundredths(record);
+	return ticks >= 0 ? std::max(0, shown) : shown;  // (the board's hundredth less never makes the start -0.01)
+}
+
+std::string Route::Show(int ticks) const { return FormatHundredths(ShownHundredths(ticks)); }
+
 std::string FormatTime(float seconds) {
 	char text[32];
 	bool negative = seconds < 0;
@@ -562,7 +592,7 @@ std::string FormatTime(float seconds) {
 	return text;
 }
 
-bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &error) {
+bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &error, int boardHundredths) {
 	Route route;
 	route.map = primary.header.map;
 	route.name = maps::ChamberName(route.map);
@@ -684,30 +714,67 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 				if (other.portalEnt == change.portalEnt && other.actor >= 0) change.actor = other.actor;
 	std::stable_sort(route.portals.begin(), route.portals.end(), [](const PortalChange &a, const PortalChange &b) { return a.tick < b.tick; });
 
-	// The run: SAR marks its end (challenge mode flags) and knows its length
+	// The run: SAR marks its end (challenge mode flags) and knows its length. Its end is where the attempts end too
+	// (the trainer watches the same flags), so the run's length is counted back from there.
 	route.timerEnd = route.lastTick;
-	if (!primary.sarFlags.empty()) route.timerEnd = primary.sarFlags.front().tick;
+	bool endKnown = false;
 	int sarTicks = 0;
-	for (const auto &result : primary.sarSpeedruns)
-		if (result.complete) {
-			if (primary.sarFlags.empty()) route.timerEnd = result.tick;
-			sarTicks = result.totalTicks;
+	auto readSar = [&](const Demo &demo, int offset) {
+		if (!endKnown && !demo.sarFlags.empty()) {
+			route.timerEnd = demo.sarFlags.front().tick + offset;
+			endKnown = true;
 		}
+		for (const auto &result : demo.sarSpeedruns)
+			if (result.complete) {
+				if (!endKnown) {
+					route.timerEnd = result.tick + offset;
+					endKnown = true;
+				}
+				// The two players' SAR timers can start a tick apart, and the boards' time is then the longer one
+				// (every such pair in the board archive)
+				sarTicks = std::max(sarTicks, result.totalTicks);
+			}
+	};
+	readSar(primary, 0);
+	if (secondary) readSar(*secondary, secondaryOffset);
 	route.timerEnd = route.ClampTick(route.timerEnd);
+
+	// Without SAR's time, the run starts at the first tick every player exists
+	int spawned = route.firstTick;
+	for (const Actor &actor : route.actors)
+		for (size_t i = 0; i < actor.samples.size(); i++)
+			if (actor.samples[i].present) {
+				spawned = std::max(spawned, route.firstTick + static_cast<int>(i));
+				break;
+			}
+
+	// The board's own time, where known, is the run's length: the demos' SAR timers are a tick off it in about one
+	// run in twenty, and some demos have no SAR timer at all. (Unless it is far from what the demo shows: then the
+	// board's entry and the demo don't belong together, and the demo is what the trainer plays.)
 	// (the clock may have started a little before the demo did: single-player demos begin a few ticks into the map)
 	constexpr int kMaxTicksBeforeDemo = 180;
-	if (sarTicks > 0 && route.timerEnd - sarTicks >= route.firstTick - kMaxTicksBeforeDemo) {
-		route.timerStart = route.timerEnd - sarTicks;
+	int length = sarTicks;
+	int boardTicks = BoardTicks(boardHundredths);
+	if (boardTicks > 0 && endKnown) {
+		int shown = sarTicks > 0 ? sarTicks : route.timerEnd - spawned;
+		int tolerance = sarTicks > 0 ? 6 : 120;
+		if (std::abs(boardTicks - shown) <= tolerance && route.timerEnd - boardTicks >= route.firstTick - kMaxTicksBeforeDemo) {
+			if (sarTicks > 0 && boardTicks != sarTicks)
+				route.notes.push_back("The board time (" + FormatHundredths(boardHundredths) + ") is " + std::to_string(std::abs(boardTicks - sarTicks)) +
+				                      (std::abs(boardTicks - sarTicks) == 1 ? " tick" : " ticks") + " off the demo's SAR timer (" +
+				                      FormatHundredths(Hundredths(sarTicks)) + "): the board's is used.");
+			length = boardTicks;
+			route.recordHundredths = boardHundredths;
+		} else {
+			route.notes.push_back("The board says " + FormatHundredths(boardHundredths) + " but this demo's run is " + FormatHundredths(Hundredths(shown)) +
+			                      " long: the demo's time is used.");
+		}
+	}
+	if (length > 0 && route.timerEnd - length >= route.firstTick - kMaxTicksBeforeDemo) {
+		route.timerStart = route.timerEnd - length;
 		route.timerFromSar = true;
 	} else {
-		// Without SAR's time: from the first tick every player exists
-		route.timerStart = route.firstTick;
-		for (const Actor &actor : route.actors)
-			for (size_t i = 0; i < actor.samples.size(); i++)
-				if (actor.samples[i].present) {
-					route.timerStart = std::max(route.timerStart, route.firstTick + static_cast<int>(i));
-					break;
-				}
+		route.timerStart = spawned;
 		route.notes.push_back("No SAR time in this demo: the clock starts when the players spawn, which may not match the board time.");
 	}
 	if (route.timerEnd <= route.timerStart) {
@@ -789,6 +856,28 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 	return true;
 }
 
+int BoardTimeFromFileName(const std::string &path, const std::string &map) {
+	std::string name = path.substr(path.find_last_of("/\\") + 1);
+	if (name.size() < 4 || _stricmp(name.c_str() + name.size() - 4, ".dem") != 0) return 0;
+	name.resize(name.size() - 4);
+	// <Chamber>_<hundredths>_<steam id>_<id>, the chamber's name without its spaces
+	size_t idAt = name.rfind('_');
+	size_t steamAt = idAt == std::string::npos || idAt == 0 ? std::string::npos : name.rfind('_', idAt - 1);
+	size_t timeAt = steamAt == std::string::npos || steamAt == 0 ? std::string::npos : name.rfind('_', steamAt - 1);
+	if (timeAt == std::string::npos) return 0;
+	auto digits = [&](size_t from, size_t to) {
+		if (to <= from || to - from > 18) return false;
+		for (size_t i = from; i < to; i++)
+			if (name[i] < '0' || name[i] > '9') return false;
+		return true;
+	};
+	if (!digits(timeAt + 1, steamAt) || !digits(steamAt + 1, idAt) || !digits(idAt + 1, name.size()) || steamAt - timeAt - 1 > 7) return 0;
+	std::string chamber = maps::ChamberName(map);
+	chamber.erase(std::remove(chamber.begin(), chamber.end(), ' '), chamber.end());
+	if (_stricmp(chamber.c_str(), name.substr(0, timeAt).c_str()) != 0) return 0;
+	return std::stoi(name.substr(timeAt + 1, steamAt - timeAt - 1));
+}
+
 bool Load(const std::vector<std::string> &paths, Route &out, std::string &error) {
 	if (paths.empty() || paths.size() > 2) {
 		error = "give one demo, or both players' demos of a co-op run";
@@ -805,7 +894,14 @@ bool Load(const std::vector<std::string> &paths, Route &out, std::string &error)
 	// The host's demo knows the most (its own path every tick, SAR's entity inputs): build on it
 	size_t primary = demos.size() == 2 && !IsHostDemo(demos[0]) && IsHostDemo(demos[1]) ? 1 : 0;
 	const Demo *secondary = demos.size() == 2 ? &demos[1 - primary] : nullptr;
-	if (!Build(demos[primary], secondary, out, error)) return false;
+	// A demo downloaded from the boards carries the run's board time in its name (both of a co-op pair the same)
+	int boardHundredths = 0;
+	for (size_t i = 0; i < demos.size(); i++) {
+		int time = BoardTimeFromFileName(paths[i], demos[i].header.map);
+		if (i == 0) boardHundredths = time;
+		else if (time != boardHundredths) boardHundredths = 0;
+	}
+	if (!Build(demos[primary], secondary, out, error, boardHundredths)) return false;
 	out.files = paths;
 	for (const Demo &demo : demos)
 		for (const std::string &warning : demo.warnings) out.notes.push_back(warning);
@@ -815,7 +911,7 @@ bool Load(const std::vector<std::string> &paths, Route &out, std::string &error)
 std::string Describe(const Route &route) {
 	std::string text;
 	char line[256];
-	snprintf(line, sizeof(line), "%s  %s  (%s%s, %d demo%s)\n", route.name.c_str(), FormatTime(route.RunTime()).c_str(),
+	snprintf(line, sizeof(line), "%s  %s  (%s%s, %d demo%s)\n", route.name.c_str(), route.Show(route.timerEnd - route.timerStart).c_str(),
 	         route.coop ? "co-op" : "single player", route.challenge ? ", Challenge Mode" : "", static_cast<int>(route.files.size()),
 	         route.files.size() == 1 ? "" : "s");
 	text += line;
@@ -825,8 +921,8 @@ std::string Describe(const Route &route) {
 	}
 	for (size_t i = 0; i < route.segments.size(); i++) {
 		const Segment &s = route.segments[i];
-		snprintf(line, sizeof(line), "  part %d  %6s - %-6s  %s\n", static_cast<int>(i) + 1, FormatTime(route.TimeAt(s.startTick)).c_str(),
-		         FormatTime(route.TimeAt(s.endTick)).c_str(), s.name.c_str());
+		snprintf(line, sizeof(line), "  part %d  %6s - %-6s  %s\n", static_cast<int>(i) + 1, route.Show(s.startTick - route.timerStart).c_str(),
+		         route.Show(s.endTick - route.timerStart).c_str(), s.name.c_str());
 		text += line;
 	}
 	for (const std::string &note : route.notes) text += "  note: " + note + "\n";

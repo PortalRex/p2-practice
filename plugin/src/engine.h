@@ -71,10 +71,11 @@ bool EntityExists(const char *className);
 // board, which otherwise shows "-" for a run it didn't record. False when the game offers no way.
 bool SendScoreboard(int portals, int hundredths);
 
-// Commands the server sends to players' consoles (engine->ClientCommand, which opens the finish board) pass
-// through `hold` first; the ones it holds wait until ReleaseClientCommands sends them. Installed once (the
+// Commands the server sends to players' consoles (engine->ClientCommand: the Challenge Mode boards open that way)
+// pass through `filter` first: sent, held until ReleaseClientCommands sends them, or dropped. Installed once (the
 // engine's vtable slot is put back by Shutdown). HeldClientCommands says how many wait.
-void HoldClientCommands(bool (*hold)(const char *command));
+enum class ClientCommandFate { Send, Hold, Drop };
+void HoldClientCommands(ClientCommandFate (*filter)(const char *command));
 void ReleaseClientCommands();
 size_t HeldClientCommands();
 void DropHeldClientCommands();

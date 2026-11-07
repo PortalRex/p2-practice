@@ -223,6 +223,15 @@ bool Init(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn server
 
 	if (void *listdemo = FindCommandBase("listdemo")) g_commandVtable = *static_cast<void **>(listdemo);
 	g_svCheats = FindVar("sv_cheats");
+	// Challenge Mode is the cvar sv_bonus_challenge, which the shipped game hides as development-only: the console
+	// answers "Unknown command" to it unless something has made it usable (SAR does). Without its two hiding flags
+	// it is an ordinary cvar, which the trainer sets when it loads a level in a run's mode.
+	constexpr int kFcvarDevelopmentOnly = 1 << 1, kFcvarHidden = 1 << 4;
+	if (void *base = FindCommandBase("sv_bonus_challenge"); base && !IsCommand(base)) {
+		auto *var = static_cast<sdk::ConVar *>(base);
+		var->flags &= ~(kFcvarDevelopmentOnly | kFcvarHidden);
+		if (var->parent) var->parent->flags &= ~(kFcvarDevelopmentOnly | kFcvarHidden);
+	}
 	if (!g_globals || !g_commandVtable || !g_svCheats || !FindCommandBase("script")) {
 		Warn("Not a game P2 Practice understands (no VScript console or cvar system as expected).\n");
 		return false;
@@ -490,7 +499,7 @@ namespace {
 using ClientCommandFn = void(__cdecl *)(void *self, sdk::Edict *edict, const char *format, ...);
 ClientCommandFn g_clientCommand = nullptr;  // the engine's own (or whoever had the slot before)
 void **g_clientCommandSlot = nullptr;
-bool (*g_holdCommand)(const char *) = nullptr;
+ClientCommandFate (*g_holdCommand)(const char *) = nullptr;
 struct HeldCommand {
 	sdk::Edict *edict;
 	std::string text;
@@ -503,7 +512,10 @@ void __cdecl HookedClientCommand(void *self, sdk::Edict *edict, const char *form
 	va_start(args, format);
 	vsnprintf(text, sizeof(text), format, args);
 	va_end(args);
-	if (g_holdCommand && g_holdCommand(text)) {
+	Trace("client", text);
+	ClientCommandFate fate = g_holdCommand ? g_holdCommand(text) : ClientCommandFate::Send;
+	if (fate == ClientCommandFate::Drop) return;
+	if (fate == ClientCommandFate::Hold) {
 		g_heldCommands.push_back({edict, text});
 		return;
 	}
@@ -519,7 +531,7 @@ bool WriteSlot(void **slot, void *value) {
 }
 }  // namespace
 
-void HoldClientCommands(bool (*hold)(const char *command)) {
+void HoldClientCommands(ClientCommandFate (*hold)(const char *command)) {
 	g_holdCommand = hold;
 	if (g_clientCommandSlot || !g_engineServer) return;
 	void **slot = *static_cast<void ***>(g_engineServer) + sdk::slot::ClientCommand;
