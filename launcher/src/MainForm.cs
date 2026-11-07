@@ -48,7 +48,7 @@ namespace P2Practice {
 		RunHeader sign;
 		Words notes, status, libraryLabel;
 		Caption roleCaption, partnerCaption;
-		Option practice, watch, blue, orange, bot, real, ghost, clock, keys, line, loop;
+		Option practice, watch, blue, orange, bot, real, ghost, clock, speedo, line, loop, resetAuto, resetInstant, resetRestart;
 		ColorPick ghostColor;
 		Stepper ghostOpacity;
 		Stepper leadIn, speed;
@@ -465,11 +465,11 @@ namespace P2Practice {
 			ghostOpacity.Tip(tips, "How solid the ghosts are drawn: 100 is opaque, less is see-through.");
 			ghostOpacity.ValueChanged += (s, e) => { if (!building) EnableOptions(); };
 			clock = Choice("On-screen clock", "clock", false, "The run's clock and how far ahead or behind you are.");
-			keys = Choice("Record's keys", "keys", false, "The keys the record holds at each moment.");
+			speedo = Choice("Speed", "gauge", false, "Your speed over the ground, next to the record's at the same point of the route.");
 			line = Choice("Route line", "line", false, "The record's route and portal shots, drawn in the level.");
 			var show = Across(ghost, clock);
 			show.RowCount = 2;
-			show.Controls.Add(keys, 0, 1);
+			show.Controls.Add(speedo, 0, 1);
 			show.Controls.Add(line, 1, 1);
 			AddOption(opt, new Caption(look, "SHOW"), show);
 			AddOption(opt, new Caption(look, "GHOSTS"), Across(ghostColor, new Caption(look, "OPACITY %") { Margin = new Padding(P(8), 0, P(6), 0) }, ghostOpacity));
@@ -479,6 +479,10 @@ namespace P2Practice {
 			speed = new Stepper(look, Options.MinSpeed, Options.MaxSpeed, 0.05, 2) { Margin = Padding.Empty };
 			speed.Tip(tips, "Game speed while you practice: 1 is normal, 0.5 is half speed.");
 			AddOption(opt, new Caption(look, "LEAD-IN"), Across(leadIn, Aside("s"), new Caption(look, "SPEED") { Margin = new Padding(P(22), 0, P(10), 0) }, speed, Aside("×")));
+			resetAuto = Choice("Auto", "auto", true, "A retry is instant when the run records no change of the level since the lead-in's start and the level's clock hasn't run past it (in single player it always has after an attempt); otherwise the level restarts and the run is replayed up to the part.");
+			resetInstant = Choice("Instant", "bolt", true, "A retry always puts you back at once. Buttons, doors and cubes stay as your last attempt left them, so use it on parts where that doesn't matter.");
+			resetRestart = Choice("Restart the level", "tostart", true, "A retry always restarts the level and replays the run up to the part.");
+			AddOption(opt, new Caption(look, "RETRY"), Across(resetAuto, resetInstant, resetRestart));
 			loop = Choice("Start again automatically after the finish", "loop", false, null);
 			AddOption(opt, new Caption(look, "AFTER"), Across(loop));
 			foreach (Control c in opt.Controls) if (c is Caption) c.Height = P(26);
@@ -934,9 +938,10 @@ namespace P2Practice {
 			ghostColor.Chosen = ColorOf(o.GhostColor);
 			ghostOpacity.Value = o.GhostOpacity;
 			clock.Checked = o.Clock;
-			keys.Checked = o.Keys;
+			speedo.Checked = o.Speedometer;
 			line.Checked = o.Line;
 			loop.Checked = o.Loop;
+			(o.Reset == "instant" ? resetInstant : o.Reset == "restart" ? resetRestart : resetAuto).Checked = true;
 			leadIn.Value = o.LeadIn;
 			speed.Value = o.Speed;
 			extra.Box.Text = o.Extra;
@@ -954,9 +959,10 @@ namespace P2Practice {
 			ghostOpacity.Bump(0);
 			o.GhostOpacity = ghostOpacity.Value;
 			o.Clock = clock.Checked;
-			o.Keys = keys.Checked;
+			o.Speedometer = speedo.Checked;
 			o.Line = line.Checked;
 			o.Loop = loop.Checked;
+			o.Reset = resetInstant.Checked ? "instant" : resetRestart.Checked ? "restart" : "auto";
 			leadIn.Bump(0); // (takes a number still being typed)
 			speed.Bump(0);
 			o.LeadIn = leadIn.Value;

@@ -44,7 +44,7 @@ struct Settings {
 	int ghostStyle = kGhostBasic;  // how: kGhostSolid, kGhostWire, kGhostWireLow, kGhostBasic
 	bool hud = true;         // on-screen clock, delta, part
 	bool path = true;        // draw the route and its portal shots in the world (seen by the host)
-	bool keys = true;        // show the keys the recorded player holds
+	bool speedometer = true; // show the person's speed next to the record's
 	bool loop = false;       // start again by itself after the finish
 	float autoReset = 0;     // retry by itself when this many seconds behind (0 = never)
 	float speed = 1;         // game speed while practicing
@@ -153,9 +153,12 @@ constexpr int kHudInterval = 6;  // ticks between text updates
 constexpr float kFinishRadius = 56;
 constexpr float kGhostHideDistance = 44;
 
-// Text channels (game_text has six)
-// (the game draws channel 3 in a larger font than the others: the clock gets it)
-enum Channel { kChTitle = 0, kChSpeed = 1, kChKeys = 2, kChClock = 3, kChFlash = 4, kChSplit = 5 };
+// Text channels (game_text has six; the game draws channel 3 in a larger font than the others and channel 2 in a
+// smaller one): the clock gets the large one, the speed line the small one
+enum Channel { kChDelta = 0, kChSpeed = 2, kChClock = 3, kChFlash = 4 };
+constexpr float kClockY = 0.045f, kDeltaY = 0.108f, kFlashY = 0.215f;  // the lines, from the top of the screen
+constexpr float kLingerSeconds = 600;  // how long the finish stays on screen (until the next attempt or a stop)
+constexpr const char *kDot = "  \xC2\xB7  ";  // a middle dot between the parts of a line
 
 Vec3 Sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 float Length(Vec3 a) { return std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z); }
@@ -279,13 +282,13 @@ bool ShowsHud(const Slot &slot) {
 	return g_set.hud && slot.entIndex && slot.human;
 }
 
+// The clock at the top of the screen with the gap to the record under it, flashes (GO, the parts, the finish) a
+// little lower, and the speed in small print at the bottom left, out of the way
 void SetupHud(int entIndex) {
-	SetText(entIndex, kChTitle, -1, 0.03f, 235, 235, 235);
-	SetText(entIndex, kChClock, -1, 0.07f, 255, 255, 255);
-	SetText(entIndex, kChSplit, -1, 0.15f, 235, 235, 235);
-	SetText(entIndex, kChFlash, -1, 0.30f, 255, 220, 80);
-	SetText(entIndex, kChKeys, -1, 0.74f, 255, 230, 140);
-	SetText(entIndex, kChSpeed, -1, 0.78f, 200, 220, 235);
+	SetText(entIndex, kChClock, -1, kClockY, 255, 255, 255);
+	SetText(entIndex, kChDelta, -1, kDeltaY, 170, 170, 170);
+	SetText(entIndex, kChFlash, -1, kFlashY, 255, 255, 255);
+	SetText(entIndex, kChSpeed, 0.045f, 0.905f, 150, 150, 150);
 }
 
 // Portals the trainer opened through the console because nobody in the game owns them (a robot nobody plays):
@@ -757,14 +760,6 @@ void DrawRoute() {
 // On-screen text
 // ---------------------------------------------------------------------------------------------------------------
 
-std::string KeysText(int buttons) {
-	if (buttons < 0) return "";
-	auto key = [buttons](int bit, const char *name) { return std::string((buttons & bit) ? name : "-"); };
-	return "WR keys   " + key(p2demo::IN_FORWARD, "W") + " " + key(p2demo::IN_MOVELEFT, "A") + " " + key(p2demo::IN_BACK, "S") + " " +
-	       key(p2demo::IN_MOVERIGHT, "D") + "   " + key(p2demo::IN_JUMP, "JUMP") + " " + key(p2demo::IN_DUCK, "DUCK") + "   " +
-	       key(p2demo::IN_ATTACK, "M1") + " " + key(p2demo::IN_ATTACK2, "M2") + " " + key(p2demo::IN_USE, "USE");
-}
-
 // How fast a run's player moved over the ground at `tick`
 float GroundSpeed(const Route &route, int actor, int tick) {
 	Vec3 velocity = VelocityAt(route, actor, tick);
@@ -777,42 +772,22 @@ std::string SignedTime(float seconds) {
 	return text;
 }
 
-// `text`, cut to `limit` characters at a word's end where one is near, with dots to say so.
-std::string Shortened(const std::string &text, size_t limit) {
-	if (text.size() <= limit) return text;
-	size_t cut = text.rfind(' ', limit - 3);
-	if (cut == std::string::npos || cut < limit / 2) cut = limit - 3;
-	return text.substr(0, cut) + "...";
+// The line under the clock: grey for a word on what is going on, the portal colours for the gap to the record
+// (blue while ahead of it, orange while behind)
+void SetDeltaColor(int entIndex, bool grey, bool ahead) {
+	if (grey) SetText(entIndex, kChDelta, -1, kDeltaY, 170, 170, 170);
+	else SetText(entIndex, kChDelta, -1, kDeltaY, ahead ? 60 : 255, ahead ? 170 : 150, ahead ? 255 : 30);
 }
 
-std::string TitleText() {
-	// The game's text line holds about 62 characters at this size; what is over runs off the screen (both ends,
-	// since it is centred). With the screen split between two players, each half holds fewer. The part's name
-	// gets what the rest of the line leaves.
-	constexpr size_t kLineLimit = 62, kSplitLineLimit = 50, kShortestName = 12;
-	bool split = engine::MaxClients() > 1 && !g.botPartner;
-	size_t lineLimit = split ? kSplitLineLimit : kLineLimit;
-	int index = g.route.SegmentAt(std::min(g.cursor, g.route.timerEnd));
-	char start[160];
-	snprintf(start, sizeof(start), "%s   record %s   part %d/%d: ", g.route.name.c_str(), route::FormatTime(g.route.RunTime()).c_str(), index + 1,
-	         static_cast<int>(g.route.segments.size()));
-	size_t used = strlen(start);
-	return start + Shortened(g.route.segments[index].name, std::max(kShortestName, lineLimit > used ? lineLimit - used : 0));
-}
-
-void UpdateHud() {
+// `hold` is how long the lines stay up: by default just past the next update
+void UpdateHud(float hold = -1) {
 	if (!g_set.hud) return;
-	const float hold = kHudInterval * g.route.tickInterval + 0.25f;
+	if (hold < 0) hold = kHudInterval * g.route.tickInterval + 0.25f;
 	const float dt = g.route.tickInterval;
-	std::string title = TitleText();
 	for (size_t a = 0; a < g.slots.size(); a++) {
 		const Slot &slot = g.slots[a];
 		if (!ShowsHud(slot)) continue;
 		int ent = slot.entIndex;
-		Say(ent, kChTitle, hold, title);
-
-		const Sample &wr = g.route.At(static_cast<int>(a), std::min(g.cursor, g.route.timerEnd));
-		if (g_set.keys && g.route.actors[a].hasInputs) Say(ent, kChKeys, hold, KeysText(wr.buttons));
 
 		if (g.mode == Mode::LeadIn || g.mode == Mode::CatchUp) {
 			float left = (g.handover - g.cursor) * dt;
@@ -820,30 +795,32 @@ void UpdateHud() {
 			if (g.mode == Mode::CatchUp) snprintf(text, sizeof(text), "setting up the level...");
 			else if (g.replaying) snprintf(text, sizeof(text), "replay starts in %.1f", left);
 			else snprintf(text, sizeof(text), "you take over in %.1f", left);
-			Say(ent, kChFlash, hold, text);
+			SetDeltaColor(ent, true, false);
+			Say(ent, kChDelta, hold, text);
 			if (g.mode == Mode::LeadIn) Say(ent, kChClock, hold, route::FormatTime(std::max(0.0f, g.route.TimeAt(g.cursor))));
 			continue;
 		}
 		if (g.mode == Mode::Watch) {
-			Say(ent, kChClock, hold, route::FormatTime(g.route.TimeAt(std::min(g.cursor, g.route.timerEnd))) + "   watching the record");
+			Say(ent, kChClock, hold, route::FormatTime(g.route.TimeAt(std::min(g.cursor, g.route.timerEnd))));
+			SetDeltaColor(ent, true, false);
+			Say(ent, kChDelta, hold, "watching the record");
 			continue;
 		}
 
-		// Run: clock, and how far ahead of or behind the record this player is
+		// Run (and the finish): the clock, and how far ahead of or behind the record this player is
 		int clock = slot.finished ? slot.finishCursor : g.cursor;
 		float delta = (clock - slot.progress) * dt;
-		bool ahead = delta < 0;
-		// the portal colours: blue while ahead of the run, orange while behind
-		SetText(ent, kChClock, -1, 0.07f, ahead ? 60 : 255, ahead ? 170 : 150, ahead ? 255 : 30);
-		Say(ent, kChClock, hold, route::FormatTime(g.route.TimeAt(clock)) + "   " + SignedTime(delta));
+		Say(ent, kChClock, hold, route::FormatTime(g.route.TimeAt(clock)));
+		SetDeltaColor(ent, false, delta < 0);
+		Say(ent, kChDelta, hold, SignedTime(delta));
 
 		engine::PlayerState state;
-		if (engine::GetPlayer(ent, state)) {
+		if (g_set.speedometer && !slot.finished && engine::GetPlayer(ent, state)) {
 			// (a replayed run carries the player along: its speed is the replayed run's, the player's own is zero)
 			float speed = g.replaying ? GroundSpeed(Driver(), static_cast<int>(a), DriverTick(g.cursor))
 			                          : Length({state.velocity.x, state.velocity.y, 0});
 			char text[96];
-			snprintf(text, sizeof(text), "speed %.0f   record %.0f", speed, GroundSpeed(g.route, static_cast<int>(a), slot.progress));
+			snprintf(text, sizeof(text), "SPEED %.0f%sRECORD %.0f", speed, kDot, GroundSpeed(g.route, static_cast<int>(a), slot.progress));
 			Say(ent, kChSpeed, hold, text);
 		}
 	}
@@ -1091,7 +1068,7 @@ bool WrongLevelMode() {
 // Loads the level again, in the route's mode. (The game's own restart_level keeps the mode the player is in.)
 void ReloadLevel() {
 	g.mode = Mode::Reloading;
-	Flash(2, "restarting the level...");
+	Flash(2, "RESTARTING THE LEVEL");
 	engine::FlushScript();
 	engine::Execute("unpause");  // (the finish board may still be up: the level change needs the game running)
 	engine::Execute("sv_bonus_challenge %d", ChallengeMode() ? 1 : 0);
@@ -1441,9 +1418,9 @@ void TrackPlayers() {
 			bool best = false;
 			if (!g.replaying && part.startTick >= g.handover) RecordBest(g.bestPart, slot.part, ticks, best);
 			char text[128];
-			snprintf(text, sizeof(text), "part %d   %s  (%s)%s", slot.part + 1, route::FormatTime(ticks * dt).c_str(),
-			         SignedTime((ticks - record) * dt).c_str(), best && g.attempts > 1 ? "  best" : "");
-			if (g_set.hud) Say(slot.entIndex, kChSplit, 2.5f, text);
+			snprintf(text, sizeof(text), "PART %d%s%s%s%s%s", slot.part + 1, kDot, route::FormatTime(ticks * dt).c_str(), kDot,
+			         SignedTime((ticks - record) * dt).c_str(), best && g.attempts > 1 ? "  \xC2\xB7  BEST" : "");
+			if (g_set.hud) Say(slot.entIndex, kChFlash, 2.5f, text);
 			slot.part++;
 			slot.partStart = g.cursor;
 		}
@@ -1472,10 +1449,9 @@ void Finish(bool atFlags) {
 	int record = g.route.timerEnd - g.handover;
 	bool best = false;
 	if (!g.replaying) RecordBest(g.bestFromPart, g.segment, ticks, best);
-	char text[160];
-	snprintf(text, sizeof(text), "%s  %s  (%s)%s", atFlags ? "FLAGS" : "FINISH", route::FormatTime(g.route.TimeAt(finish)).c_str(),
-	         SignedTime((ticks - record) * dt).c_str(), best && g.attempts > 1 ? "   personal best" : "");
-	Flash(4, text);
+	// (the clock and the gap stay up with their final values; the flash says what ended the attempt)
+	UpdateHud(kLingerSeconds);
+	Flash(4, std::string(atFlags ? "FLAGS" : "FINISH") + (best && g.attempts > 1 ? "  \xC2\xB7  PERSONAL BEST" : ""));
 	engine::Print("%s from part %d: %s%s, record %s (%s)\n", g.replaying ? "Replayed run" : "Attempt", g.segment + 1,
 	              route::FormatTime(g.route.TimeAt(finish)).c_str(), atFlags ? " at the flags" : "", route::FormatTime(g.route.RunTime()).c_str(),
 	              SignedTime((ticks - record) * dt).c_str());
@@ -1501,7 +1477,6 @@ void FinishAtFlags() {
 		slot.finishCursor = g.cursor - 1;
 		slot.progress = g.route.timerEnd;
 	}
-	UpdateHud();
 	TellBoard();
 	Finish(true);
 }
@@ -1552,7 +1527,7 @@ void TickLeadIn() {
 		g.mode = Mode::Run;
 		ShieldPlayers(true);  // the people are on their own again; bots stay protected
 		HandOverObjects();
-		Flash(0.8f, g.replaying ? "replay" : "GO");
+		Flash(0.8f, g.replaying ? "REPLAY" : "GO");
 	}
 	g.cursor++;
 }
@@ -1567,7 +1542,7 @@ void TickWatch() {
 	MarkWorld();
 	if (g.cursor % kHudInterval == 0) UpdateHud();
 	if (++g.cursor > g.route.timerEnd) {
-		Flash(3, "end of the record: " + route::FormatTime(g.route.RunTime()));
+		Flash(3, "END OF THE RECORD" + std::string(kDot) + route::FormatTime(g.route.RunTime()));
 		engine::Print("Watched the run to its end (%s).%c", route::FormatTime(g.route.RunTime()).c_str(), 10);
 		g.mode = Mode::Done;
 		g.doneTicks = 0;
@@ -1604,7 +1579,6 @@ void TickRun() {
 		return;
 	}
 	if (AllTrackedFinished()) {
-		UpdateHud();
 		Finish(false);
 		return;
 	}
@@ -1882,8 +1856,8 @@ void PrintSettings() {
 	engine::Print("  ghost %d         show the recorded players\n", g_set.ghost);
 	engine::Print("  ghoststyle %s  how: basic (wireframe, the large shapes), wirelow (the coarse mesh), wire (the full mesh) or solid\n",
 	              g_set.ghostStyle == kGhostSolid ? "solid" : g_set.ghostStyle == kGhostWire ? "wire" : g_set.ghostStyle == kGhostWireLow ? "wirelow" : "basic");
-	engine::Print("  hud %d           clock, delta and part on screen\n", g_set.hud);
-	engine::Print("  keys %d          show the keys the record holds\n", g_set.keys);
+	engine::Print("  hud %d           the clock, the gap to the record and the flashes on screen\n", g_set.hud);
+	engine::Print("  speedometer %d   your speed next to the record's, at the bottom left\n", g_set.speedometer);
 	engine::Print("  path %d          draw the route and portal shots in the level (host only)\n", g_set.path);
 	engine::Print("  partner %d       alone in co-op: a bot plays the other robot's half\n", g_set.partner);
 	engine::Print("  loop %d          start again by itself after the finish\n", g_set.loop);
@@ -1909,7 +1883,7 @@ void CmdSet(const sdk::CCommand &args) {
 	else if (name == "ghost") g_set.ghost = on;
 	else if (name == "ghoststyle") g_set.ghostStyle = value == "solid" ? kGhostSolid : value == "wire" ? kGhostWire : value == "wirelow" ? kGhostWireLow : kGhostBasic;
 	else if (name == "hud") g_set.hud = on;
-	else if (name == "keys") g_set.keys = on;
+	else if (name == "speedometer") g_set.speedometer = on;
 	else if (name == "path") g_set.path = on;
 	else if (name == "partner") g_set.partner = on;
 	else if (name == "loop") g_set.loop = on;

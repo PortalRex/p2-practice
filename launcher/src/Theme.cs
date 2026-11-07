@@ -276,9 +276,10 @@ namespace P2Practice {
 						g.DrawLine(pen, 12, 12, 12, 7.6f);
 						g.DrawLine(pen, 12, 12, 15.3f, 13.9f);
 						break;
-					case "keys": // a cluster of key caps
-						foreach (var k in new[] { new PointF(9, 4.2f), new PointF(2.4f, 11.2f), new PointF(9, 11.2f), new PointF(15.6f, 11.2f) })
-							using (var p = Ui.Round(new RectangleF(k.X, k.Y, 6, 6), 1.3f)) g.FillPath(b, p);
+					case "gauge": // a speedometer: an open arc with a needle
+						g.DrawArc(pen, 4, 5, 16, 16, 150, 240);
+						g.DrawLine(pen, 12, 13, 16.2f, 7.8f);
+						g.FillEllipse(b, 10.4f, 11.4f, 3.2f, 3.2f);
 						break;
 					case "line": // the route through the chamber
 						g.DrawLines(pen, new[] { new PointF(4.6f, 18.4f), new PointF(9.2f, 10), new PointF(14.6f, 14.4f), new PointF(19.4f, 5.6f) });
@@ -325,6 +326,21 @@ namespace P2Practice {
 							g.DrawPath(pen, p);
 						}
 						g.FillEllipse(b, 9, 9, 6, 6);
+						break;
+					case "auto": // the plugin decides: an A
+						g.DrawLines(pen, new[] { new PointF(5.6f, 19.4f), new PointF(12, 4.6f), new PointF(18.4f, 19.4f) });
+						g.DrawLine(pen, 8.3f, 14.2f, 15.7f, 14.2f);
+						break;
+					case "bolt": // at once
+						g.FillPolygon(b, new[] { new PointF(13.4f, 2.6f), new PointF(6.2f, 13.4f), new PointF(11.2f, 13.4f), new PointF(9.6f, 21.4f), new PointF(17.8f, 9.8f), new PointF(12.8f, 9.8f) });
+						break;
+					case "tostart": // back to the level's start: a bar and a triangle pointing at it
+						g.DrawLine(pen, 6, 5.4f, 6, 18.6f);
+						using (var p = new GraphicsPath()) {
+							p.AddPolygon(new[] { new PointF(18.4f, 5.4f), new PointF(8.6f, 12), new PointF(18.4f, 18.6f) });
+							using (var edge = new Pen(ink, 1.6f) { LineJoin = LineJoin.Round }) g.DrawPath(edge, p);
+							g.FillPath(b, p);
+						}
 						break;
 					case "search":
 						g.DrawEllipse(pen, 4.6f, 4.6f, 10, 10);

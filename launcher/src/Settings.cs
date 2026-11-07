@@ -14,11 +14,12 @@ namespace P2Practice {
 		public string GhostColor = "";  // "r g b" (0-255), or "" for the robots' own colours
 		public double GhostOpacity = 100;  // percent
 		public bool Clock = true;       // on-screen clock ("hud")
-		public bool Keys = true;        // the keys the record holds
+		public bool Speedometer = true; // your speed next to the record's
 		public bool Line = true;        // the route drawn in the level ("path")
 		public double LeadIn = 1.5;     // seconds the run plays itself before the player takes over
 		public double Speed = 1.0;      // game speed while practicing
 		public bool Loop;               // start again by itself after the finish
+		public string Reset = "auto";   // how a retry gets back to the part: "auto", "instant" (never restart the level), "restart" (always)
 		public string Extra = "";       // the player's own launch options, appended as typed
 
 		public const double MinLeadIn = 0, MaxLeadIn = 10, MinSpeed = 0.05, MaxSpeed = 4; // the plugin's limits
@@ -36,9 +37,10 @@ namespace P2Practice {
 				case "ghostcolor": GhostColor = ParseColor(value); return true;
 				case "ghostopacity": if (num) GhostOpacity = Math.Max(0, Math.Min(100, Math.Round(d))); return num;
 				case "clock": Clock = on; return true;
-				case "keys": Keys = on; return true;
+				case "speedometer": Speedometer = on; return true;
 				case "line": Line = on; return true;
 				case "loop": Loop = on; return true;
+				case "reset": Reset = value == "instant" || value == "soft" ? "instant" : value == "restart" || value == "reload" ? "restart" : "auto"; return true;
 				case "leadin": if (num) LeadIn = Math.Max(MinLeadIn, Math.Min(MaxLeadIn, d)); return num;
 				case "speed": if (num) Speed = Math.Max(MinSpeed, Math.Min(MaxSpeed, d)); return num;
 				case "extra": Extra = value; return true;
@@ -54,11 +56,12 @@ namespace P2Practice {
 			yield return "ghostcolor=" + GhostColor;
 			yield return "ghostopacity=" + Num(GhostOpacity);
 			yield return "clock=" + (Clock ? 1 : 0);
-			yield return "keys=" + (Keys ? 1 : 0);
+			yield return "speedometer=" + (Speedometer ? 1 : 0);
 			yield return "line=" + (Line ? 1 : 0);
 			yield return "leadin=" + Num(LeadIn);
 			yield return "speed=" + Num(Speed);
 			yield return "loop=" + (Loop ? 1 : 0);
+			yield return "reset=" + Reset;
 			yield return "extra=" + Extra;
 		}
 

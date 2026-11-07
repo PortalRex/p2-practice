@@ -200,10 +200,11 @@ namespace P2Practice {
 			c.Add("prac_set ghostcolor " + (o.GhostColor == "" ? "team" : o.GhostColor));
 			c.Add("prac_set ghostopacity " + Options.Num(o.GhostOpacity));
 			c.Add("prac_set hud " + (o.Clock ? 1 : 0));
-			c.Add("prac_set keys " + (o.Keys ? 1 : 0));
+			c.Add("prac_set speedometer " + (o.Speedometer ? 1 : 0));
 			c.Add("prac_set path " + (o.Line ? 1 : 0));
 			c.Add("prac_set speed " + Options.Num(o.Speed));
 			c.Add("prac_set loop " + (o.Loop ? 1 : 0));
+			c.Add("prac_set reset " + (o.Reset == "instant" ? "soft" : o.Reset == "restart" ? "reload" : "auto"));
 			c.Add("prac_set partner " + (r.Coop && o.RealPartner ? 0 : 1));
 			// with a real partner the host is ATLAS and the client P-body, as always: nothing to choose
 			c.Add("prac_role " + (bot ? (o.Orange ? "orange" : "blue") : "auto"));

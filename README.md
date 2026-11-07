@@ -5,10 +5,10 @@ it puts you on that run's route, in the real game:
 
 - **Ghosts** of the recorded players run the route beside you, animated the way the game animates a player,
   drawn as wireframes in their portal colours (or as solid robots, if you prefer).
-- **A live clock** shows how far ahead of or behind the run you are, with a split for every part. At the
-  Challenge Mode flags you get the time your run would have had.
+- **A live clock** shows how far ahead of or behind the run you are, with a split for every part and your speed
+  next to the record's in small print. At the Challenge Mode flags you get the time your run would have had.
 - **Parts.** The run is cut into parts at its portal shots, portal trips and doors. Start from any part, or from
-  any time: the run plays itself up to that moment (you ride along and see the keys it holds), then hands you
+  any time: the run plays itself up to that moment (you ride along), then hands you
   the player with the run's exact position, aim, speed and portals.
 - **Co-op alone.** Pick ATLAS or P-body. The other robot is a real second player, driven through its half of
   the run from the demo: it moves, places its portals and presses its buttons on time, and you can stand on it.
@@ -77,7 +77,8 @@ Settings (`prac_set` alone lists them): `leadin` (seconds the run plays itself b
 `ghost`, `ghoststyle` (`basic`: a wireframe of the model's coarsest mesh with its small triangles left out;
 `wirelow`: that mesh whole; `wire`: the full mesh; `solid`), `ghostcolor` (`team` for the robots' own colours, or
 three numbers 0-255), `ghostopacity` (percent; below 100 the ghosts are see-through),
-`hud`, `keys`, `path`, `partner` (the bot), `loop`, `autoreset` (retry when this far behind), `speed` (game
+`hud` (the clock, the gap to the record and the flashes), `speedometer` (your speed next to the record's, bottom
+left), `path`, `partner` (the bot), `loop`, `autoreset` (retry when this far behind), `speed` (game
 speed), `reset` (`auto`, `soft`, `reload`), `challenge` (practice every run in Challenge Mode, 1), `snapshots`.
 
 The wireframe ghosts are copies of the game's own player models that the plugin writes once, under the game
