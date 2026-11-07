@@ -92,5 +92,7 @@ bool SetPoseParameters(int entIndex, const float values[kPoseParameters]);
 void PrintRawState();
 void PrintUserMessages();
 bool SendTestChat(const char *text);
+int FindBadEdict(char *detail, size_t size, int &inUse, int &highest);
+int NoteEdictChanges(char *out, size_t size);
 
 }  // namespace engine

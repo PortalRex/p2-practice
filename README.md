@@ -130,12 +130,22 @@ in the run's mode. In co-op the driven partner keeps acting the run out after th
 retries of a part with buttons or doors in it restart the level; in single player the level's clock is past the
 part after any attempt, so there Auto restarts every time.
 
-With [ChocolateLoading](https://github.com/Blenderiste09/ChocolateLoading) running (started through its
-`chocoload.exe`) and `prac_set snapshots 1`, the plugin stores a memory snapshot a moment into each lead-in and a
-retry returns to it in about 12 ms instead, then plays the rest of the lead-in. Tested in single player with the
-ghost off: with a ghost shown, the game crashed a third of a second after each restore in testing (the cause is
-in how the two interact and isn't found yet), so leave `ghost 0` with snapshots on. Experimental, off by
-default.
+### Save states
+
+With [ChocolateLoading](https://github.com/Blenderiste09/ChocolateLoading) (RAM snapshots of the whole game)
+the retry rules above don't matter: the plugin stores a snapshot a moment into each lead-in, and a retry puts
+the whole level back as it was then, cubes, doors, buttons and all, in about 10 ms, then plays the rest of the
+lead-in. The launcher's **SAVE STATES** switch does it all: it puts ChocolateLoading's `chocoload.exe` and
+`chocolateloading.dll` (shipped in `chocolateloading\` next to the launcher) into the Portal 2 folder, starts
+the game through `chocoload.exe` (Steam must be running: it starts `portal2.exe` itself) and sets
+`prac_set snapshots 1`. From the console it is the same two things: start the game through `chocoload.exe`
+and set `prac_set snapshots 1`.
+
+The ChocolateLoading shipped here carries one fix that isn't upstream yet (`build/scratch/choco-steam-overlay.patch`):
+with the Steam overlay enabled, Steam's `gameoverlayrenderer.dll` hooks `VirtualAlloc`, and ChocolateLoading's
+check "was this reservation made by game code?" stopped at it, so the engine's 48 MB hunk (where the entity
+table lives) was never part of a snapshot and the game crashed a moment after every restore in which an entity
+had come or gone. The stock build works too if the Steam overlay is turned off for Portal 2.
 
 ## What a demo gives
 

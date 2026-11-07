@@ -540,6 +540,74 @@ bool SetPoseParameters(int entIndex, const float values[kPoseParameters]) {
 	return true;
 }
 
+// Development aid: the edict table checked the way the engine's entity packing walks it (every edict in use
+// has its entity and networkable followed): the first one whose pointers can't be read, described, or -1.
+// `inUse` and `highest` count the table. (After a memory-snapshot restore a corrupted edict shows up here
+// before the engine trips over it.)
+int FindBadEdict(char *detail, size_t size, int &inUse, int &highest) {
+	inUse = 0;
+	highest = -1;
+	if (!g_globals || !g_globals->edicts) return -1;
+	for (int i = 0; i < g_globals->maxEntities && i < kMaxEdicts; i++) {
+		const sdk::Edict &edict = g_globals->edicts[i];
+		if ((edict.stateFlags & sdk::kEdictFree) || !edict.unknown) continue;
+		inUse++;
+		highest = i;
+		bool badEntity = IsBadReadPtr(edict.unknown, 8);
+		bool badNetworkable = !edict.networkable || IsBadReadPtr(edict.networkable, 8) || IsBadReadPtr(*static_cast<void *const *>(edict.networkable), 8);
+		if (badEntity || badNetworkable) {
+			snprintf(detail, size, "edict %d: flags %08x serial %d networkable %p entity %p (%s)", i, edict.stateFlags, edict.networkSerialNumber,
+			         edict.networkable, edict.unknown, badEntity ? "entity unreadable" : "networkable unreadable");
+			return i;
+		}
+	}
+	return -1;
+}
+
+// Development aid: the edicts that came and went since the last call, as "+139 prop_dynamic@054E3E10" and
+// "-139 prop_dynamic" entries in `out` (how many, or 0). The first call only takes stock.
+namespace {
+struct EdictMark {
+	int serial = 0;
+	const void *entity = nullptr;
+	char cls[40] = "";
+};
+EdictMark g_marks[kMaxEdicts];
+bool g_marksTaken = false;
+}  // namespace
+
+int NoteEdictChanges(char *out, size_t size) {
+	constexpr int kGetClassName = 3;  // IServerNetworkable
+	if (!g_globals || !g_globals->edicts) return 0;
+	int changes = 0;
+	size_t used = 0;
+	out[0] = 0;
+	for (int i = 0; i < g_globals->maxEntities && i < kMaxEdicts; i++) {
+		const sdk::Edict &edict = g_globals->edicts[i];
+		bool inUse = !(edict.stateFlags & sdk::kEdictFree) && edict.unknown;
+		EdictMark now;
+		if (inUse) {
+			now.serial = edict.networkSerialNumber;
+			now.entity = edict.unknown;
+			const char *name = edict.networkable && !IsBadReadPtr(edict.networkable, 8) && !IsBadReadPtr(*static_cast<void *const *>(edict.networkable), 16)
+			                       ? CallVirtual<const char *>(edict.networkable, kGetClassName) : nullptr;
+			snprintf(now.cls, sizeof(now.cls), "%s", name && !IsBadReadPtr(name, 4) ? name : "?");
+		}
+		EdictMark &was = g_marks[i];
+		if (g_marksTaken && (inUse != (was.entity != nullptr) || (inUse && (now.serial != was.serial || now.entity != was.entity)))) {
+			changes++;
+			if (used < size - 1) {
+				if (was.entity) used += snprintf(out + used, size - used, " -%d %s", i, was.cls);
+				if (inUse && used < size - 1) used += snprintf(out + used, size - used, " +%d %s@%p", i, now.cls, now.entity);
+				if (used > size - 1) used = size - 1;
+			}
+		}
+		was = now;
+	}
+	g_marksTaken = true;
+	return changes;
+}
+
 void PrintRawState() {
 	Print("prop_dynamic pose parameters at %d\n", g_poseParameterOffset);
 	Print("portal gun fields: active weapon %d, primary portal %d, secondary portal %d\n", g_player.activeWeapon, g_gun.primaryPortal, g_gun.secondaryPortal);

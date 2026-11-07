@@ -20,6 +20,7 @@ namespace P2Practice {
 		public double Speed = 1.0;      // game speed while practicing
 		public bool Loop;               // start again by itself after the finish
 		public string Reset = "auto";   // how a retry gets back to the part: "auto", "instant" (never restart the level), "restart" (always)
+		public bool SaveStates;         // retries through ChocolateLoading's memory snapshots (the game is started through it)
 		public string Extra = "";       // the player's own launch options, appended as typed
 
 		public const double MinLeadIn = 0, MaxLeadIn = 10, MinSpeed = 0.05, MaxSpeed = 4; // the plugin's limits
@@ -41,6 +42,7 @@ namespace P2Practice {
 				case "line": Line = on; return true;
 				case "loop": Loop = on; return true;
 				case "reset": Reset = value == "instant" || value == "soft" ? "instant" : value == "restart" || value == "reload" ? "restart" : "auto"; return true;
+				case "savestates": SaveStates = on; return true;
 				case "leadin": if (num) LeadIn = Math.Max(MinLeadIn, Math.Min(MaxLeadIn, d)); return num;
 				case "speed": if (num) Speed = Math.Max(MinSpeed, Math.Min(MaxSpeed, d)); return num;
 				case "extra": Extra = value; return true;
@@ -62,6 +64,7 @@ namespace P2Practice {
 			yield return "speed=" + Num(Speed);
 			yield return "loop=" + (Loop ? 1 : 0);
 			yield return "reset=" + Reset;
+			yield return "savestates=" + (SaveStates ? 1 : 0);
 			yield return "extra=" + Extra;
 		}
 

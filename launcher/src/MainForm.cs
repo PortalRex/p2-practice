@@ -48,7 +48,7 @@ namespace P2Practice {
 		RunHeader sign;
 		Words notes, status, libraryLabel;
 		Caption roleCaption, partnerCaption;
-		Option practice, watch, blue, orange, bot, real, ghost, clock, speedo, line, loop, resetAuto, resetInstant, resetRestart;
+		Option practice, watch, blue, orange, bot, real, ghost, clock, speedo, line, loop, resetAuto, resetInstant, resetRestart, saveStates;
 		ColorPick ghostColor;
 		Stepper ghostOpacity;
 		Stepper leadIn, speed, takeOver;
@@ -496,6 +496,10 @@ namespace P2Practice {
 			resetInstant = Choice("Instant", "bolt", true, "A retry always puts you back at once. Buttons, doors and cubes stay as your last attempt left them, so use it on parts where that doesn't matter.");
 			resetRestart = Choice("Restart the level", "tostart", true, "A retry always restarts the level and replays the run up to the part.");
 			AddOption(opt, new Caption(look, "RETRY"), Across(resetAuto, resetInstant, resetRestart));
+			saveStates = Choice("Save states through ChocolateLoading", "save", false,
+				"A retry brings the whole level back as it was a moment into the part (cubes, doors, buttons, everything) in a few milliseconds, from a memory snapshot. " +
+				"The game is started through ChocolateLoading's chocoload.exe (Steam must be running); the launcher puts its two files into the Portal 2 folder.");
+			AddOption(opt, new Caption(look, "SAVE STATES"), Across(saveStates));
 			loop = Choice("Start again automatically after the finish", "loop", false, null);
 			AddOption(opt, new Caption(look, "AFTER"), Across(loop));
 			foreach (Control c in opt.Controls) if (c is Caption) c.Height = P(26);
@@ -966,6 +970,7 @@ namespace P2Practice {
 			line.Checked = o.Line;
 			loop.Checked = o.Loop;
 			(o.Reset == "instant" ? resetInstant : o.Reset == "restart" ? resetRestart : resetAuto).Checked = true;
+			saveStates.Checked = o.SaveStates;
 			leadIn.Value = o.LeadIn;
 			speed.Value = o.Speed;
 			extra.Box.Text = o.Extra;
@@ -987,6 +992,7 @@ namespace P2Practice {
 			o.Line = line.Checked;
 			o.Loop = loop.Checked;
 			o.Reset = resetInstant.Checked ? "instant" : resetRestart.Checked ? "restart" : "auto";
+			o.SaveStates = saveStates.Checked;
 			leadIn.Bump(0); // (takes a number still being typed)
 			speed.Bump(0);
 			o.LeadIn = leadIn.Value;

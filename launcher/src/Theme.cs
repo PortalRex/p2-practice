@@ -342,6 +342,12 @@ namespace P2Practice {
 							g.FillPath(b, p);
 						}
 						break;
+					case "save": // a save state: a floppy disk
+						using (var p = Ui.Round(new RectangleF(4.5f, 4.5f, 15, 15), 2.2f)) g.DrawPath(pen, p);
+						g.FillRectangle(b, 8, 4.5f, 8, 5.2f);      // the shutter
+						g.FillRectangle(h, 13, 5.6f, 2, 3);        // its window
+						g.DrawRectangle(pen, 8, 13.2f, 8, 6.3f);   // the label
+						break;
 					case "search":
 						g.DrawEllipse(pen, 4.6f, 4.6f, 10, 10);
 						using (var handle = new Pen(ink, 2.7f) { StartCap = LineCap.Round, EndCap = LineCap.Round }) g.DrawLine(handle, 13.6f, 13.6f, 19, 19);

@@ -255,6 +255,22 @@ int FrameTicks() {
 // the plugin's tick counter sees them. Development: "prac_debug parity 1" tries the odd ones.)
 int g_frameStartParity = 0;
 bool g_noPose = false;  // development: "prac_debug nopose 1" leaves the ghosts' pose parameters alone
+bool g_scanEdicts = false;  // development: "prac_debug edicts 1" checks the edict table every frame (snapshot restores)
+int g_lastBadEdict = -1;
+
+// Development: reports a corrupted edict the moment it appears (and the table's size after a snapshot restore)
+void ScanEdicts(int tick, bool restored) {
+	char detail[200] = "";
+	int inUse, highest;
+	int bad = engine::FindBadEdict(detail, sizeof(detail), inUse, highest);
+	char changes[600];
+	if (engine::NoteEdictChanges(changes, sizeof(changes)) > 0) engine::Print("[edicts] tick %d:%s\n", tick, changes);
+	if (restored) engine::Print("[edicts] tick %d, right after the restore: %d in use, highest %d%s%s\n", tick, inUse, highest, bad >= 0 ? ", BAD " : "", bad >= 0 ? detail : "");
+	if (bad == g_lastBadEdict) return;
+	g_lastBadEdict = bad;
+	if (bad >= 0) engine::Print("[edicts] tick %d: %s (%d in use, highest %d)\n", tick, detail, inUse, highest);
+	else engine::Print("[edicts] tick %d: all %d edicts readable (highest %d)\n", tick, inUse, highest);
+}
 bool g_noGhostMove = false;  // development: "prac_debug noghostmove 1" leaves the ghosts where they are
 bool FrameStartsNow() {
 	return FrameTicks() == 1 || engine::TickCount() % 2 == g_frameStartParity;
@@ -940,7 +956,7 @@ bool WorldEventsBetween(int after, int upTo) {
 // turned "prac_set snapshots 1" on, the trainer stores the level a moment into each lead-in and a retry of the
 // same attempt returns to that instead of restarting the level and replaying the run up to the part.
 constexpr const char *kSnapshotName = "p2practice";
-constexpr int kSnapshotDelayTicks = 3;  // lets the portals and objects just placed (queued inputs) take effect first
+int g_snapshotDelayTicks = 3;  // lets the portals and objects just placed (queued inputs) take effect first (prac_debug snapdelay)
 
 bool SnapshotsUsable() {
 	return g_set.snapshots && !g.replaying && engine::CommandExists("snap_save") && engine::CommandExists("snap_load");
@@ -984,7 +1000,7 @@ bool RestoreSnapshot(int handover, bool watch) {
 
 // Puts everyone on the route at the lead-in's start and lets the run play itself to the handover.
 void BeginLeadIn() {
-	g.snapshotIn = SnapshotsUsable() ? kSnapshotDelayTicks : 0;
+	g.snapshotIn = SnapshotsUsable() ? g_snapshotDelayTicks : 0;
 	g.cursor = g.leadStart;
 	SetPortals(Driver(), DriverTick(g.cursor));
 	g.objectLastDriven.clear();
@@ -1525,6 +1541,8 @@ void TickLeadIn() {
 	if (g.cursor % kHudInterval == 0) UpdateHud();
 	if (g.cursor > g.handover && FrameStartsNow()) {
 		// The players have just been given the run's state at the handover, and a frame begins: it is theirs
+		// (the snapshot of this attempt, if one was stored, is for the handover as it is now: a retry asks for it)
+		if (g.snapshotHandover == g.handover) g.snapshotHandover = g.cursor - 1;
 		g.handover = g.cursor - 1;  // (in single player the handover falls on the tick before a frame)
 		g.mode = Mode::Run;
 		ShieldPlayers(true);  // the people are on their own again; bots stay protected
@@ -1968,6 +1986,17 @@ void CmdDebug(const sdk::CCommand &args) {
 		g_noPose = atoi(args.Arg(2)) != 0;
 		return;
 	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "snapdelay")) {
+		g_snapshotDelayTicks = std::max(1, atoi(args.Arg(2)));
+		return;
+	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "edicts")) {
+		g_scanEdicts = atoi(args.Arg(2)) != 0;
+		g_lastBadEdict = -1;
+		for (size_t a = 0; a < g.ghosts.size(); a++) engine::Print("ghost %d: entity %d\n", static_cast<int>(a), g.ghosts[a].entIndex);
+		ScanEdicts(engine::TickCount(), false);
+		return;
+	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "parity")) {
 		g_frameStartParity = atoi(args.Arg(2)) & 1;
 		return;
@@ -2137,10 +2166,12 @@ void OnFrame(bool simulating) {
 	// A snapshot restore takes a few frames to come: the trainer runs on meanwhile, so when the level's clock
 	// jumps back to the snapshot's, the run's cursor is set back to where the snapshot was taken
 	int tick = engine::TickCount();
-	if (g.snapshotLoading && tick < g.lastTick) {
+	bool restored = g.snapshotLoading && tick < g.lastTick;
+	if (restored) {
 		g.cursor = g.snapshotCursor;
 		g.snapshotLoading = false;
 	}
+	if (g_scanEdicts) ScanEdicts(tick, restored);
 	g.lastTick = tick;
 	if (!simulating) {
 		OnPausedFrame();

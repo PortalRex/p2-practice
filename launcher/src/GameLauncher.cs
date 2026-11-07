@@ -96,6 +96,9 @@ namespace P2Practice {
 	static class GameLauncher {
 		public const string PluginFile = "p2practice.dll";
 		public const string LaunchCfg = "p2practice_launch";
+		// ChocolateLoading (memory snapshots for save states): its loader and DLL, shipped in a folder next to the
+		// launcher and put into the game folder when save states are on
+		public const string ChocoDir = "chocolateloading", ChocoExe = "chocoload.exe", ChocoDll = "chocolateloading.dll";
 		const string SteamAppId = "620";
 		const int MaxConsoleCommand = 500; // the game's console cuts a command off a little after this
 
@@ -122,10 +125,11 @@ namespace P2Practice {
 			string demo, partner, error;
 			if (!StageDemos(r, writes, notes, out demo, out partner, out error)) return Fail(error);
 			if (!InstallPlugin(r.GameDir, running, writes, notes, out error)) return Fail(error);
+			if (r.Options.SaveStates && !InstallChocolate(r.GameDir, running, writes, notes, out error)) return Fail(error);
 
 			var commands = Commands(r, demo, partner);
 			string extra = Regex.Replace(r.Options.Extra ?? "", @"\s+", " ").Trim();
-			string what = r.MapName + ", " + (r.Options.Watch ? "watching from part " : "part ") + Math.Max(1, r.Part);
+			string what = r.MapName + ", " + (r.Options.Watch ? "watching from part " : "part ") + Math.Max(1, r.Part) + (r.Options.SaveStates ? ", save states" : "");
 			string tail = notes.Count > 0 ? "  " + string.Join(" ", notes) : "";
 
 			// The session is a cfg the game executes: loading the plugin, the settings, the run, the map. One "exec"
@@ -162,11 +166,18 @@ namespace P2Practice {
 				return Done("Portal 2 is already running. Open its console and " + (copied ? "paste:  " + paste + "  (it's on the clipboard)." : "type:  " + paste) + tail);
 			}
 
-			// start the game: through Steam when it's running (as the library does), else directly
+			// start the game: through ChocolateLoading's loader for save states (it starts portal2.exe itself, with
+			// Steam up), else through Steam when it's running (as the library does), else directly
 			string args = "-novid +exec " + LaunchCfg + (extra.Length > 0 ? " " + extra : "");
 			string steam = SteamRunning() ? GameLocator.SteamExe() : null;
-			string exe = steam ?? Path.Combine(r.GameDir, "portal2.exe");
-			args = (steam != null ? "-applaunch " + SteamAppId + " " : "-steam ") + args;
+			string exe;
+			if (r.Options.SaveStates) {
+				if (steam == null) return Fail("Save states start the game through ChocolateLoading, which needs Steam running. Start Steam, then launch again.");
+				exe = Path.Combine(r.GameDir, ChocoExe);
+			} else {
+				exe = steam ?? Path.Combine(r.GameDir, "portal2.exe");
+				args = (steam != null ? "-applaunch " + SteamAppId + " " : "-steam ") + args;
+			}
 			string commandLine = "\"" + exe + "\" " + args;
 			if (App.DryRun) {
 				App.Log("launch: " + what);
@@ -206,6 +217,7 @@ namespace P2Practice {
 			c.Add("prac_set speed " + Options.Num(o.Speed));
 			c.Add("prac_set loop " + (o.Loop ? 1 : 0));
 			c.Add("prac_set reset " + (o.Reset == "instant" ? "soft" : o.Reset == "restart" ? "reload" : "auto"));
+			c.Add("prac_set snapshots " + (o.SaveStates ? 1 : 0));
 			c.Add("prac_set partner " + (r.Coop && o.RealPartner ? 0 : 1));
 			// with a real partner the host is ATLAS and the client P-body, as always: nothing to choose
 			c.Add("prac_role " + (bot ? (o.Orange ? "orange" : "blue") : "auto"));
@@ -396,6 +408,33 @@ namespace P2Practice {
 				error = "The plugin couldn't be copied to " + installed + ": " + ex.Message;
 				return false;
 			}
+		}
+
+		// Puts ChocolateLoading's loader and DLL (shipped in a folder next to the launcher) into the game folder when
+		// they are missing or another build; the ones already there do when nothing is shipped.
+		static bool InstallChocolate(string gameDir, bool running, bool writes, List<string> notes, out string error) {
+			error = null;
+			foreach (var file in new[] { ChocoExe, ChocoDll }) {
+				string shipped = Path.Combine(App.ExeDir, ChocoDir, file), installed = Path.Combine(gameDir, file);
+				bool have = File.Exists(installed);
+				if (!File.Exists(shipped)) {
+					if (have) continue;
+					error = "Save states need ChocolateLoading (" + file + ") in the Portal 2 folder, and none is shipped next to P2Practice.exe (" + ChocoDir + "\\). See the README.";
+					return false;
+				}
+				try {
+					if (have && SameContent(shipped, installed)) continue;
+					if (!writes) { notes.Add("Would " + (have ? "update " : "install ") + file + " in the game folder."); continue; }
+					File.Copy(shipped, installed, true);
+					notes.Add(file + (have ? " updated" : " installed") + " in the game folder.");
+				} catch (Exception ex) {
+					if (!(ex is IOException || ex is UnauthorizedAccessException)) throw;
+					if (have) { notes.Add(file + " in the game folder couldn't be updated" + (running ? " while Portal 2 is running" : "") + "; using the one there."); continue; }
+					error = file + " couldn't be copied to " + installed + ": " + ex.Message;
+					return false;
+				}
+			}
+			return true;
 		}
 
 		static bool SameContent(string a, string b) {
