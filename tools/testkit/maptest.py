@@ -302,7 +302,7 @@ def run_case(console, case, state):
     mark = console.mark()
     # (the trainer restarts the level where needed - into Challenge Mode, back onto the level's own clock - and
     # begins the recording itself when the ride starts, so the demo holds the whole of it)
-    console.send(f'prac_debug record {session_name}', 'prac_watch 1')
+    console.send('prac_debug dev 1', f'prac_debug record {session_name}', 'prac_watch 1')
     line = console.wait_for(r'Watched the run to its end', mark, seconds * 4 + 180)
     console.send('stop')
     time.sleep(1.5)

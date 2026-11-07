@@ -1,0 +1,110 @@
+diff --git a/src/arena.cpp b/src/arena.cpp
+index e72b6d3..caa39e6 100644
+--- a/src/arena.cpp
++++ b/src/arena.cpp
+@@ -18,7 +18,9 @@ uintptr_t g_lo = 1, g_hi = 1;   // [g_lo, g_hi) = heap span used by Contains()
+ namespace {
+ 
+ enum : uint32_t { F_FREE = 1, F_PREVFREE = 2, F_FROZEN = 4, F_MASK = 7 };
+-const uint32_t ALIGN = 8, HDR = 8, MIN_BLOCK = 16;
++// Blocks are multiples of 16 and every header sits 8 bytes before a 16-byte boundary, so every payload is
++// 16-byte aligned, as tier0's own heap returns it (the game's SSE code, the paint contacts among it, relies on it).
++const uint32_t ALIGN = 16, HDR = 8, MIN_BLOCK = 16;
+ const uint32_t SL_LOG = 4, SL_COUNT = 1u << SL_LOG;
+ const uint32_t FL_SHIFT = SL_LOG + 3;        // first FL class starts at 128 bytes
+ const uint32_t SMALL = 1u << FL_SHIFT;
+@@ -152,7 +154,7 @@ bool grow(uint32_t need) {
+     uintptr_t delta = ((uintptr_t)need + GROW_MIN + 0xFFFF) & ~(uintptr_t)0xFFFF;
+     uintptr_t new_top = old_top + delta;
+     if (new_top + HDR > g_reserve_end) {
+-        delta = ((g_reserve_end - HDR - old_top) & ~(uintptr_t)7);
++        delta = ((g_reserve_end - HDR - old_top) & ~(uintptr_t)(ALIGN - 1));
+         if (delta < need) return false;
+         new_top = old_top + delta;
+     }
+@@ -277,7 +279,7 @@ bool Init(size_t reserve_bytes) {
+     g_ctl = (Control*)g_base;
+     memset(g_ctl, 0, sizeof(Control));
+     g_ctl->magic = MAGIC;
+-    g_heap_start = (g_base + sizeof(Control) + 63) & ~(uintptr_t)63;
++    g_heap_start = ((g_base + sizeof(Control) + 63) & ~(uintptr_t)63) + HDR;   // (the first payload on a 16-byte boundary)
+     // initial sentinel only; the first allocation grows the heap
+     Hdr* s = (Hdr*)g_heap_start;
+     s->prev_size = 0;
+diff --git a/src/callsite.cpp b/src/callsite.cpp
+index 316de82..859f547 100644
+--- a/src/callsite.cpp
++++ b/src/callsite.cpp
+@@ -1,6 +1,7 @@
+ #define _CRT_SECURE_NO_WARNINGS
+ #include "callsite.h"
+ #include <windows.h>
++#include <stdio.h>
+ #include <string.h>
+ 
+ extern "C" IMAGE_DOS_HEADER __ImageBase;   // this DLL's own base address
+@@ -48,9 +49,11 @@ bool in_modlist(const char* name) {
+ 
+ bool is_passthrough(const char* n) {
+     // Thin API layers between the game and ntdll (kernel32/kernelbase, and the application-
+-    // compatibility shims that may wrap them).
++    // compatibility shims that may wrap them), and Steam's overlay, which hooks VirtualAlloc and
++    // therefore stands between the game and kernelbase on every reservation while it is enabled.
+     return !strcmp(n, "kernelbase.dll") || !strcmp(n, "kernel32.dll") || !strcmp(n, "apphelp.dll") ||
+-           !strcmp(n, "acgenral.dll") || !strcmp(n, "aclayers.dll") || !strcmp(n, "acspecfc.dll");
++           !strcmp(n, "acgenral.dll") || !strcmp(n, "aclayers.dll") || !strcmp(n, "acspecfc.dll") ||
++           !strcmp(n, "gameoverlayrenderer.dll") || !strcmp(n, "gameoverlayrenderer64.dll");
+ }
+ 
+ int classify(uintptr_t addr, const char** name) {
+@@ -102,6 +105,21 @@ void SetGameModules(const char* module_list) {
+     if (strcmp(tmp, g_modlist) != 0) strcpy(g_modlist, tmp);
+ }
+ 
++// Diagnostic: the modules of the frames on the stack, as " name:cls" entries (cls: P pass, S self, G game, O other)
++__declspec(noinline) void DescribeStack(char* out, size_t cap) {
++    out[0] = 0;
++    if (!g_backtrace || cap < 8) return;
++    void* frames[24];
++    USHORT n = g_backtrace(0, 24, frames, nullptr);
++    size_t used = 0;
++    for (USHORT i = 0; i < n && used + 40 < cap; i++) {
++        const char* nm;
++        int c = classify((uintptr_t)frames[i], &nm);
++        used += _snprintf_s(out + used, cap - used, _TRUNCATE, " %s+%x:%c", nm[0] ? nm : "?", (unsigned)((uintptr_t)frames[i] & 0xfffff),
++                            c == C_PASS ? 'P' : c == C_SELF ? 'S' : c == C_GAME ? 'G' : 'O');
++    }
++}
++
+ __declspec(noinline) bool DirectGameCaller(char* owner, size_t olen) {
+     if (!g_backtrace) return false;
+     void* frames[24];
+diff --git a/src/callsite.h b/src/callsite.h
+index 7ee1d1f..ae21e1a 100644
+--- a/src/callsite.h
++++ b/src/callsite.h
+@@ -16,6 +16,7 @@ namespace callsite {
+ // Sets the space separated list of game modules (e.g. "engine.dll client.dll"). Safe to call again;
+ // the list is only rewritten when it changes, because hook threads read it concurrently.
+ void SetGameModules(const char* module_list);
++void DescribeStack(char* out, size_t cap);   // diagnostic: the stack's modules, " name+off:cls" entries
+ 
+ // True if the hooked function was called directly by a game module; `owner` (optional) receives the
+ // module name. Must be called from the hook itself (frames of chocolateloading.dll at the top of the
+diff --git a/src/vatrack.cpp b/src/vatrack.cpp
+index f8211ad..4931def 100644
+--- a/src/vatrack.cpp
++++ b/src/vatrack.cpp
+@@ -70,6 +70,12 @@ LONG NTAPI H_NtAllocateVirtualMemory(HANDLE proc, PVOID* base, ULONG_PTR zero_bi
+     if (status >= 0 && (type & MEM_RESERVE) && proc == CURRENT_PROCESS && base && *base && size && *size >= MIN_RESERVE) {
+         char owner[24];
+         if (callsite::DirectGameCaller(owner, sizeof(owner))) add_region((uintptr_t)*base, *size, owner);
++        else if (*size >= (1u << 20)) {
++            // (diagnostic: a large reservation the walk did not attribute to game code, with its callers)
++            char frames[400];
++            callsite::DescribeStack(frames, sizeof(frames));
++            util::Log("vatrack: not tracked: %u KB at %p, protect %08x, callers:%s", (unsigned)(*size >> 10), *base, (unsigned)protect, frames);
++        }
+     }
+     return status;
+ }

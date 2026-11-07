@@ -10,3 +10,4 @@ demos/
 *.log
 P2Practice.ini
 P2Practice.cache
+dist/

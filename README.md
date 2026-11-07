@@ -30,8 +30,9 @@ a practice level can end up on a leaderboard.
 
 ## Install
 
-1. Copy `p2practice.dll` into the Portal 2 folder (next to `portal2.exe`), or let the launcher do it.
-2. Start the launcher, pick a run, press **Launch**. Or, in the game's console: `plugin_load p2practice`.
+1. Unzip the release anywhere (`P2Practice.exe`, `p2practice.dll`, `p2route.exe`, `chocolateloading\`).
+2. Start `P2Practice.exe`, pick a run, press **Launch**: it puts the plugin into the Portal 2 folder itself. Or
+   copy `p2practice.dll` next to `portal2.exe` and type `plugin_load p2practice` in the game's console.
 
 Load the plugin from a cfg or the console, not with `+plugin_load` if another plugin is loaded that way too:
 the game honours only one `+plugin_load` on its command line.
@@ -141,11 +142,17 @@ the game through `chocoload.exe` (Steam must be running: it starts `portal2.exe`
 `prac_set snapshots 1`. From the console it is the same two things: start the game through `chocoload.exe`
 and set `prac_set snapshots 1`.
 
-The ChocolateLoading shipped here carries one fix that isn't upstream yet (`build/scratch/choco-steam-overlay.patch`):
-with the Steam overlay enabled, Steam's `gameoverlayrenderer.dll` hooks `VirtualAlloc`, and ChocolateLoading's
-check "was this reservation made by game code?" stopped at it, so the engine's 48 MB hunk (where the entity
-table lives) was never part of a snapshot and the game crashed a moment after every restore in which an entity
-had come or gone. The stock build works too if the Steam overlay is turned off for Portal 2.
+ChocolateLoading is Blenderiste09's, shipped with the release with their permission. The build shipped carries
+two fixes (`third_party/chocolateloading/fixes.patch`, explained in `third_party/chocolateloading/README.txt`):
+with the Steam overlay enabled the engine's entity table was left out of snapshots (a crash a moment after a
+restore), and its heap aligned memory to 8 bytes where the game's SSE code needs 16 (a crash on gel maps with
+ChocolateLoading merely loaded). The stock build has both problems.
+
+Snapshots are off with a partner over the network (the snapshot holds this computer's game only): retries then
+restart the level as without save states. Each snapshot takes about 350 MB of memory (pagefile-backed); the
+plugin keeps one, replaced at every new part. While save states are in use the plugin sets
+`r_threaded_particles 0` (particles simulated on the main thread): particles simulated on the job threads
+crashed the game a moment after some restores (seen on Laser Stairs). The setting lasts until the game closes.
 
 ## What a demo gives
 
@@ -189,3 +196,8 @@ launcher\build.bat
   `engine.cpp` is the only file that touches the game, `helper_nut.h` is its VScript half.
 - `tools/routeinfo` is `p2route.exe`, which describes demos for the launcher (`p2route info --text <demo>`).
 - `tools/testkit` starts hidden test copies of the game and runs the map tests (`maptest.py`).
+- `tools/package.ps1` packs a release zip into `dist/`. It takes ChocolateLoading's two files from
+  `launcher/bin/chocolateloading/`: build them from its repository with `third_party/chocolateloading/fixes.patch`
+  applied.
+- `prac_debug` alone prints the plugin's state for bug reports; its development switches (`edicts`, `messages`,
+  `nopose`, ...) answer only after `prac_debug dev 1`.

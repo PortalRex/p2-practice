@@ -115,10 +115,12 @@ struct Session {
 	bool speedChanged = false;
 	// ChocolateLoading snapshot of the level at the start of a lead-in (see TakeSnapshotIfDue)
 	int snapshotHandover = -1;    // the handover its attempt had, -1: no snapshot
+	bool snapshotStartScreenOpen = false;  // the start board hadn't come and gone yet when it was taken
 	bool snapshotWatch = false;
 	int snapshotCursor = 0;       // the run tick the snapshot was taken at
 	int snapshotIn = 0;           // ticks until the snapshot of the lead-in that just began is taken (0: none due)
 	bool snapshotLoading = false; // snap_load has been asked for: the level's tick count jumps back when it is done
+	std::chrono::steady_clock::time_point snapshotAskedAt{};
 	int lastTick = 0;
 	bool savesOff = false;        // the game's saving was switched off for practice (and is switched back on at the end)
 	bool levelTouched = false;    // the trainer has worked in this map load: nothing done in it may count as a run
@@ -958,8 +960,10 @@ bool WorldEventsBetween(int after, int upTo) {
 constexpr const char *kSnapshotName = "p2practice";
 int g_snapshotDelayTicks = 3;  // lets the portals and objects just placed (queued inputs) take effect first (prac_debug snapdelay)
 
+// (Not with a partner over the network: a snapshot holds this computer's game only, and the partner's game would
+// not go back with it. Those retries restart the level instead.)
 bool SnapshotsUsable() {
-	return g_set.snapshots && !g.replaying && engine::CommandExists("snap_save") && engine::CommandExists("snap_load");
+	return g_set.snapshots && !g.replaying && !RemotePerson() && engine::CommandExists("snap_save") && engine::CommandExists("snap_load");
 }
 
 // Called every tick of a lead-in: takes the snapshot when it is due. The trainer's own bookkeeping is set before
@@ -969,9 +973,14 @@ void TakeSnapshotIfDue() {
 	if (g.snapshotIn <= 0 || --g.snapshotIn > 0) return;
 	if (!SnapshotsUsable()) return;
 	g.snapshotHandover = g.handover;
+	g.snapshotStartScreenOpen = !g.startScreenClosed;
 	g.snapshotWatch = g.watch;
 	g.snapshotCursor = g.cursor;
 	engine::FlushScript();
+	// Particles simulated on the job threads crashed a moment after some restores (CParticleCollection::Simulate
+	// on a worker, sp_a2_laser_stairs): with snapshots in use they are simulated on the main thread. The cvar is
+	// not saved, so the next game start has the default again.
+	engine::Execute("r_threaded_particles 0");
 	engine::Execute("snap_save %s", kSnapshotName);
 }
 
@@ -995,6 +1004,7 @@ bool RestoreSnapshot(int handover, bool watch) {
 	engine::FlushScript();
 	engine::Execute("snap_load %s", kSnapshotName);
 	g.snapshotLoading = true;
+	g.snapshotAskedAt = std::chrono::steady_clock::now();
 	return true;
 }
 
@@ -1111,6 +1121,10 @@ int BeforePortalTrip(int handover) {
 
 // Starts an attempt whose handover is at `handover`; reloads the map first when its state is past that point.
 void Start(int handover, bool watch) {
+	// (a snapshot restore asked for a moment ago is still on its way: ChocolateLoading holds one request at a time,
+	// so a second retry now would replace it halfway)
+	if (g.snapshotLoading && std::chrono::steady_clock::now() - g.snapshotAskedAt < std::chrono::seconds(3)) return;
+	g.snapshotLoading = false;  // (one that never came, after a failed restore: the retry goes ahead)
 	if (!g.hasRoute) {
 		engine::Warn("No route loaded. Use prac_load <demo> [partner's demo].\n");
 		return;
@@ -1469,7 +1483,8 @@ void Finish(bool atFlags) {
 	if (!g.replaying) RecordBest(g.bestFromPart, g.segment, ticks, best);
 	// (the clock and the gap stay up with their final values; the flash says what ended the attempt)
 	UpdateHud(kLingerSeconds);
-	Flash(4, std::string(atFlags ? "FLAGS" : "FINISH") + (best && g.attempts > 1 ? "  \xC2\xB7  PERSONAL BEST" : ""));
+	Flash(4, std::string(atFlags ? "FLAGS" : "FINISH") + kDot + route::FormatTime(g.route.TimeAt(finish)) +
+	             (best && g.attempts > 1 ? std::string(kDot) + "PERSONAL BEST" : ""));
 	engine::Print("%s from part %d: %s%s, record %s (%s)\n", g.replaying ? "Replayed run" : "Attempt", g.segment + 1,
 	              route::FormatTime(g.route.TimeAt(finish)).c_str(), atFlags ? " at the flags" : "", route::FormatTime(g.route.RunTime()).c_str(),
 	              SignedTime((ticks - record) * dt).c_str());
@@ -1972,7 +1987,26 @@ void CmdSet(const sdk::CCommand &args) {
 }
 
 // Development aid: what the plugin reads from the game right now
+// The development switches of prac_debug answer only after "prac_debug dev 1" (the map tests and the dev
+// scripts send it); "prac_debug" alone (the status, for bug reports) and the helper script's own "ghost" report
+// always work.
+bool g_devCommands = false;
+
 void CmdDebug(const sdk::CCommand &args) {
+	if (args.ArgC() >= 4 && !strcmp(args.Arg(1), "ghost")) {
+		// (from the helper script: the entity number of the ghost it made for a robot)
+		size_t actor = static_cast<size_t>(atoi(args.Arg(2)));
+		if (actor < g.ghosts.size()) g.ghosts[actor].entIndex = atoi(args.Arg(3));
+		return;
+	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "dev")) {
+		g_devCommands = atoi(args.Arg(2)) != 0;
+		return;
+	}
+	if (args.ArgC() >= 2 && !g_devCommands) {
+		engine::Print("prac_debug - the plugin's state, for bug reports\n");
+		return;
+	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "exec")) {
 		// (development: a console line run as the player, from a console that has no player of its own)
 		engine::Execute("%s", args.ArgS() + strlen("exec "));
@@ -1999,12 +2033,6 @@ void CmdDebug(const sdk::CCommand &args) {
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "parity")) {
 		g_frameStartParity = atoi(args.Arg(2)) & 1;
-		return;
-	}
-	if (args.ArgC() >= 4 && !strcmp(args.Arg(1), "ghost")) {
-		// (from the helper script: the entity number of the ghost it made for a robot)
-		size_t actor = static_cast<size_t>(atoi(args.Arg(2)));
-		if (actor < g.ghosts.size()) g.ghosts[actor].entIndex = atoi(args.Arg(3));
 		return;
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "record")) {
@@ -2170,6 +2198,13 @@ void OnFrame(bool simulating) {
 	if (restored) {
 		g.cursor = g.snapshotCursor;
 		g.snapshotLoading = false;
+		// The game is back at the snapshot's moment and the plugin's memory is not: what the plugin knows about
+		// the level is set back to what held then. (The Challenge Mode start board, the flags, the screen fade.)
+		if (g.snapshotStartScreenOpen) g.startScreenClosed = false;
+		g.pausedFrames = 0;
+		g.flagsUp = ChallengeMode() && engine::EntityExists(kEndNode);
+		g.flagsGone = false;
+		g.dimmed = false;
 	}
 	if (g_scanEdicts) ScanEdicts(tick, restored);
 	g.lastTick = tick;

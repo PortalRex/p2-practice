@@ -26,7 +26,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$splicer = 'H:\Claude\p2-demo-splicer\bin\P2DemoSplicer.exe'
+# (Portal 2 Demo Splicer's exe holds the hidden-launch code; P2_SPLICER points at another copy)
+$splicer = if ($env:P2_SPLICER) { $env:P2_SPLICER } else { 'H:\Claude\p2-demo-splicer\bin\P2DemoSplicer.exe' }
 $asm = [Reflection.Assembly]::LoadFrom($splicer)
 $static = [Reflection.BindingFlags]'Public,NonPublic,Static'
 function Splicer($type, $method) { $asm.GetType("P2DemoSplicer.$type").GetMethod($method, $static) }
