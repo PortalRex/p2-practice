@@ -4,6 +4,7 @@
 // Usage: ghosttest <game folder, e.g. ...\Portal 2\p2practice-test\t1\portal2> [low]
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "ghostmodel.h"
@@ -22,7 +23,9 @@ void Warn(const char *format, ...) {
 int main(int argc, char **argv) {
 	if (argc < 2) return 1;
 	engine::g_dir = argv[1];
-	bool low = argc > 2;
-	for (int team : {3, 2, 0}) printf("team %d: %s\n", team, ghostmodel::Wireframe(team, low).c_str());
+	ghostmodel::Detail detail = ghostmodel::kBasic;
+	if (argc > 2 && !strcmp(argv[2], "low")) detail = ghostmodel::kCoarse;
+	if (argc > 2 && !strcmp(argv[2], "full")) detail = ghostmodel::kFull;
+	for (int team : {3, 2, 0}) printf("team %d: %s\n", team, ghostmodel::Wireframe(team, detail).c_str());
 	return 0;
 }

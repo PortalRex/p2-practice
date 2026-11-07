@@ -11,6 +11,7 @@ namespace P2Practice {
 		public bool Orange;             // co-op alone: play P-body (otherwise ATLAS)
 		public bool RealPartner;        // co-op: a real partner plays the other robot (otherwise a bot does)
 		public bool Ghost = true;       // show the recorded players
+		public string GhostColor = "";  // "r g b" (0-255), or "" for the robots' own colours
 		public bool Clock = true;       // on-screen clock ("hud")
 		public bool Keys = true;        // the keys the record holds
 		public bool Line = true;        // the route drawn in the level ("path")
@@ -31,6 +32,7 @@ namespace P2Practice {
 				case "role": Orange = value == "orange"; return true;
 				case "partner": RealPartner = value == "real"; return true;
 				case "ghost": Ghost = on; return true;
+				case "ghostcolor": GhostColor = ParseColor(value); return true;
 				case "clock": Clock = on; return true;
 				case "keys": Keys = on; return true;
 				case "line": Line = on; return true;
@@ -47,6 +49,7 @@ namespace P2Practice {
 			yield return "role=" + (Orange ? "orange" : "blue");
 			yield return "partner=" + (RealPartner ? "real" : "bot");
 			yield return "ghost=" + (Ghost ? 1 : 0);
+			yield return "ghostcolor=" + GhostColor;
 			yield return "clock=" + (Clock ? 1 : 0);
 			yield return "keys=" + (Keys ? 1 : 0);
 			yield return "line=" + (Line ? 1 : 0);
@@ -54,6 +57,18 @@ namespace P2Practice {
 			yield return "speed=" + Num(Speed);
 			yield return "loop=" + (Loop ? 1 : 0);
 			yield return "extra=" + Extra;
+		}
+
+		// "r g b" with each 0-255, or "" for anything else
+		public static string ParseColor(string value) {
+			var parts = (value ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+			if (parts.Length != 3) return "";
+			var numbers = new int[3];
+			for (int i = 0; i < 3; i++) {
+				if (!int.TryParse(parts[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out numbers[i])) return "";
+				numbers[i] = Math.Max(0, Math.Min(255, numbers[i]));
+			}
+			return numbers[0] + " " + numbers[1] + " " + numbers[2];
 		}
 
 		// numbers as the game's console reads them: a point, no thousands separators, no trailing zeros

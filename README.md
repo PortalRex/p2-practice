@@ -40,7 +40,7 @@ the game honours only one `+plugin_load` on its command line.
 
 `P2Practice.exe` lists the demos in the folders you add (co-op pairs are shown as one run), shows the selected
 run's parts, and starts the game with everything set up: which robot you play, bot or real partner, which part
-to start from, practice or watch. If the game is already running it writes `cfg/p2practice_launch.cfg` and puts
+to start from, practice or watch, what is shown and in which colour the ghosts are drawn. If the game is already running it writes `cfg/p2practice_launch.cfg` and puts
 `exec p2practice_launch` on the clipboard for you to paste into the console.
 
 ## Console commands
@@ -64,14 +64,16 @@ Co-op alone needs the level in split screen: `ss_map mp_coop_doors`. Single play
 Maps are shown by their chamber names (Doors, Laser Stairs); commands take the file names as always.
 
 Settings (`prac_set` alone lists them): `leadin` (seconds the run plays itself before you take over, 1.5),
-`ghost`, `ghoststyle` (`wirelow`: a wireframe of the model's coarsest mesh; `wire`: of its full mesh; `solid`),
+`ghost`, `ghoststyle` (`basic`: a wireframe of the model's coarsest mesh with its small triangles left out;
+`wirelow`: that mesh whole; `wire`: the full mesh; `solid`), `ghostcolor` (`team` for the robots' own colours, or
+three numbers 0-255),
 `hud`, `keys`, `path`, `partner` (the bot), `loop`, `autoreset` (retry when this far behind), `speed` (game
 speed), `reset` (`auto`, `soft`, `reload`), `snapshots`.
 
 The wireframe ghosts are copies of the game's own player models that the plugin writes once, under the game
-folder (`models/p2practice/`, `materials/p2practice/ghost/`). Chell's model has one level of detail, so her
-`wirelow` ghost is the full mesh. A partner over the network doesn't have those files, so with one connected
-the ghosts are shown solid.
+folder (`models/p2practice/`, `materials/p2practice/ghost/`). Chell's model has no coarser mesh (the game never
+shows her from outside), so her ghost is always the full mesh. A partner over the network doesn't have those
+files, so with one connected the ghosts are shown solid.
 
 Useful binds: `bind f5 prac_retry`, `bind f6 prac_next`, `bind f7 prac_prev`.
 
@@ -91,17 +93,21 @@ when the level's state changed (SAR's records) and what the level's clock showed
   moved along the path it took; what moved on its own (thrown, rolling, in a funnel) is thrown the same way
   and left to the game's physics, put back on its path only if it strays. Every button, door and laser ends up
   as the run had it.
-- A run made in Challenge Mode is practiced in Challenge Mode (the restart switches to it): the finish flags and
-  the game's own timer are there, no saves are kept, and a death starts the level again. The leaderboard screens
-  the game opens at the start and the finish of a Challenge Mode level are closed again by the plugin.
+- Every run is practiced in Challenge Mode (the restart switches to it), whether or not it was made in it: the
+  finish flags and the game's own timer are there, no saves are kept, and a death starts the level again. The
+  leaderboard screens the game opens at the start and the finish of a Challenge Mode level are closed again by
+  the plugin. `prac_set challenge 0` keeps a run's own mode instead.
 - At the handover you get the run's exact position, aim, speed and portals, and whatever the run was carrying
   at that moment is put in your hands.
 
 `prac_set reset soft` never restarts, `reload` always.
 
-With [ChocolateLoading](https://github.com/Blenderiste09/ChocolateLoading) running and `prac_set snapshots 1`,
-the plugin stores a memory snapshot at the start of each lead-in and a retry returns to it in milliseconds
-instead. This path is written but has not been tested yet.
+With [ChocolateLoading](https://github.com/Blenderiste09/ChocolateLoading) running (started through its
+`chocoload.exe`) and `prac_set snapshots 1`, the plugin stores a memory snapshot a moment into each lead-in and a
+retry returns to it in about 12 ms instead, then plays the rest of the lead-in. Tested in single player with the
+ghost off: with a ghost shown, the game crashed a third of a second after each restore in testing (the cause is
+in how the two interact and isn't found yet), so leave `ghost 0` with snapshots on. Experimental, off by
+default.
 
 ## What a demo gives
 
@@ -121,10 +127,10 @@ instead. This path is written but has not been tested yet.
   same, and let go when the run's robot did.
 - In co-op the level waits for both players before it starts, so there is no level clock to join: the run's
   clock starts when both robots stand in the level.
-- In a Challenge Mode run the finish is the level's own flags: touching them (both robots, in co-op) ends the
-  attempt and shows the time the flags would have shown. The game itself shows none with cheats on, and nothing
-  is saved or submitted. A run made outside Challenge Mode has no flags: the finish is where the run's player
-  finished.
+- The finish is the level's own Challenge Mode flags: touching them (both robots, in co-op) ends the attempt and
+  shows the time the flags would have shown. The game itself shows none with cheats on, and nothing is saved or
+  submitted. Where a level has no flags (or `prac_set challenge 0` keeps a run out of Challenge Mode), the
+  finish is where the run's player finished.
 - A demo recorded on an altered copy of a map can't be followed on the real one (the level does different
   things); the plugin doesn't detect this, the run just won't line up.
 - The route line and portal marks are debug overlays: only the host sees them.

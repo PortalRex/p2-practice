@@ -32,12 +32,15 @@ using route::Sample;
 
 enum ResetMode { kResetAuto, kResetSoft, kResetReload };
 
-enum GhostStyle { kGhostSolid = 0, kGhostWire = 1, kGhostWireLow = 2 };
+enum GhostStyle { kGhostSolid = 0, kGhostWire = 1, kGhostWireLow = 2, kGhostBasic = 3 };
 
 struct Settings {
 	float leadIn = 1.5f;     // seconds the run plays itself before the players take over
 	bool ghost = true;       // show the recorded players
-	int ghostStyle = 2;      // how: kGhostSolid, kGhostWire, kGhostWireLow
+	bool challenge = true;   // practice every run in Challenge Mode (flags, the game's timer), not only runs made in it
+	bool ghostColorSet = false;  // the ghosts in one colour of the player's choosing rather than their robots' colours
+	int ghostColor[3] = {255, 255, 255};
+	int ghostStyle = kGhostBasic;  // how: kGhostSolid, kGhostWire, kGhostWireLow, kGhostBasic
 	bool hud = true;         // on-screen clock, delta, part
 	bool path = true;        // draw the route and its portal shots in the world (seen by the host)
 	bool keys = true;        // show the keys the recorded player holds
@@ -114,6 +117,8 @@ struct Session {
 	bool snapshotWatch = false;
 	int snapshotCursor = 0;       // the run tick the snapshot was taken at
 	int snapshotIn = 0;           // ticks until the snapshot of the lead-in that just began is taken (0: none due)
+	bool snapshotLoading = false; // snap_load has been asked for: the level's tick count jumps back when it is done
+	int lastTick = 0;
 	bool savesOff = false;        // the game's saving was switched off for practice (and is switched back on at the end)
 	bool levelTouched = false;    // the trainer has worked in this map load: nothing done in it may count as a run
 	bool resumeAfterLoad = false; // the level went away in the middle of an attempt: start it again when it is back
@@ -181,19 +186,21 @@ void EnsureCheats() {
 	engine::Print("sv_cheats turned on for practice.\n");
 }
 
+bool ChallengeMode();
+
 // In Challenge Mode the game opens its leaderboard a few seconds into every level load and again at the finish
 // flags, and pauses for it until a button is pressed. During practice nobody is waiting to read those: around
 // the moments they come up, a pause is answered by closing them (what their own Continue button does, and SAR's
 // sar_disable_challenge_stats_hud). A pause at any other time is the player's own.
 void ExpectFinishScreen() {
-	if (!g.route.challenge) return;
+	if (!ChallengeMode()) return;
 	g.closeScreensUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
 	g.pausedFrames = 0;
 }
 
 bool GameScreenDue() {
 	if (std::chrono::steady_clock::now() <= g.closeScreensUntil) return true;
-	if (g.mode == Mode::Idle || !g.route.challenge) return false;
+	if (g.mode == Mode::Idle || !ChallengeMode()) return false;
 	// The level-start board comes up once, some seconds into the level (three in most, ten in some) ...
 	constexpr float kStartScreenSeconds = 20;
 	if (!g.startScreenClosed && engine::TickCount() * engine::TickInterval() < kStartScreenSeconds) return true;
@@ -250,6 +257,8 @@ int FrameTicks() {
 // Whether the game simulates a frame right after this tick's plugin call. (Single player: the even ticks, as
 // the plugin's tick counter sees them. Development: "prac_debug parity 1" tries the odd ones.)
 int g_frameStartParity = 0;
+bool g_noPose = false;  // development: "prac_debug nopose 1" leaves the ghosts' pose parameters alone
+bool g_noGhostMove = false;  // development: "prac_debug noghostmove 1" leaves the ghosts where they are
 bool FrameStartsNow() {
 	return FrameTicks() == 1 || engine::TickCount() % 2 == g_frameStartParity;
 }
@@ -471,6 +480,21 @@ Rgb TeamColor(int team) {
 	return {110, 255, 170};
 }
 
+// The colour a ghost of `team`'s robot is drawn in: the robot's own, or the one the player chose
+Rgb GhostColor(int team) {
+	if (g_set.ghostColorSet) return {g_set.ghostColor[0], g_set.ghostColor[1], g_set.ghostColor[2]};
+	return TeamColor(team);
+}
+
+// Recolours the ghosts that exist (the setting changed mid-attempt)
+void RecolorGhosts() {
+	for (size_t a = 0; a < g.ghosts.size() && a < g.route.actors.size(); a++) {
+		if (!g.ghosts[a].entIndex) continue;
+		Rgb c = GhostColor(g.route.actors[a].team);
+		engine::Script("::PP.Gc(%d,%d,%d,%d)", static_cast<int>(a), c.r, c.g, c.b);
+	}
+}
+
 const char *TeamModel(int team) {
 	if (team == route::kTeamBlue) return "models/player/ballbot/ballbot.mdl";
 	if (team == route::kTeamOrange) return "models/player/eggbot/eggbot.mdl";
@@ -507,7 +531,7 @@ bool RemotePerson() {
 // be made and everybody playing has the files (they are made on this computer), else the game's own model
 std::string GhostModel(int team) {
 	if (g_set.ghostStyle != kGhostSolid && !RemotePerson()) {
-		std::string wire = ghostmodel::Wireframe(team, g_set.ghostStyle == kGhostWireLow);
+		std::string wire = ghostmodel::Wireframe(team, g_set.ghostStyle == kGhostBasic ? ghostmodel::kBasic : g_set.ghostStyle == kGhostWireLow ? ghostmodel::kCoarse : ghostmodel::kFull);
 		if (!wire.empty()) return wire;
 	}
 	return TeamModel(team);
@@ -535,7 +559,7 @@ void CreateGhosts() {
 	g.ghosts.assign(g.route.actors.size(), Ghost{});
 	for (size_t a = 0; a < g.route.actors.size(); a++) {
 		if (!HasGhost(a)) continue;
-		Rgb c = TeamColor(g.route.actors[a].team);
+		Rgb c = GhostColor(g.route.actors[a].team);
 		engine::Script("::PP.Ghost(%d,\"%s\",\"%s\",%d,%d,%d)", static_cast<int>(a), GhostModel(g.route.actors[a].team).c_str(),
 		               TeamModel(g.route.actors[a].team), c.r, c.g, c.b);
 	}
@@ -665,7 +689,7 @@ void AnimateGhost(size_t a, int tick) {
 	}
 	SetPose(pose, kMoveAhead, ahead);
 	SetPose(pose, kMoveSide, sideways);
-	engine::SetPoseParameters(ghost.entIndex, pose);
+	if (!g_noPose) engine::SetPoseParameters(ghost.entIndex, pose);
 	if (std::fabs(rate - ghost.rate) > 0.05f) {
 		engine::Script("::PP.Gr(%d,%.2f)", static_cast<int>(a), rate);
 		ghost.rate = rate;
@@ -673,6 +697,7 @@ void AnimateGhost(size_t a, int tick) {
 }
 
 void MoveGhosts() {
+	if (g_noGhostMove) return;
 	constexpr float kShowAgainDistance = kGhostHideDistance + 20;
 	int tick = std::min(g.cursor, g.route.timerEnd);
 	for (size_t a = 0; a < g.route.actors.size() && a < g.ghosts.size(); a++) {
@@ -768,15 +793,18 @@ std::string Shortened(const std::string &text, size_t limit) {
 }
 
 std::string TitleText() {
-	// The game's text line holds about 62 characters at this size; what is over runs off the screen. The part's
-	// name gets what the rest of the line leaves.
-	constexpr size_t kLineLimit = 62, kShortestName = 12;
+	// The game's text line holds about 62 characters at this size; what is over runs off the screen (both ends,
+	// since it is centred). With the screen split between two players, each half holds fewer. The part's name
+	// gets what the rest of the line leaves.
+	constexpr size_t kLineLimit = 62, kSplitLineLimit = 50, kShortestName = 12;
+	bool split = engine::MaxClients() > 1 && !g.botPartner;
+	size_t lineLimit = split ? kSplitLineLimit : kLineLimit;
 	int index = g.route.SegmentAt(std::min(g.cursor, g.route.timerEnd));
 	char start[160];
 	snprintf(start, sizeof(start), "%s   record %s   part %d/%d: ", g.route.name.c_str(), route::FormatTime(g.route.RunTime()).c_str(), index + 1,
 	         static_cast<int>(g.route.segments.size()));
 	size_t used = strlen(start);
-	return start + Shortened(g.route.segments[index].name, std::max(kShortestName, kLineLimit > used ? kLineLimit - used : 0));
+	return start + Shortened(g.route.segments[index].name, std::max(kShortestName, lineLimit > used ? lineLimit - used : 0));
 }
 
 void UpdateHud() {
@@ -970,6 +998,7 @@ bool RestoreSnapshot(int handover, bool watch) {
 	}
 	engine::FlushScript();
 	engine::Execute("snap_load %s", kSnapshotName);
+	g.snapshotLoading = true;
 	return true;
 }
 
@@ -1019,7 +1048,7 @@ void Approach() {
 	RegisterGhostModels();
 	CreateGhosts();
 	MakeCatapult();
-	g.flagsUp = g.route.challenge && engine::EntityExists(kEndNode);
+	g.flagsUp = ChallengeMode() && engine::EntityExists(kEndNode);
 	for (const Slot &slot : g.slots)
 		if (ShowsHud(slot)) SetupHud(slot.entIndex);
 
@@ -1052,7 +1081,7 @@ void Approach() {
 // players spawn.
 bool WrongLevelMode() {
 	std::vector<LivePlayer> players = LivePlayers();
-	return !players.empty() && players.front().state.challenge != g.route.challenge;
+	return !players.empty() && players.front().state.challenge != ChallengeMode();
 }
 
 // Loads the level again, in the route's mode. (The game's own restart_level keeps the mode the player is in.)
@@ -1060,7 +1089,7 @@ void ReloadLevel() {
 	g.mode = Mode::Reloading;
 	Flash(2, "restarting the level...");
 	engine::FlushScript();
-	engine::Execute("sv_bonus_challenge %d", g.route.challenge ? 1 : 0);
+	engine::Execute("sv_bonus_challenge %d", ChallengeMode() ? 1 : 0);
 	engine::Execute("changelevel %s", g.route.map.c_str());
 }
 
@@ -1204,6 +1233,13 @@ void DriveSlots() {
 		engine::PlayerState live;
 		if (s.held < 0 && engine::GetPlayer(player, live) && live.held > 0) DropCarried(g.slots[i]);
 	}
+}
+
+// Whether the level is practiced in Challenge Mode: a run made in it always; any other run too unless the
+// setting says otherwise (a chamber run is a Challenge Mode run as far as the boards are concerned, and the
+// flags give the time)
+bool ChallengeMode() {
+	return g.route.challenge || g_set.challenge;
 }
 
 // Whether an object can be given a speed: the physics props (cubes, balls, boxes). A turret is a character
@@ -1831,8 +1867,8 @@ void PrintSettings() {
 	engine::Print("prac_set <name> <value>:\n");
 	engine::Print("  leadin %.1f      seconds the run plays itself before you take over\n", g_set.leadIn);
 	engine::Print("  ghost %d         show the recorded players\n", g_set.ghost);
-	engine::Print("  ghoststyle %s  how: wirelow (wireframe, few lines), wire (wireframe, every edge) or solid\n",
-	              g_set.ghostStyle == kGhostSolid ? "solid" : g_set.ghostStyle == kGhostWire ? "wire" : "wirelow");
+	engine::Print("  ghoststyle %s  how: basic (wireframe, the large shapes), wirelow (the coarse mesh), wire (the full mesh) or solid\n",
+	              g_set.ghostStyle == kGhostSolid ? "solid" : g_set.ghostStyle == kGhostWire ? "wire" : g_set.ghostStyle == kGhostWireLow ? "wirelow" : "basic");
 	engine::Print("  hud %d           clock, delta and part on screen\n", g_set.hud);
 	engine::Print("  keys %d          show the keys the record holds\n", g_set.keys);
 	engine::Print("  path %d          draw the route and portal shots in the level (host only)\n", g_set.path);
@@ -1841,6 +1877,9 @@ void PrintSettings() {
 	engine::Print("  autoreset %.1f   retry by itself when this many seconds behind (0 = off)\n", g_set.autoReset);
 	engine::Print("  speed %.2f       game speed while practicing\n", g_set.speed);
 	engine::Print("  reset %s       back to a part's start: auto, soft (teleport only) or reload (restart the level)\n", resets[g_set.reset]);
+	engine::Print("  challenge %d     practice every run in Challenge Mode (the flags end it); 0: only runs made in it\n", g_set.challenge);
+	if (g_set.ghostColorSet) engine::Print("  ghostcolor %d %d %d  the ghosts' colour (red green blue), or team for their robots' colours\n", g_set.ghostColor[0], g_set.ghostColor[1], g_set.ghostColor[2]);
+	else engine::Print("  ghostcolor team   the ghosts' colour: their robots' colours, or three numbers 0-255 (red green blue)\n");
 	engine::Print("  snapshots %d     retry instantly through ChocolateLoading's snapshots when it is running (experimental)\n", g_set.snapshots);
 }
 
@@ -1854,7 +1893,7 @@ void CmdSet(const sdk::CCommand &args) {
 	bool on = number != 0;
 	if (name == "leadin") g_set.leadIn = std::clamp(number, 0.0f, 10.0f);
 	else if (name == "ghost") g_set.ghost = on;
-	else if (name == "ghoststyle") g_set.ghostStyle = value == "solid" ? kGhostSolid : value == "wire" ? kGhostWire : kGhostWireLow;
+	else if (name == "ghoststyle") g_set.ghostStyle = value == "solid" ? kGhostSolid : value == "wire" ? kGhostWire : value == "wirelow" ? kGhostWireLow : kGhostBasic;
 	else if (name == "hud") g_set.hud = on;
 	else if (name == "keys") g_set.keys = on;
 	else if (name == "path") g_set.path = on;
@@ -1863,6 +1902,24 @@ void CmdSet(const sdk::CCommand &args) {
 	else if (name == "autoreset") g_set.autoReset = std::max(0.0f, number);
 	else if (name == "speed") g_set.speed = std::clamp(number, 0.05f, 4.0f);
 	else if (name == "reset") g_set.reset = value == "soft" ? kResetSoft : value == "reload" ? kResetReload : kResetAuto;
+	else if (name == "challenge") g_set.challenge = on;
+	else if (name == "ghostcolor") {
+		// "team", or three numbers 0-255 (as one quoted value or three arguments)
+		std::string text = value;
+		for (int i = 3; i < args.ArgC(); i++) text += std::string(" ") + args.Arg(i);
+		int r, gg, b;
+		if (text == "team") g_set.ghostColorSet = false;
+		else if (sscanf(text.c_str(), "%d %d %d", &r, &gg, &b) == 3) {
+			g_set.ghostColorSet = true;
+			g_set.ghostColor[0] = std::clamp(r, 0, 255);
+			g_set.ghostColor[1] = std::clamp(gg, 0, 255);
+			g_set.ghostColor[2] = std::clamp(b, 0, 255);
+		} else {
+			engine::Warn("ghostcolor takes \"team\" or three numbers 0-255 (red green blue).\n");
+			return;
+		}
+		if (g.helperLoaded) RecolorGhosts();
+	}
 	else if (name == "snapshots") {
 		g_set.snapshots = on;
 		g.snapshotHandover = -1;
@@ -1880,6 +1937,14 @@ void CmdDebug(const sdk::CCommand &args) {
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "exec")) {
 		// (development: a console line run as the player, from a console that has no player of its own)
 		engine::Execute("%s", args.ArgS() + strlen("exec "));
+		return;
+	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "noghostmove")) {
+		g_noGhostMove = atoi(args.Arg(2)) != 0;
+		return;
+	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "nopose")) {
+		g_noPose = atoi(args.Arg(2)) != 0;
 		return;
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "parity")) {
@@ -1983,6 +2048,7 @@ void OnLevelInit(const char *mapName) {
 	// A new map load: nothing made in the old one exists any more
 	g.snapshotHandover = -1;
 	g.snapshotIn = 0;
+	g.snapshotLoading = false;
 	g.helperLoaded = false;
 	g.levelTouched = false;
 	g.startScreenClosed = false;
@@ -2015,6 +2081,14 @@ void OnLevelShutdown() {
 }
 
 void OnFrame(bool simulating) {
+	// A snapshot restore takes a few frames to come: the trainer runs on meanwhile, so when the level's clock
+	// jumps back to the snapshot's, the run's cursor is set back to where the snapshot was taken
+	int tick = engine::TickCount();
+	if (g.snapshotLoading && tick < g.lastTick) {
+		g.cursor = g.snapshotCursor;
+		g.snapshotLoading = false;
+	}
+	g.lastTick = tick;
 	if (!simulating) {
 		OnPausedFrame();
 		return;

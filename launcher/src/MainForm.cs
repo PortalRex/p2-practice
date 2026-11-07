@@ -41,6 +41,7 @@ namespace P2Practice {
 		Words notes, status, libraryLabel;
 		Caption roleCaption, partnerCaption;
 		Option practice, watch, blue, orange, bot, real, ghost, clock, keys, line, loop;
+		ColorPick ghostColor;
 		Stepper leadIn, speed;
 		SignButton launch;
 		TickBar progress;
@@ -242,13 +243,18 @@ namespace P2Practice {
 			AddOption(opt, partnerCaption = new Caption(look, "PARTNER"), Down(bot, real));
 
 			ghost = Choice("Ghost", "ghost", false, "The recorded players, shown in the level.");
+			ghostColor = new ColorPick(look, "Ghost colour") { DefaultText = "robot colours", Margin = Padding.Empty };
+			ghostColor.Changed += (s, e) => { if (!building) EnableOptions(); };
+			tips.SetToolTip(ghostColor, "The colour the ghosts are drawn in. Click to pick one; right-click for the robots' own colours (blue, orange; green for Chell).");
 			clock = Choice("On-screen clock", "clock", false, "The run's clock and how far ahead or behind you are.");
 			keys = Choice("Record's keys", "keys", false, "The keys the record holds at each moment.");
 			line = Choice("Route line", "line", false, "The record's route and portal shots, drawn in the level.");
 			var show = Across(ghost, clock);
-			show.RowCount = 2;
+			show.RowCount = 3;
 			show.Controls.Add(keys, 0, 1);
 			show.Controls.Add(line, 1, 1);
+			show.Controls.Add(ghostColor, 0, 2);
+			show.SetColumnSpan(ghostColor, 2);
 			AddOption(opt, new Caption(look, "SHOW"), show);
 
 			leadIn = new Stepper(look, Options.MinLeadIn, Options.MaxLeadIn, 0.5, 1) { Margin = Padding.Empty };
@@ -672,6 +678,7 @@ namespace P2Practice {
 			(o.Orange ? orange : blue).Checked = true;
 			(o.RealPartner ? real : bot).Checked = true;
 			ghost.Checked = o.Ghost;
+			ghostColor.Chosen = ColorOf(o.GhostColor);
 			clock.Checked = o.Clock;
 			keys.Checked = o.Keys;
 			line.Checked = o.Line;
@@ -689,6 +696,7 @@ namespace P2Practice {
 			o.Orange = orange.Checked;
 			o.RealPartner = real.Checked;
 			o.Ghost = ghost.Checked;
+			o.GhostColor = ghostColor.Chosen.HasValue ? ghostColor.Chosen.Value.R + " " + ghostColor.Chosen.Value.G + " " + ghostColor.Chosen.Value.B : "";
 			o.Clock = clock.Checked;
 			o.Keys = keys.Checked;
 			o.Line = line.Checked;
@@ -703,11 +711,20 @@ namespace P2Practice {
 		// The co-op choices only mean something for a co-op run, and the robot only when a bot plays the other
 		// one. The portal colour everything is marked with follows: orange when the player is about to be
 		// P-body, blue otherwise (ATLAS, or single player).
+		// "r g b" as a colour, or null for the default
+		static Color? ColorOf(string text) {
+			string parsed = Options.ParseColor(text);
+			if (parsed == "") return null;
+			var p = parsed.Split(' ');
+			return Color.FromArgb(int.Parse(p[0]), int.Parse(p[1]), int.Parse(p[2]));
+		}
+
 		void EnableOptions() {
 			if (building || launch == null) return;
 			bool ok = selected != null && selected.Ok, coop = ok && selected.Coop;
 			partnerCaption.Enabled = bot.Enabled = real.Enabled = coop;
 			roleCaption.Enabled = blue.Enabled = orange.Enabled = coop && bot.Checked;
+			ghostColor.Enabled = ghost.Checked;
 			launch.Enabled = ok;
 			var accent = coop && bot.Checked && orange.Checked ? Theme.Orange : Theme.Blue;
 			if (look.Accent != accent) {

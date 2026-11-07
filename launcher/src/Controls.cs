@@ -234,6 +234,77 @@ namespace P2Practice {
 		}
 	}
 
+	// A colour to pick, shown as a lit square with its name beside it: a click opens the colour dialog, a right
+	// click (or Delete) goes back to the default, which is described in words.
+	class ColorPick : SignControl {
+		public Color? Chosen { get; set; }  // null: the default
+		public string DefaultText = "";   // what the default is, shown in place of a colour
+		public event EventHandler Changed;
+		bool hot;
+
+		public ColorPick(Look look, string text) : base(look, true) {
+			Text = AccessibleName = text;
+			AccessibleRole = AccessibleRole.PushButton;
+			Cursor = Cursors.Hand;
+			Size = new Size(P(3) + Square + P(7) + (int)Math.Ceiling(Ui.Width(text + ": robot colours", look.Body)) + P(8), P(26));
+		}
+
+		int Square { get { return P(22); } }
+
+		void Set(Color? colour) {
+			Chosen = colour;
+			Invalidate();
+			if (Changed != null) Changed(this, EventArgs.Empty);
+		}
+
+		public void Pick() {
+			using (var dialog = new ColorDialog { FullOpen = true, AnyColor = true, Color = Chosen ?? Theme.Blue }) {
+				if (dialog.ShowDialog(FindForm()) == DialogResult.OK) Set(dialog.Color);
+			}
+		}
+
+		protected override void OnMouseEnter(EventArgs e) { hot = true; Invalidate(); base.OnMouseEnter(e); }
+		protected override void OnMouseLeave(EventArgs e) { hot = false; Invalidate(); base.OnMouseLeave(e); }
+		protected override void OnMouseDown(MouseEventArgs e) {
+			Focus();
+			if (e.Button == MouseButtons.Left) Pick();
+			else if (e.Button == MouseButtons.Right) Set(null);
+			base.OnMouseDown(e);
+		}
+		protected override void OnKeyDown(KeyEventArgs e) {
+			if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter) { Pick(); e.Handled = true; }
+			else if (e.KeyCode == Keys.Delete || e.KeyCode == Keys.Back) { Set(null); e.Handled = true; }
+			base.OnKeyDown(e);
+		}
+		protected override bool IsInputKey(Keys key) { return key == Keys.Enter || base.IsInputKey(key); }
+
+		protected override void OnPaint(PaintEventArgs e) {
+			var g = e.Graphics;
+			Ui.Prepare(g);
+			g.Clear(BackColor);
+			var all = new RectangleF(0, 0, Width, Height);
+			if (hot && Enabled) Ui.FillRound(g, Theme.Mix(BackColor, Theme.Ink, 0.07f), all, P(4));
+			var square = new RectangleF(P(3), (Height - Square) / 2f, Square, Square);
+			if (Chosen.HasValue) {
+				Ui.FillRound(g, Enabled ? Chosen.Value : Theme.Mix(Chosen.Value, Theme.Panel, 0.5f), square, P(3));
+			} else {
+				// the default: the two robots' colours, halved
+				var left = new RectangleF(square.X, square.Y, square.Width / 2, square.Height);
+				var right = new RectangleF(square.X + square.Width / 2, square.Y, square.Width / 2, square.Height);
+				g.SetClip(left);
+				Ui.FillRound(g, Enabled ? Theme.Blue : Theme.Mix(Theme.Blue, Theme.Panel, 0.5f), square, P(3));
+				g.SetClip(right);
+				Ui.FillRound(g, Enabled ? Theme.Orange : Theme.Mix(Theme.Orange, Theme.Panel, 0.5f), square, P(3));
+				g.ResetClip();
+			}
+			Ui.StrokeRound(g, Enabled ? Theme.Ink : Theme.Pale, square, P(3), Math.Max(1, P(1)));
+			string words = Text + ": " + (Chosen.HasValue ? "#" + Chosen.Value.R.ToString("X2") + Chosen.Value.G.ToString("X2") + Chosen.Value.B.ToString("X2") : DefaultText);
+			var text = new RectangleF(square.Right + P(7), 0, Width - square.Right - P(7), Height);
+			Ui.Text(g, words, L.Body, Enabled ? Theme.Ink : Theme.Pale, text);
+			if (KeyFocus && Enabled) Ui.StrokeRound(g, Theme.Ink, all, P(4), Math.Max(1, P(1)));
+		}
+	}
+
 	// A framed text box: white, a thin black outline (thicker while typing in it), an optional pictogram.
 	class TextField : SignControl {
 		public readonly TextBox Box;

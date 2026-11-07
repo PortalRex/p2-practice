@@ -2,7 +2,9 @@
 # polite until it exits. Development tool only (the launcher users get starts the game normally).
 #
 #   powershell -NoProfile -File launch.ps1 -Job t1 -Port 2141 [-Plugins a.dll,b.dll] [-Sar] [-Cfg "line","line"]
-#       [-GameArgs "+map x"] [-Width 1280] [-Height 720]
+#       [-GameArgs "+map x"] [-Width 1280] [-Height 720] [-Inject some.dll]
+# -Inject loads a DLL into the game before any of its code runs (ChocolateLoading's way: its chocoload.exe does
+# the same), with CHOCOLOAD_EARLY=1 in the game's environment.
 #
 # The method is Portal 2 Demo Splicer's (its GameLauncher, NoFocus and AudioMute classes are called from its exe):
 # own profile, VPROJECT + -allowmultiple, focus/EnumWindows calls patched out, helper window untagged, mixer mute,
@@ -19,7 +21,8 @@ param(
 	[switch]$CopyOnly,          # copy -Plugins into the profile without loading them from the autoexec
 	[string[]]$CfgFiles = @(),  # extra cfg files copied into the profile's cfg folder
 	[int]$Width = 1280,
-	[int]$Height = 720
+	[int]$Height = 720,
+	[string]$Inject = ''
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -74,8 +77,10 @@ foreach ($cfg in @($CfgFiles | ForEach-Object { $_ -split ',' } | ForEach-Object
 $env:P2PRACTICE_LOG = Join-Path $state 'trace.log'
 $gameArg = "p2practice-test\$Job\portal2"
 $cmd = "-game `"$gameArg`" -allowmultiple -novid -condebug -windowed -w $Width -h $Height -netconport $Port -netconpassword $Password " + $GameArgs
-[object[]]$launchArgs = @([string](Join-Path $game 'portal2.exe'), [string]$cmd, $game, $false)
-[Diagnostics.Process]$proc = (Splicer GameLauncher StartInBackground).Invoke($null, $launchArgs)
+if ($Inject) { $env:CHOCOLOAD_EARLY = '1' }
+[object[]]$launchArgs = @([string](Join-Path $game 'portal2.exe'), [string]$cmd, $game, $false, [string]$Inject)
+$start = $asm.GetType('P2DemoSplicer.GameLauncher').GetMethods($static) | Where-Object { $_.Name -eq 'StartInBackground' -and $_.GetParameters().Count -eq 5 }
+[Diagnostics.Process]$proc = $start.Invoke($null, $launchArgs)
 $focusBlocked = [bool]$launchArgs[3]
 
 $info = [ordered]@{ job = $Job; pid = $proc.Id; port = $Port; password = $Password; profile = $profile; root = $root

@@ -178,34 +178,145 @@ bool Patch(std::vector<char> &mdl, const std::string &ownName, std::vector<std::
 // ---- the mesh file (OptimizedModel::FileHeader_t, version 7) ----
 
 constexpr size_t kVtxNumBodyParts = 28, kVtxBodyPartIndex = 32;
+constexpr size_t kVtxLodHeader = 12, kVtxMeshHeader = 9, kVtxStripGroupHeader = 33, kVtxStripHeader = 35, kVtxVertex = 9;
+constexpr size_t kMdlNumBodyParts = 232, kMdlBodyPartIndex = 236, kMdlBodyPart = 16, kMdlModel = 148, kMdlMesh = 116;
+constexpr size_t kVvdNumVertices = 16, kVvdNumFixups = 48, kVvdFixupIndex = 52, kVvdVertexIndex = 56, kVvdVertex = 48, kVvdPosition = 16;
 
-// Makes the mesh file's coarsest level of detail the one drawn at any distance. The game draws the first level
-// whose successor's switch distance is beyond the model's (a level at -1 is only for shadows and is left out);
-// with every switch distance at zero that is the last level. (The model header's "root LOD" would seem to be
-// for this, but set, it makes the engine reject the vertex file.)
-bool LowestDetail(std::vector<char> &vtx, std::string &error) {
+struct Vec3f {
+	float x = 0, y = 0, z = 0;
+};
+
+float Read32f(const std::vector<char> &data, size_t at) {
+	float v = 0;
+	if (at + 4 <= data.size()) memcpy(&v, &data[at], 4);
+	return v;
+}
+
+uint16_t U16(const std::vector<char> &data, size_t at) {
+	uint16_t v = 0;
+	if (at + 2 <= data.size()) memcpy(&v, &data[at], 2);
+	return v;
+}
+
+void Put32(std::vector<char> &data, size_t at, int32_t v) {
+	if (at + 4 <= data.size()) memcpy(&data[at], &v, 4);
+}
+
+// The vertex positions in the order the mesh file numbers them: the vertex file's "fixups" lay the vertices
+// out level of detail by level of detail (at the root level every fixup is taken, in order)
+std::vector<Vec3f> VertexPositions(const std::vector<char> &vvd) {
+	std::vector<Vec3f> out;
+	int32_t fixups = I32(vvd, kVvdNumFixups), fixupAt = I32(vvd, kVvdFixupIndex), verticesAt = I32(vvd, kVvdVertexIndex);
+	auto position = [&](int32_t index) {
+		size_t at = static_cast<size_t>(verticesAt) + static_cast<size_t>(index) * kVvdVertex + kVvdPosition;
+		return Vec3f{Read32f(vvd, at), Read32f(vvd, at + 4), Read32f(vvd, at + 8)};
+	};
+	if (fixups == 0) {
+		int32_t count = I32(vvd, kVvdNumVertices);
+		for (int32_t i = 0; i < count; i++) out.push_back(position(i));
+		return out;
+	}
+	for (int32_t f = 0; f < fixups; f++) {
+		size_t at = static_cast<size_t>(fixupAt) + static_cast<size_t>(f) * 12;
+		int32_t source = I32(vvd, at + 4), count = I32(vvd, at + 8);
+		for (int32_t i = 0; i < count; i++) out.push_back(position(source + i));
+	}
+	return out;
+}
+
+float LongestEdge(const Vec3f &a, const Vec3f &b, const Vec3f &c) {
+	auto length = [](const Vec3f &p, const Vec3f &q) {
+		float dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
+		return std::sqrt(dx * dx + dy * dy + dz * dz);
+	};
+	return std::max({length(a, b), length(b, c), length(c, a)});
+}
+
+// Makes the mesh file draw the model's coarsest level of detail whatever level the game picks: every level's
+// header is pointed at the last level's meshes. With `minEdge` above zero the coarsest meshes are thinned too:
+// every triangle whose longest edge is shorter is dropped (the lines left are the model's larger shapes; each
+// strip keeps at least its largest triangle, since an empty strip crashes the game). Positions come from the
+// vertex file, the meshes' material and vertex ranges from the model file.
+bool CoarsestMesh(std::vector<char> &vtx, const std::vector<char> &mdl, const std::vector<char> &vvd, float minEdge, std::string &error) {
 	if (vtx.size() < 36 || I32(vtx, 0) != 7) {
 		error = "the mesh file isn't the kind this plugin knows (version 7)";
 		return false;
 	}
+	std::vector<Vec3f> positions = minEdge > 0 ? VertexPositions(vvd) : std::vector<Vec3f>{};
 	int32_t bodyParts = I32(vtx, kVtxNumBodyParts), bodyPartAt = I32(vtx, kVtxBodyPartIndex);
+	int32_t mdlBodyPartAt = I32(mdl, kMdlBodyPartIndex);
+	if (I32(mdl, kMdlNumBodyParts) != bodyParts) {
+		error = "the model and mesh files disagree on the body parts";
+		return false;
+	}
 	for (int32_t part = 0; part < bodyParts; part++) {
 		size_t partAt = static_cast<size_t>(bodyPartAt) + static_cast<size_t>(part) * 8;
+		size_t mdlPartAt = static_cast<size_t>(mdlBodyPartAt) + static_cast<size_t>(part) * kMdlBodyPart;
 		int32_t models = I32(vtx, partAt), modelAt = I32(vtx, partAt + 4);
+		int32_t mdlModelAt = I32(mdl, mdlPartAt + 12);
 		for (int32_t model = 0; model < models; model++) {
 			size_t at = partAt + static_cast<size_t>(modelAt) + static_cast<size_t>(model) * 8;
+			size_t mdlAt = mdlPartAt + static_cast<size_t>(mdlModelAt) + static_cast<size_t>(model) * kMdlModel;
 			int32_t lods = I32(vtx, at), lodAt = I32(vtx, at + 4);
-			for (int32_t lod = 1; lod < lods; lod++) {
-				size_t switchAt = at + static_cast<size_t>(lodAt) + static_cast<size_t>(lod) * 12 + 8;
-				if (switchAt + 4 > vtx.size()) {
-					error = "the mesh file is cut short";
-					return false;
+			if (lods < 1) continue;
+			size_t lastAt = at + static_cast<size_t>(lodAt) + static_cast<size_t>(lods - 1) * kVtxLodHeader;
+			int32_t lastMeshes = I32(vtx, lastAt), lastMeshAt = I32(vtx, lastAt + 4);
+			for (int32_t lod = 0; lod < lods - 1; lod++) {
+				size_t headerAt = at + static_cast<size_t>(lodAt) + static_cast<size_t>(lod) * kVtxLodHeader;
+				Put32(vtx, headerAt, lastMeshes);
+				Put32(vtx, headerAt + 4, static_cast<int32_t>(lastAt + static_cast<size_t>(lastMeshAt)) - static_cast<int32_t>(headerAt));
+			}
+			if (minEdge <= 0 || lods < 2) continue;  // (a model with one level is left whole: all of its triangles are small)
+			int32_t mdlMeshAt = I32(mdl, mdlAt + 76);
+			size_t modelVertex = static_cast<size_t>(I32(mdl, mdlAt + 84)) / kVvdVertex;
+			for (int32_t mesh = 0; mesh < lastMeshes; mesh++) {
+				size_t meshAt = lastAt + static_cast<size_t>(lastMeshAt) + static_cast<size_t>(mesh) * kVtxMeshHeader;
+				size_t meshVertex = modelVertex + static_cast<size_t>(I32(mdl, mdlAt + static_cast<size_t>(mdlMeshAt) + static_cast<size_t>(mesh) * kMdlMesh + 12));
+				int32_t groups = I32(vtx, meshAt), groupAt = I32(vtx, meshAt + 4);
+				for (int32_t group = 0; group < groups; group++) {
+					size_t gAt = meshAt + static_cast<size_t>(groupAt) + static_cast<size_t>(group) * kVtxStripGroupHeader;
+					size_t verticesAt = gAt + static_cast<size_t>(I32(vtx, gAt + 4)), indicesAt = gAt + static_cast<size_t>(I32(vtx, gAt + 12));
+					int32_t indices = I32(vtx, gAt + 8), strips = I32(vtx, gAt + 16), stripAt = I32(vtx, gAt + 20);
+					if (indicesAt + static_cast<size_t>(indices) * 2 > vtx.size()) {
+						error = "the mesh file is cut short";
+						return false;
+					}
+					auto positionOf = [&](uint16_t local) {
+						size_t index = meshVertex + U16(vtx, verticesAt + static_cast<size_t>(local) * kVtxVertex + 4);
+						return index < positions.size() ? positions[index] : Vec3f{};
+					};
+					std::vector<uint16_t> old(static_cast<size_t>(indices));
+					for (int32_t i = 0; i < indices; i++) old[static_cast<size_t>(i)] = U16(vtx, indicesAt + static_cast<size_t>(i) * 2);
+					// (a strip is a run of the group's triangle list with its own bones: each is thinned in place and
+					// the runs packed together again, in the order they came)
+					std::vector<std::pair<int32_t, size_t>> runs;  // (first index, strip header)
+					for (int32_t strip = 0; strip < strips; strip++) {
+						size_t sAt = gAt + static_cast<size_t>(stripAt) + static_cast<size_t>(strip) * kVtxStripHeader;
+						runs.push_back({I32(vtx, sAt + 4), sAt});
+					}
+					std::sort(runs.begin(), runs.end());
+					std::vector<uint16_t> kept;
+					for (const auto &run : runs) {
+						int32_t first = run.first, count = I32(vtx, run.second);
+						size_t start = kept.size();
+						float biggest = -1;
+						size_t biggestAt = 0;
+						for (int32_t t = first; t + 2 < first + count && t + 2 < indices; t += 3) {
+							size_t i = static_cast<size_t>(t);
+							float longest = LongestEdge(positionOf(old[i]), positionOf(old[i + 1]), positionOf(old[i + 2]));
+							if (longest > biggest) {
+								biggest = longest;
+								biggestAt = i;
+							}
+							if (longest >= minEdge) kept.insert(kept.end(), {old[i], old[i + 1], old[i + 2]});
+						}
+						if (kept.size() == start && biggest >= 0) kept.insert(kept.end(), {old[biggestAt], old[biggestAt + 1], old[biggestAt + 2]});
+						Put32(vtx, run.second, static_cast<int32_t>(kept.size() - start));
+						Put32(vtx, run.second + 4, static_cast<int32_t>(start));
+					}
+					for (size_t i = 0; i < kept.size(); i++) memcpy(&vtx[indicesAt + i * 2], &kept[i], 2);
+					Put32(vtx, gAt + 8, static_cast<int32_t>(kept.size()));
 				}
-				float distance;
-				memcpy(&distance, &vtx[switchAt], 4);
-				if (distance < 0) continue;
-				distance = 0;
-				memcpy(&vtx[switchAt], &distance, 4);
 			}
 		}
 	}
@@ -249,8 +360,8 @@ std::vector<fs::path> ArchiveFiles() {
 	return files;
 }
 
-std::string CopyName(const PlayerModel &model, bool lowDetail) {
-	return std::string(lowDetail ? "ghostlow_" : "ghost_") + model.key;
+std::string CopyName(const PlayerModel &model, Detail detail) {
+	return std::string(detail == kBasic ? "ghostbasic_" : detail == kCoarse ? "ghostlow_" : "ghost_") + model.key;
 }
 
 // Reads a model's three files from the first archive that holds the model (all three from the same one: they
@@ -281,8 +392,8 @@ bool ReadModel(const PlayerModel &model, std::vector<char> &mdl, std::vector<cha
 }
 
 // Makes one model's copy (and the materials), unless it is already there
-bool Make(const PlayerModel &model, bool lowDetail, std::string &error) {
-	fs::path target = GameFolder() / "models" / "p2practice" / CopyName(model, lowDetail);
+bool Make(const PlayerModel &model, Detail detail, std::string &error) {
+	fs::path target = GameFolder() / "models" / "p2practice" / CopyName(model, detail);
 	std::error_code ec;
 	if (fs::is_regular_file(target.string() + ".mdl", ec) && fs::is_regular_file(target.string() + ".vvd", ec) &&
 	    fs::is_regular_file(target.string() + ".dx90.vtx", ec))
@@ -291,8 +402,11 @@ bool Make(const PlayerModel &model, bool lowDetail, std::string &error) {
 	std::string vtxExtension;
 	if (!ReadModel(model, mdl, vvd, vtx, vtxExtension, error)) return false;
 	std::vector<std::string> materials;
-	if (!Patch(mdl, "p2practice/" + CopyName(model, lowDetail) + ".mdl", materials, error)) return false;
-	if (lowDetail && !LowestDetail(vtx, error)) return false;
+	if (!Patch(mdl, "p2practice/" + CopyName(model, detail) + ".mdl", materials, error)) return false;
+	// (the basic look drops the coarse mesh's triangles with no edge of 6 units: the robots keep their shapes,
+	// and about a quarter of their lines)
+	constexpr float kBasicEdge = 6;
+	if (detail != kFull && !CoarsestMesh(vtx, mdl, vvd, detail == kBasic ? kBasicEdge : 0, error)) return false;
 	// (the mesh file is written under the name this renderer looks for, whatever the source called it)
 	if (!WriteFile(target.string() + ".mdl", mdl.data(), mdl.size(), error) || !WriteFile(target.string() + ".vvd", vvd.data(), vvd.size(), error) ||
 	    !WriteFile(target.string() + ".dx90.vtx", vtx.data(), vtx.size(), error))
@@ -308,16 +422,16 @@ bool g_complained = false;
 
 }  // namespace
 
-std::string Wireframe(int team, bool lowDetail) {
+std::string Wireframe(int team, Detail detail) {
 	const PlayerModel &model = team == route::kTeamBlue ? kModels[0] : team == route::kTeamOrange ? kModels[1] : kModels[2];
 	std::string error;
-	bool ok = Make(model, lowDetail, error);
+	bool ok = Make(model, detail, error);
 	if (!ok) {
 		if (!g_complained) engine::Warn("Wireframe ghosts aren't available: %s. Ghosts are shown as solid models.\n", error.c_str());
 		g_complained = true;
 		return "";
 	}
-	return "models/p2practice/" + CopyName(model, lowDetail) + ".mdl";
+	return "models/p2practice/" + CopyName(model, detail) + ".mdl";
 }
 
 }  // namespace ghostmodel

@@ -321,6 +321,12 @@ R"nut(
 	EntFireByHandle(ghosts[id], "SetAnimation", sequence, 0, null, null)
 }
 
+// A ghost's colour
+::PP.Gc <- function(id, r, g, b) {
+	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return
+	ghosts[id].__KeyValueFromString("rendercolor", r + " " + g + " " + b)
+}
+
 // How fast a ghost's animation plays (1: as made)
 ::PP.Gr <- function(id, rate) {
 	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return
