@@ -95,7 +95,11 @@ namespace P2Practice {
 
 	static class GameLauncher {
 		public const string PluginFile = "p2practice.dll";
-		public const string LaunchCfg = "p2practice_launch";
+		// The launcher's cfgs (the launch one and those saved under a name) live in cfg\p2practice, out of the way
+		// of the player's own: "exec p2practice/<name>" runs one.
+		public const string CfgFolder = "p2practice", LaunchCfg = "launch", OldLaunchCfg = "p2practice_launch";
+		public static string CfgPath(string gameDir, string name) { return Path.Combine(gameDir, "portal2", "cfg", CfgFolder, name + ".cfg"); }
+		public static string ExecName(string name) { return CfgFolder + "/" + name; }
 		// ChocolateLoading (memory snapshots for save states): its loader and DLL, shipped in a folder next to the
 		// launcher and put into the game folder when save states are on
 		public const string ChocoDir = "chocolateloading", ChocoExe = "chocoload.exe", ChocoDll = "chocolateloading.dll";
@@ -136,7 +140,8 @@ namespace P2Practice {
 			// starts it, on the command line of a new game or in the console of one that is already up. (The plugin
 			// can't be loaded with +plugin_load here: the engine honours only one on its command line, and Steam adds
 			// the player's own launch options, which may already hold one for SAR.)
-			string cfg = Path.Combine(r.GameDir, "portal2", "cfg", LaunchCfg + ".cfg");
+			string cfg = CfgPath(r.GameDir, LaunchCfg);
+			if (writes) MoveOldCfgs(r.GameDir, notes);
 			var lines = new List<string>(commands);
 			if (running) lines.AddRange(ExtraCommands(extra)); // a new game takes these from its command line instead
 			if (App.DryRun) {
@@ -155,7 +160,7 @@ namespace P2Practice {
 			}
 
 			if (running) {
-				string paste = "exec " + LaunchCfg;
+				string paste = "exec " + ExecName(LaunchCfg);
 				if (App.DryRun) {
 					App.Log("would copy to the clipboard: " + paste);
 					foreach (var n in notes) App.Log("note: " + n);
@@ -168,7 +173,7 @@ namespace P2Practice {
 
 			// start the game: through ChocolateLoading's loader for save states (it starts portal2.exe itself, with
 			// Steam up), else through Steam when it's running (as the library does), else directly
-			string args = "-novid +exec " + LaunchCfg + (extra.Length > 0 ? " " + extra : "");
+			string args = "-novid +exec " + ExecName(LaunchCfg) + (extra.Length > 0 ? " " + extra : "");
 			string steam = SteamRunning() ? GameLocator.SteamExe() : null;
 			string exe;
 			if (r.Options.SaveStates) {
@@ -233,7 +238,8 @@ namespace P2Practice {
 		// the same commands a launch runs, with the demo where it is (a launch's staged copies come and go, so a
 		// demo the game can't read in place gets a lasting copy of its own).
 		public static LaunchResult SaveCfg(LaunchRequest r, string name) {
-			if (!Regex.IsMatch(name ?? "", @"^[A-Za-z0-9_\-]{1,40}$")) return Fail("Name the cfg with letters, digits, _ or - only: it becomes cfg\\<name>.cfg.");
+			if (!Regex.IsMatch(name ?? "", @"^[A-Za-z0-9_\-]{1,40}$")) return Fail("Name the cfg with letters, digits, _ or - only: it becomes cfg\\" + CfgFolder + "\\<name>.cfg.");
+			if (name.Equals(LaunchCfg, StringComparison.OrdinalIgnoreCase)) return Fail("\"" + LaunchCfg + "\" is the launcher's own cfg: choose another name.");
 			if (!GameLocator.IsGameDir(r.GameDir)) return Fail("Portal 2 wasn't found. Choose its folder under Game > Choose Portal 2 folder.");
 			if (!Regex.IsMatch(r.Map ?? "", @"^[A-Za-z0-9_][A-Za-z0-9_\-./]*$")) return Fail("This demo's map name (" + r.Map + ") can't be given to the game.");
 			if (!File.Exists(r.Demo)) return Fail("The demo is no longer there: " + r.Demo);
@@ -261,7 +267,8 @@ namespace P2Practice {
 
 			var lines = new List<string>(Commands(r, demo, partner));
 			lines.AddRange(ExtraCommands(Regex.Replace(r.Options.Extra ?? "", @"\s+", " ").Trim()));
-			string cfg = Path.Combine(r.GameDir, "portal2", "cfg", name + ".cfg");
+			string cfg = CfgPath(r.GameDir, name);
+			if (writes) MoveOldCfgs(r.GameDir, notes);
 			if (App.DryRun) {
 				App.Log("save cfg: " + (writes ? "wrote " : "would write ") + cfg + ":");
 				foreach (var l in lines) App.Log("  " + l);
@@ -276,7 +283,32 @@ namespace P2Practice {
 				}
 			}
 			string tail = notes.Count > 0 ? "  " + string.Join(" ", notes) : "";
-			return Done((writes ? "Saved " : "Would save ") + "cfg\\" + name + ".cfg. In the game's console,  exec " + name + "  starts this practice again (from the menu or inside a level)." + tail);
+			return Done((writes ? "Saved " : "Would save ") + "cfg\\" + CfgFolder + "\\" + name + ".cfg. In the game's console,  exec " + ExecName(name) + "  starts this practice again (from the menu or inside a level)." + tail);
+		}
+
+		// Earlier versions wrote the launcher's cfgs straight into cfg\. The launch cfg is just deleted (each launch
+		// writes it again); a cfg saved under a name is moved into cfg\p2practice. Only cfgs this launcher wrote
+		// are touched: they start with "plugin_load p2practice" and load a route with prac_load.
+		static void MoveOldCfgs(string gameDir, List<string> notes) {
+			string dir = Path.Combine(gameDir, "portal2", "cfg");
+			int moved = 0;
+			try {
+				string old = Path.Combine(dir, OldLaunchCfg + ".cfg");
+				if (File.Exists(old)) File.Delete(old);
+				if (!Directory.Exists(dir)) return;
+				foreach (string file in Directory.GetFiles(dir, "*.cfg")) {
+					string[] lines = File.ReadAllLines(file, Encoding.Default);
+					if (lines.Length == 0 || lines[0].Trim() != "plugin_load p2practice" || !lines.Any(l => l.StartsWith("prac_load "))) continue;
+					string target = Path.Combine(dir, CfgFolder, Path.GetFileName(file));
+					if (File.Exists(target)) continue; // never overwrite: leave it where it is
+					Directory.CreateDirectory(Path.GetDirectoryName(target));
+					File.Move(file, target);
+					moved++;
+				}
+			} catch (Exception ex) {
+				if (!(ex is IOException || ex is UnauthorizedAccessException)) throw;
+			}
+			if (moved > 0) notes.Add("Moved " + moved + " saved cfg" + (moved == 1 ? "" : "s") + " into cfg\\" + CfgFolder + ": run " + (moved == 1 ? "it" : "them") + " with  exec " + CfgFolder + "/<name>.");
 		}
 
 		// The "+command arguments" among the player's own launch options, for the cfg ("-switches" only mean
@@ -445,8 +477,9 @@ namespace P2Practice {
 		// "Remove plugin from game": takes the plugin (and the launch cfg) out of the game folder again.
 		public static string RemovePlugin(string gameDir) {
 			if (!GameLocator.IsGameDir(gameDir)) return "Portal 2 wasn't found, so there is nothing to remove.";
-			string dll = Path.Combine(gameDir, PluginFile), cfg = Path.Combine(gameDir, "portal2", "cfg", LaunchCfg + ".cfg");
-			if (!File.Exists(dll) && !File.Exists(cfg)) return "The plugin isn't in the game folder.";
+			string dll = Path.Combine(gameDir, PluginFile), cfg = CfgPath(gameDir, LaunchCfg);
+			string oldCfg = Path.Combine(gameDir, "portal2", "cfg", OldLaunchCfg + ".cfg");
+			if (!File.Exists(dll) && !File.Exists(cfg) && !File.Exists(oldCfg)) return "The plugin isn't in the game folder.";
 			if (App.DryRun && !App.ApplyFiles) {
 				App.Log("remove plugin: would delete " + dll + " and " + cfg);
 				return "Dry run: would delete " + dll + ".";
@@ -454,6 +487,7 @@ namespace P2Practice {
 			try {
 				File.Delete(dll);
 				File.Delete(cfg);
+				File.Delete(oldCfg);
 				if (App.DryRun) App.Log("remove plugin: deleted " + dll + " and " + cfg);
 				return "Plugin removed from the game folder.";
 			} catch (Exception ex) {

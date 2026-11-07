@@ -512,7 +512,7 @@ namespace P2Practice {
 
 			// the session saved under a name, for "exec <name>" in the game later
 			cfgName = new TextField(look, null, "a name, then exec it in the game") { Width = P(230), Height = P(26), Margin = Padding.Empty };
-			tips.SetToolTip(cfgName.Box, "Saves this run, where you take over and these options as cfg\\<name>.cfg in the game folder. Later,  exec <name>  in the game's console starts the same practice without the launcher.");
+			tips.SetToolTip(cfgName.Box, "Saves this run, where you take over and these options as cfg\\p2practice\\<name>.cfg in the game folder. Later,  exec p2practice/<name>  in the game's console starts the same practice without the launcher.");
 			cfgName.Box.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { SaveCfg(); e.Handled = e.SuppressKeyPress = true; } };
 			saveCfg = new SignButton(look, "SAVE") { Margin = new Padding(P(8), 0, 0, 0) };
 			saveCfg.Click += (s, e) => SaveCfg();

@@ -42,12 +42,13 @@ the game honours only one `+plugin_load` on its command line.
 `P2Practice.exe` lists the demos in the folders you add (co-op pairs are shown as one run), shows the selected
 run's parts, and starts the game with everything set up: which robot you play, bot or real partner, which part
 to start from (or any second of the run: TAKE OVER AT), practice or watch, what is shown and in which colour
-and opacity the ghosts are drawn. If the game is already running it writes `cfg/p2practice_launch.cfg` and
-puts `exec p2practice_launch` on the clipboard for you to paste into the console.
+and opacity the ghosts are drawn. If the game is already running it writes `cfg/p2practice/launch.cfg` and
+puts `exec p2practice/launch` on the clipboard for you to paste into the console.
 
-**SAVE AS CFG** writes the same session under a name of your own (`cfg/<name>.cfg` in the game folder): later,
-`exec <name>` in the game's console starts that practice again without the launcher, from the menu or inside
-a level. The demo is used where it is (copied under `demos/p2practice/saved` only when the game can't read its
+**SAVE AS CFG** writes the same session under a name of your own (`cfg/p2practice/<name>.cfg` in the game
+folder): later, `exec p2practice/<name>` in the game's console starts that practice again without the launcher,
+from the menu or inside a level. Cfgs saved by earlier versions straight into `cfg/` are moved into
+`cfg/p2practice/` the next time you launch or save one. The demo is used where it is (copied under `demos/p2practice/saved` only when the game can't read its
 path). The cfg's first line loads the plugin; when it is already loaded that line just says so.
 
 **BOARDS** shows the Challenge Mode leaderboards from [board.portal2.sr](https://board.portal2.sr): pick a
