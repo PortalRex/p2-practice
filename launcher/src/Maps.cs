@@ -70,6 +70,11 @@ namespace P2Practice {
 			return slash >= 0 && slash + 1 < map.Length ? map.Substring(slash + 1) : map;
 		}
 
+		// every map of the game, in play order
+		public static IEnumerable<string> All() {
+			for (int i = 0; i < Table.Length; i += 2) yield return Table[i];
+		}
+
 		// the map's place in play order; maps that aren't the game's come after, by name
 		public static int Order(string map) {
 			int i;

@@ -1,7 +1,8 @@
 // The look: test-chamber signage. Off-white panels on a cool grey field, near-black ink, thin rules, a condensed
 // signage face, pictograms in rounded squares - and the two portal colours, used only where they mean a robot.
 // Everything is drawn here with the launcher's own colours and shapes: nothing depends on the system colours,
-// and nothing comes from the game's files.
+// and nothing comes from the game's files. The dark mode is the same signage after lights-out: dark panels,
+// pale ink, the portal colours unchanged.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -12,26 +13,67 @@ using System.Windows.Forms;
 
 namespace P2Practice {
 	static class Theme {
-		public static readonly Color Field = Color.FromArgb(0xCF, 0xD3, 0xD6);   // behind the panels
-		public static readonly Color Panel = Color.FromArgb(0xF2, 0xF2, 0xF0);
-		public static readonly Color Input = Color.FromArgb(0xFF, 0xFF, 0xFF);   // where the player types
-		public static readonly Color Ink = Color.FromArgb(0x1A, 0x1A, 0x1A);
-		public static readonly Color Grey = Color.FromArgb(0x70, 0x74, 0x78);    // secondary text
-		public static readonly Color Pale = Color.FromArgb(0xA9, 0xAD, 0xB0);    // dimmed text, unlit glyphs
-		public static readonly Color Unlit = Color.FromArgb(0xDC, 0xDD, 0xDC);   // a pictogram square that is off
-		public static readonly Color Line = Color.FromArgb(0xC9, 0xCB, 0xCB);    // light dividers
-		public static readonly Color Stripe = Color.FromArgb(0xEA, 0xEA, 0xE8);  // every other row
-		public static readonly Color Dark = Color.FromArgb(0x1C, 0x1D, 0x1F);    // the band along the top
+		public static bool IsDark { get; private set; }
+		public static Color Field = Color.FromArgb(0xCF, 0xD3, 0xD6);   // behind the panels
+		public static Color Panel = Color.FromArgb(0xF2, 0xF2, 0xF0);
+		public static Color Input = Color.FromArgb(0xFF, 0xFF, 0xFF);   // where the player types
+		public static Color Ink = Color.FromArgb(0x1A, 0x1A, 0x1A);
+		public static Color Grey = Color.FromArgb(0x70, 0x74, 0x78);    // secondary text
+		public static Color Pale = Color.FromArgb(0xA9, 0xAD, 0xB0);    // dimmed text, unlit glyphs
+		public static Color Unlit = Color.FromArgb(0xDC, 0xDD, 0xDC);   // a pictogram square that is off
+		public static Color Line = Color.FromArgb(0xC9, 0xCB, 0xCB);    // light dividers
+		public static Color Stripe = Color.FromArgb(0xEA, 0xEA, 0xE8);  // every other row
+		public static Color Dark = Color.FromArgb(0x1C, 0x1D, 0x1F);    // the band along the top (dark in both modes)
+		public static Color Pressed = Color.Black;                      // a lit sign pressed down
 		public static readonly Color Blue = Color.FromArgb(0x00, 0xA2, 0xFF);    // ATLAS, and the player's first portal
 		public static readonly Color Orange = Color.FromArgb(0xFF, 0x9A, 0x00);  // P-body
-		public static readonly Color Alert = Color.FromArgb(0xB3, 0x26, 0x1E);   // something is wrong
+		public static Color Alert = Color.FromArgb(0xB3, 0x26, 0x1E);   // something is wrong
+		static Color lightText = Color.White, darkText = Color.FromArgb(0x1A, 0x1A, 0x1A);
+
+		// Switches the whole palette. Everything drawn afterwards takes the new colours (the window is built again).
+		public static void Apply(bool dark) {
+			IsDark = dark;
+			if (dark) {
+				Field = Color.FromArgb(0x12, 0x13, 0x15);
+				Panel = Color.FromArgb(0x1F, 0x21, 0x24);
+				Input = Color.FromArgb(0x2B, 0x2E, 0x31);
+				Ink = Color.FromArgb(0xEC, 0xEC, 0xE8);
+				Grey = Color.FromArgb(0x9C, 0xA0, 0xA4);
+				Pale = Color.FromArgb(0x62, 0x66, 0x6A);
+				Unlit = Color.FromArgb(0x36, 0x39, 0x3D);
+				Line = Color.FromArgb(0x3A, 0x3D, 0x41);
+				Stripe = Color.FromArgb(0x25, 0x27, 0x2B);
+				Dark = Color.FromArgb(0x0C, 0x0D, 0x0E);
+				Pressed = Color.FromArgb(0xC8, 0xC8, 0xC4);
+				Alert = Color.FromArgb(0xE8, 0x5A, 0x50);
+				lightText = Ink;
+				darkText = Field;
+			} else {
+				Field = Color.FromArgb(0xCF, 0xD3, 0xD6);
+				Panel = Color.FromArgb(0xF2, 0xF2, 0xF0);
+				Input = Color.FromArgb(0xFF, 0xFF, 0xFF);
+				Ink = Color.FromArgb(0x1A, 0x1A, 0x1A);
+				Grey = Color.FromArgb(0x70, 0x74, 0x78);
+				Pale = Color.FromArgb(0xA9, 0xAD, 0xB0);
+				Unlit = Color.FromArgb(0xDC, 0xDD, 0xDC);
+				Line = Color.FromArgb(0xC9, 0xCB, 0xCB);
+				Stripe = Color.FromArgb(0xEA, 0xEA, 0xE8);
+				Dark = Color.FromArgb(0x1C, 0x1D, 0x1F);
+				Pressed = Color.Black;
+				Alert = Color.FromArgb(0xB3, 0x26, 0x1E);
+				lightText = Color.White;
+				darkText = Ink;
+			}
+		}
 
 		public static Color Mix(Color a, Color b, float t) {
 			return Color.FromArgb((int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
 		}
 
 		// what reads on a fill of this colour
-		public static Color On(Color fill) { return fill.GetBrightness() > 0.55f || fill == Orange ? Ink : Color.White; }
+		public static Color On(Color fill) { return fill.GetBrightness() > 0.55f || fill == Orange ? darkText : lightText; }
+		// what reads on the ink (a selected row, a lit sign): white, or the dark field in dark mode
+		public static Color OnInk { get { return On(Ink); } }
 	}
 
 	// The fonts and the scale the window is drawn at, and the portal colour of the moment. One per build of the

@@ -36,6 +36,14 @@ namespace P2Practice {
 		Panel band;
 		TextField search, extra;
 		DemoList list;
+		BoardList board;
+		SignButton demosTab, boardsTab, chamberButton, getButton, addButton;
+		bool boardsView;                     // the left panel shows a chamber's board rather than the demo folders
+		string boardMap;                     // the chamber on show (map file)
+		List<Boards.Entry> boardRows = new List<Boards.Entry>(), boardAll = new List<Boards.Entry>();
+		readonly Dictionary<string, List<Boards.Entry>> boardCache = new Dictionary<string, List<Boards.Entry>>();
+		bool boardBusy;
+		string wantedDemo;                   // a demo just downloaded: selected once the library has read it
 		PartsList parts;
 		RunHeader sign;
 		Words notes, status, libraryLabel;
@@ -60,6 +68,7 @@ namespace P2Practice {
 
 		public MainForm() {
 			settings = Settings.Load();
+			Theme.Apply(settings.Theme == "dark" || (settings.Theme == "system" && Native.SystemPrefersDark()));
 			searchText = App.Search ?? "";
 			Text = App.Title + (App.DryRun ? " (dry run)" : "");
 			Icon = Program.AppIcon;
@@ -70,6 +79,7 @@ namespace P2Practice {
 			BuildUi();
 			PlaceWindow();
 
+			HandleCreated += (s, e) => Native.DarkTitleBar(Handle, Theme.IsDark);
 			if (!GameLocator.IsGameDir(settings.GameDir)) Say("Portal 2 wasn't found. Choose its folder under Game > Choose Portal 2 folder.", true);
 			else if (!RouteCli.Exists) Say(RouteCli.MissingMessage + ".", true);
 			else if (App.DryRun) Say("Dry run: Launch starts nothing and writes what it would do to " + App.LogPath);
@@ -121,7 +131,7 @@ namespace P2Practice {
 			t.Draw += (s, e) => {
 				Ui.Prepare(e.Graphics);
 				e.Graphics.Clear(Theme.Ink);
-				Ui.Text(e.Graphics, e.ToolTipText, face, Color.White, new RectangleF(pad, pad, e.Bounds.Width - pad * 2, e.Bounds.Height - pad * 2), ContentAlignment.TopLeft, true);
+				Ui.Text(e.Graphics, e.ToolTipText, face, Theme.OnInk, new RectangleF(pad, pad, e.Bounds.Width - pad * 2, e.Bounds.Height - pad * 2), ContentAlignment.TopLeft, true);
 			};
 			return t;
 		}
@@ -166,24 +176,64 @@ namespace P2Practice {
 			return band;
 		}
 
-		// The board on the left: the search box, Add folder, and the list of runs.
+		// The board on the left: two tabs (the demo folders, the leaderboards), then the search box and Add folder,
+		// or the chamber's name and Get demo, over the list.
 		Control BuildLibrary() {
 			search = new TextField(look, "search", "Search map, player or file");
 			search.Box.Text = searchText;
-			search.Box.TextChanged += (s, e) => { if (building) return; searchText = search.Box.Text; ApplyRows(); };
-			var add = new SignButton(look, "ADD FOLDER") { Icon = "plus" };
+			search.Box.TextChanged += (s, e) => { if (building) return; if (boardsView) ApplyBoardRows(); else { searchText = search.Box.Text; ApplyRows(); } };
+			var add = addButton = new SignButton(look, "ADD FOLDER") { Icon = "plus" };
 			add.Width += P(12);
 			add.Click += (s, e) => AddFolder();
 			tips.SetToolTip(add, "Add a folder of demos (its subfolders are searched too). You can also drop a folder on the window.");
+			demosTab = new SignButton(look, "MY DEMOS") { Lit = !boardsView };
+			boardsTab = new SignButton(look, "BOARDS") { Lit = boardsView };
+			demosTab.Click += (s, e) => ShowBoards(false);
+			boardsTab.Click += (s, e) => ShowBoards(true);
+			tips.SetToolTip(demosTab, "The demos in your folders.");
+			tips.SetToolTip(boardsTab, "The Challenge Mode leaderboards at board.portal2.sr: pick a chamber, then a run, and its demo is fetched.");
+			chamberButton = new SignButton(look, "CHOOSE A CHAMBER  ▾");
+			chamberButton.Width += P(8);
+			chamberButton.Click += (s, e) => ChamberMenu();
+			tips.SetToolTip(chamberButton, "The chamber whose board is shown.");
+			getButton = new SignButton(look, "GET DEMO");
+			getButton.Width += P(8);
+			getButton.Click += (s, e) => GetBoardDemo();
+			tips.SetToolTip(getButton, "Downloads the run's demo (both robots' for co-op) into the launcher's demos\\boards folder. Double-click or Enter on a run does the same.");
 
 			var top = new Panel { Dock = DockStyle.Top, Height = P(54), BackColor = Theme.Panel };
-			top.Controls.Add(search);
-			top.Controls.Add(add);
+			top.Controls.AddRange(new Control[] { demosTab, boardsTab, search, add, chamberButton, getButton });
 			EventHandler place = (s, e) => {
-				add.Location = new Point(top.Width - add.Width - P(13), P(13));
-				search.SetBounds(P(13), P(13), Math.Max(P(60), add.Left - P(10) - P(13)), P(28));
+				int x = P(13), y = P(13);
+				demosTab.Location = new Point(x, y);
+				boardsTab.Location = new Point(demosTab.Right + P(4), y);
+				int left = boardsTab.Right + P(12);
+				add.Visible = !boardsView;
+				chamberButton.Visible = getButton.Visible = boardsView;
+				if (boardsView) {
+					getButton.Location = new Point(top.Width - getButton.Width - P(13), y);
+					chamberButton.Location = new Point(left, y);
+					search.SetBounds(chamberButton.Right + P(10), y, Math.Max(P(60), getButton.Left - P(10) - chamberButton.Right - P(10)), P(28));
+				} else {
+					add.Location = new Point(top.Width - add.Width - P(13), y);
+					search.SetBounds(left, y, Math.Max(P(60), add.Left - P(10) - left), P(28));
+				}
 			};
 			top.Resize += place;
+			top.Tag = place;
+
+			board = new BoardList(look) { Dock = DockStyle.Fill, Visible = boardsView };
+			board.Source = i => i >= 0 && i < boardRows.Count ? boardRows[i] : null;
+			board.IsHere = e => Saved(e);
+			board.RowTip = i => {
+				var e = i >= 0 && i < boardRows.Count ? boardRows[i] : null;
+				if (e == null) return null;
+				var saved = Saved(e) ? RunOf(e) : null;
+				return e.Players + "   " + e.TimeText + (e.Complete ? (saved != null ? "\nDemo saved: " + saved.Demo.Path : Saved(e) ? "\nDemo saved" : "\nDouble-click or Enter: get the demo") : "\nNo demo on the board")
+					+ (e.Video != null ? "\nVideo: https://youtu.be/" + e.Video : "");
+			};
+			board.SelectionChanged += (s, e) => SyncBoardSelection();
+			board.Activated += (s, e) => GetBoardDemo();
 
 			list = new DemoList(look) { Dock = DockStyle.Fill, SortColumn = settings.SortColumn, SortDescending = settings.SortDescending != 0 };
 			list.Source = i => i >= 0 && i < rows.Count ? rows[i] : null;
@@ -201,8 +251,172 @@ namespace P2Practice {
 
 			var card = new Card { Dock = DockStyle.Fill, Padding = new Padding(1) };
 			card.Controls.Add(list);
+			card.Controls.Add(board);
 			card.Controls.Add(top);
+			list.Visible = !boardsView;
 			return card;
+		}
+
+		// ---- the leaderboards ----
+
+		void ShowBoards(bool on) {
+			if (boardsView == on && !building) return;
+			boardsView = on;
+			demosTab.Lit = !on;
+			boardsTab.Lit = on;
+			list.Visible = !on;
+			board.Visible = on;
+			search.Box.Text = on ? "" : searchText;
+			search.Hint = on ? "Filter by player" : "Search map, player or file";
+			var top = demosTab.Parent;
+			var place = top.Tag as EventHandler;
+			if (place != null) place(top, EventArgs.Empty);
+			if (on) {
+				board.Hint = boardMap == null ? "Choose a chamber above: its board is fetched from board.portal2.sr." : board.Hint;
+				if (boardMap != null && boardAll.Count == 0) LoadBoard(boardMap);
+				SyncBoardSelection();
+				board.Focus();
+			} else {
+				SyncSelection();
+				list.Focus();
+			}
+		}
+
+		// The chambers, chapter by chapter, as a menu under the chamber button
+		void ChamberMenu() {
+			var menu = new ContextMenuStrip { Font = look.Body, ShowImageMargin = false, BackColor = Theme.Panel, Renderer = new SignMenuRenderer() };
+			foreach (var chapter in Boards.Chapters()) {
+				var item = new ToolStripMenuItem(chapter.Name);
+				foreach (var chamber in chapter.Chambers) {
+					string map = chamber.Key;
+					item.DropDownItems.Add(new ToolStripMenuItem(chamber.Value, null, (s, e) => LoadBoard(map)) { Checked = map == boardMap });
+				}
+				var drop = item.DropDown as ToolStripDropDownMenu;
+				if (drop != null) { drop.Font = look.Body; drop.ShowImageMargin = false; drop.BackColor = Theme.Panel; drop.Renderer = new SignMenuRenderer(); }
+				menu.Items.Add(item);
+			}
+			menu.Show(chamberButton, new Point(0, chamberButton.Height));
+		}
+
+		// Fetches a chamber's board (once per session) in the background and shows it
+		void LoadBoard(string map) {
+			boardMap = map;
+			chamberButton.Text = Maps.Name(map).ToUpper() + "  ▾";
+			chamberButton.Width = (int)Math.Ceiling(Ui.TrackedWidth(chamberButton.Text, look.Caps, S)) + P(38);
+			var place = demosTab.Parent.Tag as EventHandler;
+			if (place != null) place(demosTab.Parent, EventArgs.Empty);
+			List<Boards.Entry> cached;
+			if (boardCache.TryGetValue(map, out cached)) { boardAll = cached; ApplyBoardRows(); return; }
+			boardAll = new List<Boards.Entry>();
+			boardRows = new List<Boards.Entry>();
+			board.Count = 0;
+			board.Hint = "Fetching the " + Maps.Name(map) + " board…";
+			if (boardBusy) return; // (the one being fetched will hand over to the chamber wanted by then)
+			boardBusy = true;
+			ThreadPool.QueueUserWorkItem(_ => {
+				List<Boards.Entry> result = null;
+				string error = null;
+				try { result = Boards.Fetch(map); }
+				catch (Exception ex) { error = ex.Message; }
+				try {
+					BeginInvoke((Action)(() => {
+						boardBusy = false;
+						if (result != null) boardCache[map] = result;
+						if (boardMap != map) { LoadBoard(boardMap); return; }
+						if (result == null) { board.Hint = "The board couldn't be fetched: " + error; return; }
+						boardAll = result;
+						ApplyBoardRows();
+					}));
+				} catch (InvalidOperationException) { } // (the window went away)
+			});
+		}
+
+		// The board's rows through the player filter, keeping the selection
+		void ApplyBoardRows() {
+			string filter = search.Box.Text.Trim().ToLowerInvariant();
+			var shown = filter.Length == 0 ? new List<Boards.Entry>(boardAll) : boardAll.Where(e => e.Players.ToLowerInvariant().Contains(filter)).ToList();
+			string key = board.Selected >= 0 && board.Selected < boardRows.Count ? boardRows[board.Selected].Key : null;
+			boardRows = shown;
+			board.Count = boardRows.Count;
+			board.SelectRow(key != null ? boardRows.FindIndex(e => e.Key == key) : -1, true);
+			board.Hint = boardRows.Count > 0 ? "" : boardAll.Count > 0 ? "No run by \"" + search.Box.Text.Trim() + "\" on this board." : boardMap == null ? "Choose a chamber above: its board is fetched from board.portal2.sr." : board.Hint;
+			SyncBoardSelection();
+		}
+
+		Boards.Entry BoardSelected() {
+			int i = board.Selected;
+			return i >= 0 && i < boardRows.Count ? boardRows[i] : null;
+		}
+
+		// A board row that is downloaded shows as its run on the right; one that isn't shows what getting it would do
+		void SyncBoardSelection() {
+			if (building || !boardsView) return;
+			var e = BoardSelected();
+			getButton.Enabled = e != null && e.Complete && !Saved(e);
+			if (e == null) { ShowRun(null); return; }
+			var run = Saved(e) ? RunOf(e) : null;
+			if (run != null) { if (selected == null || selected.Key != run.Key) ShowRun(run); return; }
+			ShowRun(null);
+			sign.Time = e.TimeText;
+			sign.Title = Maps.Name(boardMap).ToUpper();
+			sign.Sub = boardMap.ToUpper() + "   ·   " + (boardMap.StartsWith("mp_") ? "CO-OP" : "SINGLE PLAYER") + "   ·   RANK " + e.Rank;
+			sign.Empty = false;
+			if (e.Partner == null) sign.Players.Add(new RunHeader.Player { Name = e.Player });
+			else {
+				sign.Players.Add(new RunHeader.Player { Chip = Theme.Blue, Name = e.Player });
+				sign.Players.Add(new RunHeader.Player { Chip = Theme.Orange, Name = e.Partner.Player });
+			}
+			sign.Players.Add(new RunHeader.Player { Name = e.Complete ? (wantedDemo != null && wantedDemo == Boards.DemoPath(boardMap, e) ? "fetching the demo…" : "not fetched yet: press Enter or Get demo") : "no demo on the board", Aside = true });
+			sign.Invalidate();
+		}
+
+		// the library's run for a demo file, if it has been read
+		Run RunOf(string path) {
+			return allRuns.FirstOrDefault(r => Settings.SamePath(r.Demo.Path, path) || (r.Partner != null && Settings.SamePath(r.Partner.Path, path)));
+		}
+
+		// The library's run for a board entry: the demo fetched into the boards folder, or one already in a folder
+		// under the board's own file name (it ends in the run's changelog id)
+		Run RunOf(Boards.Entry e) {
+			if (e == null || boardMap == null) return null;
+			var run = RunOf(Boards.DemoPath(boardMap, e));
+			if (run != null) return run;
+			string tail = "_" + e.ChangelogId;
+			return allRuns.FirstOrDefault(r => r.Ok && (r.Demo.Name.EndsWith(tail, StringComparison.Ordinal) || (r.Partner != null && r.Partner.Name.EndsWith(tail, StringComparison.Ordinal))));
+		}
+
+		bool Saved(Boards.Entry e) { return e != null && e.Complete && (Boards.Downloaded(boardMap, e) || RunOf(e) != null); }
+
+		// Downloads the selected run's demo(s) in the background; the library then reads them and the run is selected
+		void GetBoardDemo() {
+			var e = BoardSelected();
+			if (e == null || boardMap == null) return;
+			if (!e.Complete) { Say("That run has no demo on the board.", true); return; }
+			string map = boardMap;
+			if (Saved(e)) {
+				var run = RunOf(e);
+				if (run != null) { ShowRun(run); Launch(); }
+				return;
+			}
+			if (wantedDemo != null) { Say("Still fetching the last one…"); return; }
+			wantedDemo = Boards.DemoPath(map, e);
+			getButton.Enabled = false;
+			Say("Fetching " + e.Players + "'s " + Maps.Name(map) + " demo from the board…");
+			SyncBoardSelection();
+			ThreadPool.QueueUserWorkItem(_ => {
+				string error = null;
+				try { Boards.Download(map, e); }
+				catch (Exception ex) { error = ex.Message; }
+				try {
+					BeginInvoke((Action)(() => {
+						if (error != null) { wantedDemo = null; Say("The demo couldn't be fetched: " + error, true); SyncBoardSelection(); return; }
+						Say("Fetched " + e.Players + "'s " + Maps.Name(map) + " demo. Reading it…");
+						if (!settings.HasFolder(Boards.Folder)) { settings.Folders.Add(Boards.Folder); settings.FoldersSaved = true; settings.Save(); }
+						library.Start(settings.Folders);
+						board.Invalidate();
+					}));
+				} catch (InvalidOperationException) { }
+			});
 		}
 
 		// The sign on the right: the run, its parts, the options, Launch.
@@ -258,7 +472,7 @@ namespace P2Practice {
 			show.Controls.Add(keys, 0, 1);
 			show.Controls.Add(line, 1, 1);
 			AddOption(opt, new Caption(look, "SHOW"), show);
-			AddOption(opt, new Caption(look, "GHOSTS"), Across(ghostColor, new Caption(look, "OPACITY %") { Margin = new Padding(P(10), 0, P(8), 0) }, ghostOpacity));
+			AddOption(opt, new Caption(look, "GHOSTS"), Across(ghostColor, new Caption(look, "OPACITY %") { Margin = new Padding(P(8), 0, P(6), 0) }, ghostOpacity));
 
 			leadIn = new Stepper(look, Options.MinLeadIn, Options.MaxLeadIn, 0.5, 1) { Margin = Padding.Empty };
 			leadIn.Tip(tips, "Lead-in: seconds of the record that play before you take over.");
@@ -348,7 +562,34 @@ namespace P2Practice {
 			items.Add(new ToolStripMenuItem("&Find it through Steam", null, (s, e) => FindGame()));
 			items.Add(new ToolStripSeparator());
 			items.Add(new ToolStripMenuItem("&Remove plugin from game", null, (s, e) => RemovePlugin()) { Enabled = found });
+			items.Add(new ToolStripSeparator());
+			foreach (var choice in new[] { new[] { "system", "Follow &Windows" }, new[] { "light", "&Light" }, new[] { "dark", "&Dark" } }) {
+				string mode = choice[0];
+				items.Add(new ToolStripMenuItem(choice[1], null, (s, e) => SetTheme(mode)) { Checked = settings.Theme == mode });
+			}
 			Dress(gameMenu);
+		}
+
+		// Light or dark: the palette is switched and the window built again in it
+		void SetTheme(string mode) {
+			settings.Theme = mode;
+			bool dark = mode == "dark" || (mode == "system" && Native.SystemPrefersDark());
+			if (dark == Theme.IsDark) return;
+			Theme.Apply(dark);
+			Native.DarkTitleBar(Handle, dark);
+			ReadOptions();
+			var oldControls = Controls.Cast<Control>().ToList();
+			var oldLook = look;
+			var oldTips = tips;
+			SuspendLayout();
+			Controls.Clear();
+			BuildUi();
+			ResumeLayout(true);
+			foreach (var c in oldControls) c.Dispose();
+			oldTips.Dispose();
+			oldLook.Dispose();
+			if (selected != null) list.SelectRow(rows.FindIndex(r => r.Key == selected.Key), true);
+			Invalidate(true);
 		}
 
 		// a drop-down in the window's face, without the empty strip menus keep for pictures
@@ -509,6 +750,15 @@ namespace P2Practice {
 				lastRefresh = DateTime.UtcNow;
 				allRuns = Run.Build(library.Snapshot());
 				ApplyRows();
+				if (wantedDemo != null) {
+					var run = RunOf(wantedDemo);
+					if (run != null && run.Ok && (run.Partner != null || !run.Coop || !library.Busy)) {
+						wantedDemo = null;
+						Say("");
+						ShowRun(run);
+						if (boardsView) { getButton.Enabled = false; board.Invalidate(); }
+					}
+				}
 				if (!library.Busy) {
 					// demos that weren't read because the helper itself failed: say so once, it is not the demos' fault
 					var failed = allRuns.Where(r => !r.Ok && r.Demo.Scan.Transient).ToList();
@@ -867,6 +1117,11 @@ namespace P2Practice {
 		}
 
 		public bool LibraryIdle { get { return !library.Busy && shownVersion == library.Version; } }
+		public bool BoardReady { get { return !boardBusy && boardRows.Count > 0; } }
+		public void ShowBoard(string map) { ShowBoards(true); LoadBoard(map); }
+		public void SelectBoardRow(int index) { if (index >= 0 && index < boardRows.Count) board.Pick(index); }
+		public void GetBoard() { GetBoardDemo(); }
+		public bool Fetched { get { return wantedDemo == null; } }
 		public bool RunReady { get { return selected == null || !selected.Ok || infos.ContainsKey(selected.Key); } }
 
 		public void SelectRow(int index) {

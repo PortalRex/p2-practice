@@ -40,8 +40,18 @@ the game honours only one `+plugin_load` on its command line.
 
 `P2Practice.exe` lists the demos in the folders you add (co-op pairs are shown as one run), shows the selected
 run's parts, and starts the game with everything set up: which robot you play, bot or real partner, which part
-to start from, practice or watch, what is shown and in which colour the ghosts are drawn. If the game is already running it writes `cfg/p2practice_launch.cfg` and puts
-`exec p2practice_launch` on the clipboard for you to paste into the console.
+to start from, practice or watch, what is shown and in which colour and opacity the ghosts are drawn. If the
+game is already running it writes `cfg/p2practice_launch.cfg` and puts `exec p2practice_launch` on the
+clipboard for you to paste into the console.
+
+**BOARDS** shows the Challenge Mode leaderboards from [board.portal2.sr](https://board.portal2.sr): pick a
+chamber, and every run on its board is listed with its time, players, date and whether a demo is there. Enter or
+Get demo fetches the demo (both robots' for co-op) into `demosoards` next to the launcher, after which the run
+is read and ready to launch like any other; a run whose demo is already in one of your folders shows as saved.
+Co-op runs are paired by their time and date, so a run whose partner has since set a better time appears alone
+(its one demo still works: the partner's path then comes from the host's snapshots).
+
+The window follows Windows' light or dark mode; Game > Light / Dark sets it.
 
 ## Console commands
 

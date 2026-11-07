@@ -100,7 +100,8 @@ namespace P2Practice {
 	class SignButton : SignControl {
 		public bool Primary;
 		public string Icon;
-		bool hot, down;
+		bool hot, down, lit;
+		public bool Lit { get { return lit; } set { if (lit == value) return; lit = value; Invalidate(); } }  // held lit, as a tab that is open
 
 		public SignButton(Look look, string text) : base(look, true) {
 			Text = AccessibleName = text;
@@ -126,7 +127,7 @@ namespace P2Practice {
 			var r = new RectangleF(0, 0, Width, Height);
 			float radius = P(3);
 			if (Primary) {
-				var fill = !Enabled ? Theme.Mix(Theme.Panel, Theme.Ink, 0.22f) : down ? Color.Black : hot ? Theme.Mix(Theme.Ink, Color.White, 0.10f) : Theme.Ink;
+				var fill = !Enabled ? Theme.Mix(Theme.Panel, Theme.Ink, 0.22f) : down ? Theme.Pressed : hot ? Theme.Mix(Theme.Ink, Theme.OnInk, 0.10f) : Theme.Ink;
 				Ui.FillRound(g, fill, r, radius);
 				if (Enabled) {
 					// the edge: the portal colour, fading inwards like light off a portal's rim
@@ -137,16 +138,16 @@ namespace P2Practice {
 					}
 					Ui.StrokeRound(g, L.Accent, r, radius, w);
 				}
-				var ink = Enabled ? Color.White : Theme.Panel;
+				var ink = Enabled ? Theme.OnInk : Theme.Panel;
 				float tracking = L.S * 3.2f, text = Ui.TrackedWidth(Text, L.Button, tracking), mark = Height * 0.46f, gap = P(12);
 				float x = (Width - (mark * 0.6f + gap + text)) / 2;
 				// an upright portal beside the word
 				Pict.Draw(g, "portal", new RectangleF(x - mark * 0.2f, (Height - mark) / 2, mark, mark), Enabled ? L.Accent : Theme.Panel, fill);
 				Ui.Tracked(g, Text, L.Button, ink, new RectangleF(x + mark * 0.6f + gap, 0, text + 8, Height), tracking);
-				if (KeyFocus && Enabled) Ui.StrokeRound(g, Color.FromArgb(200, Color.White), RectangleF.Inflate(r, -P(5), -P(5)), radius, Math.Max(1, P(1)));
+				if (KeyFocus && Enabled) Ui.StrokeRound(g, Color.FromArgb(200, Theme.OnInk), RectangleF.Inflate(r, -P(5), -P(5)), radius, Math.Max(1, P(1)));
 			} else {
-				var fill = !Enabled ? Theme.Panel : down ? Theme.Ink : hot ? Theme.Mix(Theme.Panel, Theme.Ink, 0.10f) : Theme.Panel;
-				var ink = !Enabled ? Theme.Pale : down ? Color.White : Theme.Ink;
+				var fill = !Enabled ? Theme.Panel : down || lit ? Theme.Ink : hot ? Theme.Mix(Theme.Panel, Theme.Ink, 0.10f) : Theme.Panel;
+				var ink = !Enabled ? Theme.Pale : down || lit ? Theme.OnInk : Theme.Ink;
 				Ui.FillRound(g, fill, r, radius);
 				Ui.StrokeRound(g, Enabled ? Theme.Ink : Theme.Pale, r, radius, Math.Max(1, P(1)) * (KeyFocus ? 2 : 1));
 				float x = P(12);
@@ -238,7 +239,7 @@ namespace P2Practice {
 	// click (or Delete) goes back to the default, which is described in words.
 	class ColorPick : SignControl {
 		public Color? Chosen { get; set; }  // null: the default
-		public string DefaultText = "";   // what the default is, shown in place of a colour
+		string defaultText = "";
 		public event EventHandler Changed;
 		bool hot;
 
@@ -246,7 +247,16 @@ namespace P2Practice {
 			Text = AccessibleName = text;
 			AccessibleRole = AccessibleRole.PushButton;
 			Cursor = Cursors.Hand;
-			Size = new Size(P(3) + Square + P(7) + (int)Math.Ceiling(Ui.Width(text + ": robot colours", look.Body)) + P(8), P(26));
+			Fit();
+		}
+
+		// what the default is, shown in place of a colour
+		public string DefaultText { get { return defaultText; } set { defaultText = value ?? ""; Fit(); } }
+
+		// as wide as the longer of its two readings
+		void Fit() {
+			float longest = Math.Max(Ui.Width(Text + ": " + defaultText, L.Body), Ui.Width(Text + ": #FFFFFF", L.Body));
+			Size = new Size(P(3) + Square + P(7) + (int)Math.Ceiling(longest) + P(6), P(26));
 		}
 
 		int Square { get { return P(22); } }
@@ -308,7 +318,9 @@ namespace P2Practice {
 	// A framed text box: white, a thin black outline (thicker while typing in it), an optional pictogram.
 	class TextField : SignControl {
 		public readonly TextBox Box;
-		readonly string icon, prompt;
+		readonly string icon;
+		string prompt;
+		public string Hint { get { return prompt; } set { prompt = value ?? ""; Invalidate(); } }  // the pale words in the empty box
 		bool entered; // the player is in the box (it stays so while another window is in front)
 		bool shown;   // the text box is showing, rather than the prompt
 
@@ -462,7 +474,7 @@ namespace P2Practice {
 				}
 				float mark = P(16);
 				Pict.Draw(g, side < 0 ? "minus" : "plus", new RectangleF(part.X + (Side - mark) / 2, (Height - mark) / 2, mark, mark),
-					!Enabled ? Theme.Pale : pressed ? Color.White : Theme.Ink, Theme.Input);
+					!Enabled ? Theme.Pale : pressed ? Theme.OnInk : Theme.Ink, Theme.Input);
 				Ui.Fill(g, Theme.Ink, new RectangleF(side < 0 ? Side - line : Width - Side, 0, line, Height));
 			}
 			Ui.StrokeRound(g, Theme.Ink, r, P(3), line * (box.Focused || AllFocusCues ? 2 : 1));
@@ -770,6 +782,56 @@ namespace P2Practice {
 		}
 	}
 
+	// A chamber's leaderboard: Rank, Time, Players, Date, Demo (whether the board has one, and whether it is here
+	// already). Drawn like the demo list.
+	class BoardList : RowList {
+		static readonly string[] Titles = { "RANK", "TIME", "PLAYERS", "DATE", "DEMO" };
+		const int RankWidth = 60, TimeWidth = 74, DateWidth = 110, DemoWidth = 90; // at 100%
+		public Func<int, Boards.Entry> Source;
+		public Func<Boards.Entry, bool> IsHere;  // the run's demo is downloaded
+
+		public BoardList(Look look) : base(look) {
+			RowHeight = P(25);
+			HeaderHeight = P(30);
+		}
+
+		RectangleF Cell(Rectangle row, int column) {
+			int[] widths = { P(RankWidth), P(TimeWidth), Math.Max(P(60), RowsWidth - P(RankWidth + TimeWidth + DateWidth + DemoWidth)), P(DateWidth), P(DemoWidth) };
+			int x = row.X;
+			for (int i = 0; i < column; i++) x += widths[i];
+			float left = column == 0 ? P(14) : P(8);
+			return new RectangleF(x + left, row.Y, widths[column] - left - P(column <= 1 ? 10 : 6), row.Height);
+		}
+
+		protected override void DrawHeader(Graphics g, Rectangle box) {
+			Ui.Fill(g, BackColor, box);
+			for (int i = 0; i < Titles.Length; i++)
+				Ui.Tracked(g, Titles[i], L.Caps, Theme.Grey, Cell(box, i), L.S * 0.9f, i <= 1 ? ContentAlignment.MiddleRight : ContentAlignment.MiddleLeft);
+			Ui.Fill(g, Theme.Ink, new RectangleF(0, box.Bottom - Math.Max(1, P(1)), box.Width, Math.Max(1, P(1))));
+		}
+
+		protected override void DrawRow(Graphics g, int row, Rectangle box, bool selected, bool hot) {
+			var e = Source != null ? Source(row) : null;
+			if (e == null) return;
+			bool usable = e.Complete;
+			Color back = selected ? Theme.Ink : hot ? Theme.Mix(Theme.Panel, Theme.Ink, 0.09f) : row % 2 == 1 ? Theme.Stripe : BackColor;
+			Ui.Fill(g, back, box);
+			Color ink = selected ? Theme.OnInk : usable ? Theme.Ink : Theme.Pale;
+			Color soft = selected ? Theme.Mix(Theme.OnInk, Theme.Ink, 0.22f) : usable ? Theme.Grey : Theme.Pale;
+			if (selected) {
+				Ui.Fill(g, L.Accent, new RectangleF(box.X, box.Y, P(5), box.Height));
+				if (KeyFocus) Ui.StrokeRound(g, Color.FromArgb(150, Theme.OnInk), new RectangleF(box.X + P(7), box.Y + P(2), box.Width - P(9), box.Height - P(4)), 0, Math.Max(1, P(1)));
+			}
+			Ui.Text(g, e.Rank > 0 ? e.Rank.ToString() : "", L.Body, soft, Cell(box, 0), ContentAlignment.MiddleRight);
+			Ui.Text(g, e.TimeText, L.Body, ink, Cell(box, 1), ContentAlignment.MiddleRight);
+			Ui.Text(g, e.Players, L.Body, ink, Cell(box, 2));
+			Ui.Text(g, e.DateText, L.Body, soft, Cell(box, 3));
+			bool here = usable && IsHere != null && IsHere(e);
+			string demo = !usable ? "none" : here ? "saved" : "on the board";
+			Ui.Text(g, demo, L.Body, here ? ink : soft, Cell(box, 4));
+		}
+	}
+
 	// The demos: Map, Time, Players, Mode, File. Capital column heads over a rule, faint stripes, and the selected
 	// row inverted like a lit sign with a marker in the portal colour.
 	class DemoList : RowList {
@@ -840,12 +902,12 @@ namespace P2Practice {
 			if (run == null) return;
 			Color back = selected ? Theme.Ink : hot ? Theme.Mix(Theme.Panel, Theme.Ink, 0.09f) : row % 2 == 1 ? Theme.Stripe : BackColor;
 			Ui.Fill(g, back, box);
-			Color ink = selected ? Color.White : run.Ok ? Theme.Ink : Theme.Pale;
-			Color soft = selected ? Theme.Mix(Color.White, Theme.Ink, 0.22f) : run.Ok ? Theme.Grey : Theme.Pale;
+			Color ink = selected ? Theme.OnInk : run.Ok ? Theme.Ink : Theme.Pale;
+			Color soft = selected ? Theme.Mix(Theme.OnInk, Theme.Ink, 0.22f) : run.Ok ? Theme.Grey : Theme.Pale;
 			if (selected) {
 				// the marker: the portal colour of the robot about to be played
 				Ui.Fill(g, L.Accent, new RectangleF(box.X, box.Y, P(5), box.Height));
-				if (KeyFocus) Ui.StrokeRound(g, Color.FromArgb(150, Color.White), new RectangleF(box.X + P(7), box.Y + P(2), box.Width - P(9), box.Height - P(4)), 0, Math.Max(1, P(1)));
+				if (KeyFocus) Ui.StrokeRound(g, Color.FromArgb(150, Theme.OnInk), new RectangleF(box.X + P(7), box.Y + P(2), box.Width - P(9), box.Height - P(4)), 0, Math.Max(1, P(1)));
 			}
 			Ui.Text(g, run.MapName, L.Body, ink, Cell(box, 0));
 			Ui.Text(g, run.TimeText, L.Body, ink, Cell(box, 1), ContentAlignment.MiddleRight);
@@ -1012,12 +1074,12 @@ namespace P2Practice {
 
 		protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
 			bool lit = e.Item.Enabled && (e.Item.Selected || e.Item.Pressed);
-			e.TextColor = Top(e.Item) ? Color.White : !e.Item.Enabled ? Theme.Pale : lit ? Color.White : Theme.Ink;
+			e.TextColor = Top(e.Item) ? Color.White : !e.Item.Enabled ? Theme.Pale : lit ? Theme.OnInk : Theme.Ink;
 			base.OnRenderItemText(e);
 		}
 
 		protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
-			e.ArrowColor = e.Item.Enabled && (e.Item.Selected || e.Item.Pressed) ? Color.White : Theme.Ink;
+			e.ArrowColor = e.Item.Enabled && (e.Item.Selected || e.Item.Pressed) ? Theme.OnInk : Theme.Ink;
 			base.OnRenderArrow(e);
 		}
 
@@ -1031,6 +1093,25 @@ namespace P2Practice {
 		public struct RECT { public int Left, Top, Right, Bottom; }
 
 		[DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
+		[DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+
+		// A dark title bar and frame to go with the dark mode (Windows 10 from 1809 on; nothing happens elsewhere)
+		public static void DarkTitleBar(IntPtr window, bool dark) {
+			int on = dark ? 1 : 0;
+			try {
+				if (DwmSetWindowAttribute(window, 20, ref on, 4) != 0) DwmSetWindowAttribute(window, 19, ref on, 4);
+			} catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+		}
+
+		// Whether Windows is set to dark mode for apps
+		public static bool SystemPrefersDark() {
+			try {
+				using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")) {
+					var value = key == null ? null : key.GetValue("AppsUseLightTheme");
+					return value is int && (int)value == 0;
+				}
+			} catch (Exception) { return false; }
+		}
 
 		// pixels per 100%-scale unit on the monitor the window is on (1 = 100%, 1.5 = 150%)
 		public static float ScaleOf(Control window) {

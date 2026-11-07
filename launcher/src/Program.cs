@@ -21,6 +21,8 @@ namespace P2Practice {
 		public static bool ApplyFiles;        // --apply-files: with --dry-run, still install the plugin / write the cfg (tests, with --game)
 		public static string GameOverride;    // --game <folder>: use this Portal 2 folder, without remembering it
 		public static string Screenshot;      // --screenshot <file.png>: render the window to a file without showing it
+		public static string Board;           // --board <map>: the screenshot shows that chamber's leaderboard
+		public static bool Get;               // --get: fetch the selected board run's demo before the screenshot
 		public static int Select = -1;        // --select <row>: the row selected in the screenshot (0 = first)
 		public static int Dpi;                // --dpi <percent>: lay the screenshot out as on a monitor at this scale
 		public static int Part;               // --part <number>: the part selected in the screenshot
@@ -55,6 +57,8 @@ namespace P2Practice {
 					case "--home": if (next != null) { Home = Path.GetFullPath(next); i++; } break;
 					case "--game": if (next != null) { GameOverride = Path.GetFullPath(next); i++; } break;
 					case "--screenshot": if (next != null) { Screenshot = Path.GetFullPath(next); i++; } break;
+					case "--board": if (next != null) { Board = next; i++; } break;
+					case "--get": Get = true; break;
 					case "--search": if (next != null) { Search = next; i++; } break;
 					case "--select": if (int.TryParse(next, out n)) { Select = n; i++; } break;
 					case "--dpi": if (int.TryParse(next, out n)) { Dpi = Math.Max(50, Math.Min(400, n)); i++; } break;
@@ -125,7 +129,12 @@ namespace P2Practice {
 					timer.Tick += (s, e) => {
 						try {
 							if (DateTime.UtcNow > deadline) throw new TimeoutException("the window did not settle in time");
-							if (step == 0 && form.LibraryIdle) { form.SelectRow(App.Select); step = 1; }
+							if (step == 0 && form.LibraryIdle) {
+								if (App.Board != null) { form.ShowBoard(App.Board); step = 10; }
+								else { form.SelectRow(App.Select); step = 1; }
+							}
+							else if (step == 10 && form.BoardReady) { form.SelectBoardRow(App.Select); if (App.Get) { form.GetBoard(); step = 11; } else step = 2; }
+							else if (step == 11 && form.Fetched && form.LibraryIdle && form.RunReady) step = 2;
 							else if (step == 1 && form.RunReady) {
 								if (App.SelfTest) form.SelfTest();
 								if (App.Part > 0) form.SelectPart(App.Part);

@@ -89,6 +89,7 @@ namespace P2Practice {
 		public int Width, Height, Left = int.MinValue, Top = int.MinValue;
 		public bool Maximized;
 		public int SortColumn, SortDescending;
+		public string Theme = "system";                           // "system" (follow Windows), "light" or "dark"
 
 		static string FilePath { get { return Path.Combine(App.Home, "P2Practice.ini"); } }
 
@@ -113,6 +114,7 @@ namespace P2Practice {
 						case "maximized": s.Maximized = v == "1"; break;
 						case "sort": if (num) s.SortColumn = n; break;
 						case "sortdescending": s.SortDescending = v == "1" ? 1 : 0; break;
+						case "theme": s.Theme = v == "light" || v == "dark" ? v : "system"; break;
 						default: s.Options.Set(k, v); break;
 					}
 				}
@@ -152,6 +154,7 @@ namespace P2Practice {
 			lines.Add("game=" + (GameChosen ? GameDir : "")); // empty: look it up through Steam each time
 			lines.Add("folders=" + Folders.Count);
 			foreach (var f in Folders) lines.Add("folder=" + f);
+			lines.Add("theme=" + Theme);
 			lines.Add("width=" + Width);
 			lines.Add("height=" + Height);
 			if (Left != int.MinValue) { lines.Add("left=" + Left); lines.Add("top=" + Top); }
