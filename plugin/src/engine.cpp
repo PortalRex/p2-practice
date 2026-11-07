@@ -235,7 +235,10 @@ bool Init(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn server
 	return true;
 }
 
+static void UnhookClientCommands();
+
 void Shutdown() {
+	UnhookClientCommands();
 	for (sdk::ConCommand *command : g_commands) {
 		CallVirtual<void>(g_cvar, sdk::slot::UnregisterConCommand, command);
 		delete command;
@@ -478,6 +481,73 @@ static bool SendUserMessage(int type, const char *name, const void *bytes, int c
 bool SendScoreboard(int portals, int hundredths) {
 	int payload[2] = {portals, hundredths};
 	return SendUserMessage(FindScoreboardMessage(), "ScoreboardTempUpdate", payload, 8);
+}
+
+// ---- commands to players' consoles, held back on request ----
+// The engine's ClientCommand takes a format and arguments, so it is __cdecl with the interface as its first
+// argument (as the game calls it: engine, edict, "%s", text).
+namespace {
+using ClientCommandFn = void(__cdecl *)(void *self, sdk::Edict *edict, const char *format, ...);
+ClientCommandFn g_clientCommand = nullptr;  // the engine's own (or whoever had the slot before)
+void **g_clientCommandSlot = nullptr;
+bool (*g_holdCommand)(const char *) = nullptr;
+struct HeldCommand {
+	sdk::Edict *edict;
+	std::string text;
+};
+std::vector<HeldCommand> g_heldCommands;
+
+void __cdecl HookedClientCommand(void *self, sdk::Edict *edict, const char *format, ...) {
+	char text[512];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(text, sizeof(text), format, args);
+	va_end(args);
+	if (g_holdCommand && g_holdCommand(text)) {
+		g_heldCommands.push_back({edict, text});
+		return;
+	}
+	g_clientCommand(self, edict, "%s", text);
+}
+
+bool WriteSlot(void **slot, void *value) {
+	DWORD old;
+	if (!VirtualProtect(slot, sizeof(void *), PAGE_READWRITE, &old)) return false;
+	*slot = value;
+	VirtualProtect(slot, sizeof(void *), old, &old);
+	return true;
+}
+}  // namespace
+
+void HoldClientCommands(bool (*hold)(const char *command)) {
+	g_holdCommand = hold;
+	if (g_clientCommandSlot || !g_engineServer) return;
+	void **slot = *static_cast<void ***>(g_engineServer) + sdk::slot::ClientCommand;
+	void *original = *slot;
+	if (!WriteSlot(slot, reinterpret_cast<void *>(&HookedClientCommand))) return;
+	g_clientCommand = reinterpret_cast<ClientCommandFn>(original);
+	g_clientCommandSlot = slot;
+}
+
+void ReleaseClientCommands() {
+	std::vector<HeldCommand> held;
+	held.swap(g_heldCommands);
+	for (const HeldCommand &command : held) g_clientCommand(g_engineServer, command.edict, "%s", command.text.c_str());
+}
+
+size_t HeldClientCommands() { return g_heldCommands.size(); }
+
+void DropHeldClientCommands() { g_heldCommands.clear(); }
+
+// The engine's ClientCommand back in its slot (what was held goes out first), unless someone hooked it over
+// ours since
+static void UnhookClientCommands() {
+	if (g_clientCommandSlot && *g_clientCommandSlot == reinterpret_cast<void *>(&HookedClientCommand)) {
+		ReleaseClientCommands();
+		WriteSlot(g_clientCommandSlot, reinterpret_cast<void *>(g_clientCommand));
+	}
+	g_clientCommandSlot = nullptr;
+	g_holdCommand = nullptr;
 }
 
 // Development aid: a chat line (SayText: sender's entity index, the text, whether it is chat), to see that

@@ -39,7 +39,10 @@ constexpr int ExecuteClientCmd = 104;
 // IServerGameDLL (SAR)
 constexpr int GetAllServerClasses = 10;
 constexpr int GetUserMessageInfo = 28;   // (the engine's MessageEnd calls it through this slot)
-// IVEngineServer (the engine's vtable: slots 44 and 45 start and end a user message)
+// IVEngineServer (the engine's vtable: slots 44 and 45 start and end a user message; 39 is ClientCommand,
+// "void ClientCommand(edict_t *, const char *format, ...)", which the server's game rules call with
+// "leaderboard_open 1" to open the Challenge Mode finish board)
+constexpr int ClientCommand = 39;
 constexpr int UserMessageBegin = 44;
 constexpr int MessageEnd = 45;
 // IPlayerInfoManager

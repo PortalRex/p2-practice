@@ -44,6 +44,15 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	return to.Dot(aim) / distance
 }
 
+// A floor button pressed and released in the same moment, as a player pressed it with the "button glitch": both
+// inputs go out with no delay, so the button sends its pressed output and then its released one within one tick
+::PP.PressAndRelease <- function(name) {
+	local b = Entities.FindByName(null, name)
+	if (b == null || b.GetClassname().find("floor_button") == null) return
+	EntFireByHandle(b, "PressIn", "", 0, null, null)
+	EntFireByHandle(b, "PressOut", "", 0, null, null)
+}
+
 // Use something as a player: the thing of that kind (and name, if the run recorded one) that the player is
 // looking at within reach. A player also reaches through a portal: for each pair of portals given (entity
 // numbers, -1 for none), a look into one of them is carried on from the other. Buttons get pressed this way;

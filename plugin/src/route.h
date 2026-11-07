@@ -62,6 +62,15 @@ struct UseEvent {
 	std::string target;     // the thing's name in the map, "" when it has none
 };
 
+// A floor button a player pressed and released within one tick (the "button glitch"): its pressed output fired
+// and then its released one, and a map whose released output closes something with a delay that the pressed one
+// cancels keeps the thing open for good. Seen in SAR's record of the instance's io proxy firing both relays at once.
+struct ButtonGlitch {
+	int tick = 0;
+	int actor = -1;
+	std::string button;  // the floor button's name in the map ("<instance>-button")
+};
+
 // A portal opening, moving or closing
 struct PortalChange {
 	int tick = 0;
@@ -103,6 +112,7 @@ struct Route {
 	std::vector<PortalChange> portals;  // in tick order
 	std::vector<Mover> movers;          // objects the run moved, with their recorded paths
 	std::vector<UseEvent> uses;         // in tick order
+	std::vector<ButtonGlitch> buttonGlitches;  // in tick order
 	bool hasUses = false;               // the demo records uses (SAR, host's demo); otherwise they are guessed from the keys
 	std::vector<Event> events;          // in tick order
 	std::vector<Segment> segments;      // consecutive, from the first moment of control to the finish

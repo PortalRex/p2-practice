@@ -141,6 +141,7 @@ struct Session {
 	bool flagsGone = false;          // a finish took them: the next attempt needs a fresh level
 	bool dimmed = false;             // the screen is black for a catch-up (::PP.Dim)
 	int doneTicks = 0;
+	int boardHeldFrames = 0;         // frames the finish board's opening has been held back (TellBoard)
 	int attempts = 0;
 	std::vector<int> objectLastDriven;  // per route object: the last tick a driven player carried it
 	std::vector<int> useKeyDown;        // players (entity indices) whose use key the trainer is holding this tick
@@ -153,6 +154,8 @@ struct Session {
 Session g;
 
 constexpr int kHudInterval = 6;  // ticks between text updates
+constexpr int kBoardHoldFrames = 10;  // frames the finish board's opening waits at most for the attempt's time (see TellBoard)
+constexpr int kButtonGlitchDelay = 10;  // ticks after a recorded button glitch that the trainer repeats it (see DriveSlots)
 constexpr float kFinishRadius = 56;
 constexpr float kGhostHideDistance = 44;
 
@@ -199,6 +202,8 @@ bool ChallengeMode();
 bool WatchFlags();
 void FinishAtFlags();
 void TellBoard();
+bool HoldBoard(const char *command);
+void ReleaseStaleBoard();
 int TickAtSeconds(float seconds);
 
 // In Challenge Mode the game opens its leaderboard a few seconds into every level load, and pauses for it until
@@ -1068,7 +1073,9 @@ void Approach() {
 	int clock = LevelClock();
 	bool joined = clock != kNoClock && clock >= common && clock <= g.handover - kShortestLeadTicks;
 	if (joined) g.leadStart = std::max(g.leadStart, clock);
-	bool unseen = g_set.reset != kResetSoft && g.worldReached < g.leadStart && WorldEventsBetween(DriverTick(g.worldReached), DriverTick(g.leadStart));
+	// (with instant retries too: a retry never reloads the level, but a level that hasn't seen the run's start yet,
+	// a fresh one, still has to be brought up to the lead-in, or a button the run pressed before it stays up)
+	bool unseen = g.worldReached < g.leadStart && WorldEventsBetween(DriverTick(g.worldReached), DriverTick(g.leadStart));
 	if ((joined && clock < g.leadStart) || unseen) {
 		// The map hasn't seen what the run did before this point (or its clock isn't there yet): play that
 		// stretch through quickly
@@ -1246,6 +1253,16 @@ void DriveSlots() {
 		// something that is as it should be; as soon as they don't, the driven player lets go.
 		engine::PlayerState live;
 		if (s.held < 0 && engine::GetPlayer(player, live) && live.held > 0) DropCarried(g.slots[i]);
+
+		// A floor button the run's player pressed and released within one tick stays "pressed" for the map. The
+		// driven player passes over it as the run's did, but at catch-up speed the game's frames fall differently
+		// and the press and the release come apart. So the button is given both at once, as the run gave it, a
+		// moment later (when the driven player has stepped off): the same outputs in the same order. (Where the
+		// driven player already did it, this changes nothing.)
+		for (const route::ButtonGlitch &glitch : driver.buttonGlitches) {
+			if (glitch.actor != actor || glitch.tick + kButtonGlitchDelay != tick) continue;
+			engine::Script("::PP.PressAndRelease(\"%s\")", glitch.button.c_str());
+		}
 	}
 }
 
@@ -1517,10 +1534,32 @@ void FinishAtFlags() {
 // The game's finish board shows the time of the run it recorded, so "-" here: at a finish at the flags it is
 // told the attempt's time instead. Once, at the finish only: the board also keeps the best value it was ever
 // told as the player's own entry in its list, so a running time sent earlier would stand there in its place.
+// The board fills its Final box once, when it opens, from the best time it was told for the level. The game
+// opens it ("leaderboard_open 1" sent to the players' consoles) in the frame the flags are touched, and the
+// plugin only sees the touch a frame later: the board would be up before the time reaches it, and say "-".
+// So while an attempt runs towards the flags, that command is held back (HoldBoard), and it goes out here,
+// right after the time.
 void TellBoard() {
-	if (!ChallengeMode() || g.replaying) return;
-	// The time of the tick just simulated (the finish's own), in hundredths cut off as the board shows them
-	engine::SendScoreboard(-1, static_cast<int>(g.route.TimeAt(g.cursor - 1) * 100 + 0.001f));
+	if (ChallengeMode() && !g.replaying) {
+		// The time of the tick just simulated (the finish's own), in hundredths cut off as the board shows them
+		engine::SendScoreboard(-1, static_cast<int>(g.route.TimeAt(g.cursor - 1) * 100 + 0.001f));
+	}
+	engine::ReleaseClientCommands();
+	g.boardHeldFrames = 0;
+}
+
+// Whether a command the server sends to a player's console waits for TellBoard: the finish board's opening,
+// while an attempt of the person's own runs towards the flags
+bool HoldBoard(const char *command) {
+	return !strcmp(command, "leaderboard_open 1") && g.mode == Mode::Run && !g.replaying && ChallengeMode() && g.flagsUp;
+}
+
+// A held board that no finish came for (the flags went some other way) goes out after a few frames anyway
+void ReleaseStaleBoard() {
+	if (engine::HeldClientCommands() == 0) return;
+	if (++g.boardHeldFrames < kBoardHoldFrames) return;
+	engine::ReleaseClientCommands();
+	g.boardHeldFrames = 0;
 }
 
 bool AllTrackedFinished() {
@@ -2123,6 +2162,7 @@ void Init() {
 	for (const Command &command : kCommands)
 		if (!engine::RegisterCommand(command.name, command.callback, command.help)) engine::Warn("Couldn't register %s.\n", command.name);
 	WriteHelperScript();
+	engine::HoldClientCommands(HoldBoard);
 }
 
 void Shutdown() {
@@ -2142,6 +2182,8 @@ void OnLevelInit(const char *mapName) {
 	g.catapultMade = false;
 	g.flagsUp = false;
 	g.flagsGone = false;
+	engine::DropHeldClientCommands();  // (for the level that is gone)
+	g.boardHeldFrames = 0;
 	g.dimmed = false;  // (the game clears the screen fade with the level)
 	g.humanDead = false;
 	g.registeredModels.clear();
@@ -2208,6 +2250,7 @@ void OnFrame(bool simulating) {
 	}
 	if (g_scanEdicts) ScanEdicts(tick, restored);
 	g.lastTick = tick;
+	ReleaseStaleBoard();
 	if (!simulating) {
 		OnPausedFrame();
 		return;

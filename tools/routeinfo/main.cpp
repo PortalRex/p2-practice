@@ -93,6 +93,7 @@ int Samples(const std::vector<std::string> &paths, int from, int to) {
 	printf("world ticks:");
 	for (int tick : route.worldTicks) printf(" %d", tick);
 	printf("\n");
+	for (const auto &glitch : route.buttonGlitches) printf("button glitch: tick %d, actor %d, %s\n", glitch.tick, glitch.actor, glitch.button.c_str());
 	return 0;
 }
 

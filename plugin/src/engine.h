@@ -71,8 +71,17 @@ bool EntityExists(const char *className);
 // board, which otherwise shows "-" for a run it didn't record. False when the game offers no way.
 bool SendScoreboard(int portals, int hundredths);
 
+// Commands the server sends to players' consoles (engine->ClientCommand, which opens the finish board) pass
+// through `hold` first; the ones it holds wait until ReleaseClientCommands sends them. Installed once (the
+// engine's vtable slot is put back by Shutdown). HeldClientCommands says how many wait.
+void HoldClientCommands(bool (*hold)(const char *command));
+void ReleaseClientCommands();
+size_t HeldClientCommands();
+void DropHeldClientCommands();
+
 // Turns the game's god mode on or off for a player: the flag its own "god" command sets, which that command
-// can only set for the player typing it. This is the one place the plugin writes into the game's memory.
+// can only set for the player typing it. (With the ClientCommand slot of HoldClientCommands, the only places
+// the plugin writes into the game's memory.)
 void SetGodMode(int entIndex, bool on);
 
 // The entity indices of the two portals a player's portal gun shoots (-1 where it has none). False when the

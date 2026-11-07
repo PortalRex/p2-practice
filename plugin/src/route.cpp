@@ -362,6 +362,33 @@ bool ChangesWorld(const p2demo::SarEntityInput &input) {
 	return true;
 }
 
+// A demo without SAR's record of entity inputs (older SAR, or none) says nothing about the map's own state
+// changing. What the recording player saw of the map's machinery moving stands in for it: buttons going down,
+// doors, droppers, lifts. (Objects the trainer moves itself are left out; a turn or shift of a degree or half
+// a unit is the network's rounding, not a change.)
+void AddMachineryTicks(Route &route, const Demo &demo) {
+	std::vector<int> ticks;
+	for (const auto &track : demo.movers) {
+		std::string model = track.model;
+		std::transform(model.begin(), model.end(), model.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (MoverClass(track.className, model)) continue;
+		for (size_t i = 1; i < track.keys.size(); i++) {
+			const auto &a = track.keys[i - 1], &b = track.keys[i];
+			if (a.parent != b.parent || a.removed || b.removed) continue;
+			float turned = 0;
+			for (float d : {b.angles.x - a.angles.x, b.angles.y - a.angles.y, b.angles.z - a.angles.z}) {
+				d = std::fmod(std::fabs(d), 360.0f);
+				turned = std::max(turned, std::min(d, 360 - d));
+			}
+			if (Distance(a.origin, b.origin) > 0.5f || turned > 1) ticks.push_back(b.tick);
+		}
+	}
+	ticks.insert(ticks.end(), route.worldTicks.begin(), route.worldTicks.end());
+	std::sort(ticks.begin(), ticks.end());
+	ticks.erase(std::unique(ticks.begin(), ticks.end()), ticks.end());
+	route.worldTicks = std::move(ticks);
+}
+
 void AddEvent(Route &route, int tick, EventKind kind, int actor, std::string label) {
 	Event event;
 	event.tick = tick;
@@ -690,6 +717,7 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 
 	for (const auto &input : primary.sarEntityInputs)
 		if (ChangesWorld(input) && (route.worldTicks.empty() || route.worldTicks.back() != input.tick)) route.worldTicks.push_back(input.tick);
+	if (primary.sarEntityInputs.empty()) AddMachineryTicks(route, primary);
 
 	// What the players used
 	route.hasUses = !primary.sarEntityInputs.empty();
@@ -702,6 +730,28 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 		for (size_t a = 0; a < route.actors.size(); a++)
 			if (route.actors[a].entIndex == input.slot + 1) use.actor = static_cast<int>(a);
 		if (use.actor >= 0) route.uses.push_back(std::move(use));
+	}
+
+	// Floor buttons pressed and released within one tick by a player: the io proxy of the button's instance fires
+	// its first relay (pressed) and its second (released) on the same tick
+	for (size_t i = 0; i < primary.sarEntityInputs.size(); i++) {
+		const auto &a = primary.sarEntityInputs[i];
+		const std::string suffix = "-proxy";
+		if (a.slot < 0 || a.className != "func_instance_io_proxy" || a.input != "OnProxyRelay1" || a.target.size() <= suffix.size() ||
+		    a.target.compare(a.target.size() - suffix.size(), suffix.size(), suffix) != 0)
+			continue;
+		bool released = false;
+		for (size_t j = i + 1; j < primary.sarEntityInputs.size() && primary.sarEntityInputs[j].tick == a.tick; j++) {
+			const auto &b = primary.sarEntityInputs[j];
+			if (b.target == a.target && b.input == "OnProxyRelay2" && b.slot == a.slot) released = true;
+		}
+		if (!released) continue;
+		ButtonGlitch glitch;
+		glitch.tick = a.tick;
+		glitch.button = a.target.substr(0, a.target.size() - suffix.size()) + "-button";
+		for (size_t k = 0; k < route.actors.size(); k++)
+			if (route.actors[k].entIndex == a.slot + 1) glitch.actor = static_cast<int>(k);
+		if (glitch.actor >= 0) route.buttonGlitches.push_back(std::move(glitch));
 	}
 
 	// Objects the run moved. An object attached to something (parent) has an origin relative to it, which says
