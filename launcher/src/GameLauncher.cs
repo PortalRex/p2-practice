@@ -198,6 +198,7 @@ namespace P2Practice {
 			c.Add("prac_set leadin " + Options.Num(o.LeadIn));
 			c.Add("prac_set ghost " + (o.Ghost ? 1 : 0));
 			c.Add("prac_set ghostcolor " + (o.GhostColor == "" ? "team" : o.GhostColor));
+			c.Add("prac_set ghostopacity " + Options.Num(o.GhostOpacity));
 			c.Add("prac_set hud " + (o.Clock ? 1 : 0));
 			c.Add("prac_set keys " + (o.Keys ? 1 : 0));
 			c.Add("prac_set path " + (o.Line ? 1 : 0));

@@ -66,7 +66,7 @@ Maps are shown by their chamber names (Doors, Laser Stairs); commands take the f
 Settings (`prac_set` alone lists them): `leadin` (seconds the run plays itself before you take over, 1.5),
 `ghost`, `ghoststyle` (`basic`: a wireframe of the model's coarsest mesh with its small triangles left out;
 `wirelow`: that mesh whole; `wire`: the full mesh; `solid`), `ghostcolor` (`team` for the robots' own colours, or
-three numbers 0-255),
+three numbers 0-255), `ghostopacity` (percent; below 100 the ghosts are see-through),
 `hud`, `keys`, `path`, `partner` (the bot), `loop`, `autoreset` (retry when this far behind), `speed` (game
 speed), `reset` (`auto`, `soft`, `reload`), `snapshots`.
 

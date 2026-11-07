@@ -40,6 +40,7 @@ struct Settings {
 	bool challenge = true;   // practice every run in Challenge Mode (flags, the game's timer), not only runs made in it
 	bool ghostColorSet = false;  // the ghosts in one colour of the player's choosing rather than their robots' colours
 	int ghostColor[3] = {255, 255, 255};
+	int ghostOpacity = 100;      // percent; below 100 the ghosts are drawn see-through
 	int ghostStyle = kGhostBasic;  // how: kGhostSolid, kGhostWire, kGhostWireLow, kGhostBasic
 	bool hud = true;         // on-screen clock, delta, part
 	bool path = true;        // draw the route and its portal shots in the world (seen by the host)
@@ -486,12 +487,12 @@ Rgb GhostColor(int team) {
 	return TeamColor(team);
 }
 
-// Recolours the ghosts that exist (the setting changed mid-attempt)
+// Recolours the ghosts that exist (the colour or opacity changed mid-attempt)
 void RecolorGhosts() {
 	for (size_t a = 0; a < g.ghosts.size() && a < g.route.actors.size(); a++) {
 		if (!g.ghosts[a].entIndex) continue;
 		Rgb c = GhostColor(g.route.actors[a].team);
-		engine::Script("::PP.Gc(%d,%d,%d,%d)", static_cast<int>(a), c.r, c.g, c.b);
+		engine::Script("::PP.Gc(%d,%d,%d,%d,%d)", static_cast<int>(a), c.r, c.g, c.b, g_set.ghostOpacity * 255 / 100);
 	}
 }
 
@@ -562,6 +563,7 @@ void CreateGhosts() {
 		Rgb c = GhostColor(g.route.actors[a].team);
 		engine::Script("::PP.Ghost(%d,\"%s\",\"%s\",%d,%d,%d)", static_cast<int>(a), GhostModel(g.route.actors[a].team).c_str(),
 		               TeamModel(g.route.actors[a].team), c.r, c.g, c.b);
+		if (g_set.ghostOpacity < 100) engine::Script("::PP.Gc(%d,%d,%d,%d,%d)", static_cast<int>(a), c.r, c.g, c.b, g_set.ghostOpacity * 255 / 100);
 	}
 }
 
@@ -1880,6 +1882,7 @@ void PrintSettings() {
 	engine::Print("  challenge %d     practice every run in Challenge Mode (the flags end it); 0: only runs made in it\n", g_set.challenge);
 	if (g_set.ghostColorSet) engine::Print("  ghostcolor %d %d %d  the ghosts' colour (red green blue), or team for their robots' colours\n", g_set.ghostColor[0], g_set.ghostColor[1], g_set.ghostColor[2]);
 	else engine::Print("  ghostcolor team   the ghosts' colour: their robots' colours, or three numbers 0-255 (red green blue)\n");
+	engine::Print("  ghostopacity %d  how solid the ghosts are drawn, in percent\n", g_set.ghostOpacity);
 	engine::Print("  snapshots %d     retry instantly through ChocolateLoading's snapshots when it is running (experimental)\n", g_set.snapshots);
 }
 
@@ -1918,6 +1921,10 @@ void CmdSet(const sdk::CCommand &args) {
 			engine::Warn("ghostcolor takes \"team\" or three numbers 0-255 (red green blue).\n");
 			return;
 		}
+		if (g.helperLoaded) RecolorGhosts();
+	}
+	else if (name == "ghostopacity") {
+		g_set.ghostOpacity = std::clamp(static_cast<int>(number), 0, 100);
 		if (g.helperLoaded) RecolorGhosts();
 	}
 	else if (name == "snapshots") {

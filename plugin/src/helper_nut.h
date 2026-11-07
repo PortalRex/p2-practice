@@ -321,10 +321,12 @@ R"nut(
 	EntFireByHandle(ghosts[id], "SetAnimation", sequence, 0, null, null)
 }
 
-// A ghost's colour
-::PP.Gc <- function(id, r, g, b) {
+// A ghost's colour and opacity (0-255; below 255 it is drawn see-through, in the game's translucent pass)
+::PP.Gc <- function(id, r, g, b, a) {
 	if (!(id in ghosts) || ghosts[id] == null || !ghosts[id].IsValid()) return
 	ghosts[id].__KeyValueFromString("rendercolor", r + " " + g + " " + b)
+	ghosts[id].__KeyValueFromInt("renderamt", a)
+	ghosts[id].__KeyValueFromInt("rendermode", a < 255 ? 2 : 0)
 }
 
 // How fast a ghost's animation plays (1: as made)

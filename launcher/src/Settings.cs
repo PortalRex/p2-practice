@@ -12,6 +12,7 @@ namespace P2Practice {
 		public bool RealPartner;        // co-op: a real partner plays the other robot (otherwise a bot does)
 		public bool Ghost = true;       // show the recorded players
 		public string GhostColor = "";  // "r g b" (0-255), or "" for the robots' own colours
+		public double GhostOpacity = 100;  // percent
 		public bool Clock = true;       // on-screen clock ("hud")
 		public bool Keys = true;        // the keys the record holds
 		public bool Line = true;        // the route drawn in the level ("path")
@@ -33,6 +34,7 @@ namespace P2Practice {
 				case "partner": RealPartner = value == "real"; return true;
 				case "ghost": Ghost = on; return true;
 				case "ghostcolor": GhostColor = ParseColor(value); return true;
+				case "ghostopacity": if (num) GhostOpacity = Math.Max(0, Math.Min(100, Math.Round(d))); return num;
 				case "clock": Clock = on; return true;
 				case "keys": Keys = on; return true;
 				case "line": Line = on; return true;
@@ -50,6 +52,7 @@ namespace P2Practice {
 			yield return "partner=" + (RealPartner ? "real" : "bot");
 			yield return "ghost=" + (Ghost ? 1 : 0);
 			yield return "ghostcolor=" + GhostColor;
+			yield return "ghostopacity=" + Num(GhostOpacity);
 			yield return "clock=" + (Clock ? 1 : 0);
 			yield return "keys=" + (Keys ? 1 : 0);
 			yield return "line=" + (Line ? 1 : 0);

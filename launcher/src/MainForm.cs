@@ -42,6 +42,7 @@ namespace P2Practice {
 		Caption roleCaption, partnerCaption;
 		Option practice, watch, blue, orange, bot, real, ghost, clock, keys, line, loop;
 		ColorPick ghostColor;
+		Stepper ghostOpacity;
 		Stepper leadIn, speed;
 		SignButton launch;
 		TickBar progress;
@@ -243,19 +244,21 @@ namespace P2Practice {
 			AddOption(opt, partnerCaption = new Caption(look, "PARTNER"), Down(bot, real));
 
 			ghost = Choice("Ghost", "ghost", false, "The recorded players, shown in the level.");
-			ghostColor = new ColorPick(look, "Ghost colour") { DefaultText = "robot colours", Margin = Padding.Empty };
+			ghostColor = new ColorPick(look, "Colour") { DefaultText = "robot colours", Margin = Padding.Empty };
 			ghostColor.Changed += (s, e) => { if (!building) EnableOptions(); };
 			tips.SetToolTip(ghostColor, "The colour the ghosts are drawn in. Click to pick one; right-click for the robots' own colours (blue, orange; green for Chell).");
+			ghostOpacity = new Stepper(look, 0, 100, 10, 0) { Margin = Padding.Empty };
+			ghostOpacity.Tip(tips, "How solid the ghosts are drawn: 100 is opaque, less is see-through.");
+			ghostOpacity.ValueChanged += (s, e) => { if (!building) EnableOptions(); };
 			clock = Choice("On-screen clock", "clock", false, "The run's clock and how far ahead or behind you are.");
 			keys = Choice("Record's keys", "keys", false, "The keys the record holds at each moment.");
 			line = Choice("Route line", "line", false, "The record's route and portal shots, drawn in the level.");
 			var show = Across(ghost, clock);
-			show.RowCount = 3;
+			show.RowCount = 2;
 			show.Controls.Add(keys, 0, 1);
 			show.Controls.Add(line, 1, 1);
-			show.Controls.Add(ghostColor, 0, 2);
-			show.SetColumnSpan(ghostColor, 2);
 			AddOption(opt, new Caption(look, "SHOW"), show);
+			AddOption(opt, new Caption(look, "GHOSTS"), Across(ghostColor, new Caption(look, "OPACITY %") { Margin = new Padding(P(10), 0, P(8), 0) }, ghostOpacity));
 
 			leadIn = new Stepper(look, Options.MinLeadIn, Options.MaxLeadIn, 0.5, 1) { Margin = Padding.Empty };
 			leadIn.Tip(tips, "Lead-in: seconds of the record that play before you take over.");
@@ -679,6 +682,7 @@ namespace P2Practice {
 			(o.RealPartner ? real : bot).Checked = true;
 			ghost.Checked = o.Ghost;
 			ghostColor.Chosen = ColorOf(o.GhostColor);
+			ghostOpacity.Value = o.GhostOpacity;
 			clock.Checked = o.Clock;
 			keys.Checked = o.Keys;
 			line.Checked = o.Line;
@@ -697,6 +701,8 @@ namespace P2Practice {
 			o.RealPartner = real.Checked;
 			o.Ghost = ghost.Checked;
 			o.GhostColor = ghostColor.Chosen.HasValue ? ghostColor.Chosen.Value.R + " " + ghostColor.Chosen.Value.G + " " + ghostColor.Chosen.Value.B : "";
+			ghostOpacity.Bump(0);
+			o.GhostOpacity = ghostOpacity.Value;
 			o.Clock = clock.Checked;
 			o.Keys = keys.Checked;
 			o.Line = line.Checked;
@@ -724,7 +730,7 @@ namespace P2Practice {
 			bool ok = selected != null && selected.Ok, coop = ok && selected.Coop;
 			partnerCaption.Enabled = bot.Enabled = real.Enabled = coop;
 			roleCaption.Enabled = blue.Enabled = orange.Enabled = coop && bot.Checked;
-			ghostColor.Enabled = ghost.Checked;
+			ghostColor.Enabled = ghostOpacity.Enabled = ghost.Checked;
 			launch.Enabled = ok;
 			var accent = coop && bot.Checked && orange.Checked ? Theme.Orange : Theme.Blue;
 			if (look.Accent != accent) {
