@@ -80,6 +80,10 @@ void ReleaseClientCommands();
 size_t HeldClientCommands();
 void DropHeldClientCommands();
 
+// Makes sure the calling thread has vstdlib's coroutine list (made the first time a thread creates a coroutine,
+// found again through a thread-local pointer that a snapshot restore doesn't bring back): see TakeSnapshotIfDue.
+void MakeCoroutineList();
+
 // Turns the game's god mode on or off for a player: the flag its own "god" command sets, which that command
 // can only set for the player typing it. (With the ClientCommand slot of HoldClientCommands, the only places
 // the plugin writes into the game's memory.)

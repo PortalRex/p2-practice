@@ -551,6 +551,20 @@ size_t HeldClientCommands() { return g_heldCommands.size(); }
 
 void DropHeldClientCommands() { g_heldCommands.clear(); }
 
+void MakeCoroutineList() {
+	using CoroutineFunc = void(__cdecl *)(void *);
+	using CreateFn = unsigned(__cdecl *)(CoroutineFunc, void *);
+	using CancelFn = void(__cdecl *)(unsigned);
+	HMODULE vstdlib = GetModuleHandleA("vstdlib.dll");
+	if (!vstdlib) return;
+	auto create = reinterpret_cast<CreateFn>(GetProcAddress(vstdlib, "Coroutine_Create"));
+	auto cancel = reinterpret_cast<CancelFn>(GetProcAddress(vstdlib, "Coroutine_Cancel"));
+	if (!create || !cancel) return;
+	// (created, never run, dropped again: only the list stays)
+	unsigned handle = create([](void *) {}, nullptr);
+	if (handle != static_cast<unsigned>(-1)) cancel(handle);
+}
+
 // The engine's ClientCommand back in its slot (what was held goes out first), unless someone hooked it over
 // ours since
 static void UnhookClientCommands() {

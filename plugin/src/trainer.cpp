@@ -268,8 +268,14 @@ void KeepCheatsOn() {
 	if (g.levelTouched && !engine::CheatsOn()) engine::Execute("sv_cheats 1");
 }
 
+int g_positionDecimals = 4;  // development: "prac_debug decimals 2" sends positions as the trainer used to (rounded)
+
+// (Positions go to the game exactly: rounded to hundredths, a player the run had a hair off a wall was put into
+// it, and the game then holds a player it finds inside something until a random nudge frees them: the person hung
+// in the Flings arrival tube after the handover, the bot partner skipped moves.)
 void MovePlayer(int entIndex, const Sample &s, const Vec3 &velocity) {
-	engine::Script("::PP.Mv(%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f)", entIndex, s.pos.x, s.pos.y, s.pos.z, s.pitch, s.yaw,
+	int d = g_positionDecimals;
+	engine::Script("::PP.Mv(%d,%.*f,%.*f,%.*f,%.3f,%.3f,%.2f,%.2f,%.2f)", entIndex, d, s.pos.x, d, s.pos.y, d, s.pos.z, s.pitch, s.yaw,
 	               velocity.x, velocity.y, velocity.z);
 }
 
@@ -1035,6 +1041,12 @@ void TakeSnapshotIfDue() {
 	// not saved, so the next game start has the default again.
 	engine::Execute("r_threaded_particles 0");
 	SingleThreadedRendering();
+	// The game keeps its coroutines (Steam's game coordinator jobs run in them) in a list per thread, made the
+	// first time a thread creates one and found again through a thread-local pointer, which a restore doesn't bring
+	// back: a list first made after the save was freed by the restore while the pointer still led there, and the
+	// next job crashed the game (Coroutine_Create, mp_coop_fling_3 at the flags, a few seconds after a restore).
+	// So the main thread's list is made before every save.
+	engine::MakeCoroutineList();
 	engine::Execute("snap_save %s", kSnapshotName);
 }
 
@@ -1408,7 +1420,7 @@ void MoveObjects(bool all) {
 		// (how an object lies matters once it has stopped turning: a rolling ball may roll its own way)
 		float slack = (all || carried || released) ? 0 : kSlack;
 		bool launch = !carried && Launchable(mover.className) && Length(velocity) > kMovingSpeed;
-		engine::Script("::PP.Pose(%d,\"%s\",%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.0f,%.0f,%.0f,%d,%d,%.0f,%d,%d)", id, mover.className.c_str(), pos.x, pos.y, pos.z,
+		engine::Script("::PP.Pose(%d,\"%s\",%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.0f,%.0f,%.0f,%d,%d,%.0f,%d,%d)", id, mover.className.c_str(), pos.x, pos.y, pos.z,
 		               ang.x, ang.y, ang.z, velocity.x, velocity.y, velocity.z, inHands[0], inHands[1], slack, turning ? 0 : 1, launch ? 1 : 0);
 	}
 }
@@ -1726,12 +1738,19 @@ void FollowTrace() {
 	for (size_t a = 0; a < g.slots.size(); a++) {
 		const Slot &slot = g.slots[a];
 		engine::PlayerState state;
-		if (!slot.human || !engine::GetPlayer(slot.entIndex, state)) continue;
+		if (!engine::GetPlayer(slot.entIndex, state)) continue;
+		if (!slot.human) {
+			// (a driven player: where it is against the run's player at this tick)
+			const Sample &run = Driver().At(DriverActor(a), DriverTick(LiveTick()));
+			engine::Print("[follow] +%d bot off %.2f (live %.3f %.3f %.3f run %.3f %.3f %.3f)\n", since, Distance(state.origin, run.pos), state.origin.x,
+			              state.origin.y, state.origin.z, run.pos.x, run.pos.y, run.pos.z);
+			continue;
+		}
 		const Sample &s = g.route.At(static_cast<int>(a), LiveTick());
 		Vec3 v = VelocityAt(g.route, static_cast<int>(a), LiveTick());
-		engine::Print("[follow] +%d live %.1f %.1f %.1f v %.0f %.0f %.0f (%.0f) | run %.1f %.1f %.1f v %.0f %.0f %.0f (%.0f) | off %.1f keys %d\n", since,
+		engine::Print("[follow] +%d live %.4f %.4f %.3f v %.0f %.0f %.0f (%.0f) | run %.4f %.4f %.3f v %.0f %.0f %.0f (%.0f) | off %.1f keys %d flags %d\n", since,
 		              state.origin.x, state.origin.y, state.origin.z, state.velocity.x, state.velocity.y, state.velocity.z, Length(state.velocity),
-		              s.pos.x, s.pos.y, s.pos.z, v.x, v.y, v.z, Length(v), Distance(state.origin, s.pos), s.buttons);
+		              s.pos.x, s.pos.y, s.pos.z, v.x, v.y, v.z, Length(v), Distance(state.origin, s.pos), s.buttons, state.flags);
 	}
 }
 
@@ -2161,6 +2180,10 @@ void CmdDebug(const sdk::CCommand &args) {
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "follow")) {
 		g_followTicks = std::max(0, atoi(args.Arg(2)));
+		return;
+	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "decimals")) {
+		g_positionDecimals = std::clamp(atoi(args.Arg(2)), 0, 6);
 		return;
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "snapdelay")) {
