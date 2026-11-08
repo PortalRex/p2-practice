@@ -2554,6 +2554,11 @@ void OnFrame(bool simulating) {
 	if (restored) {
 		g.cursor = g.snapshotCursor;
 		g.snapshotLoading = false;
+		// The lightmaps live on the graphics card, which a restore doesn't take back: after a restore the level
+		// was drawn with some of the lightmap pages from the discarded timeline (Turret Warehouse after the finish
+		// board's Replay Map: lit walls all yellow for 4-5 s, until the game uploaded them again by itself). The
+		// engine is asked to upload them all again from its memory, which the restore did bring back.
+		engine::RebuildLightmaps();
 		// The game is back at the snapshot's moment and the plugin's memory is not: what the plugin knows about
 		// the level is set back to what held then. (The Challenge Mode start board, the flags, the screen fade.)
 		if (g.snapshotStartScreenOpen) g.startScreenClosed = false;
