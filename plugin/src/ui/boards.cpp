@@ -298,6 +298,7 @@ std::mutex g_gate;
 std::thread g_boardThread, g_downloadThread;
 std::atomic<State> g_boardState{State::Idle}, g_downloadState{State::Idle};
 std::string g_boardMap, g_boardError, g_downloadError;
+std::string g_pendingMap;  // a chamber picked while another's board was still on its way: fetched next
 std::vector<Entry> g_entries, g_freshEntries;
 std::vector<std::string> g_files, g_freshFiles;
 bool g_freshBoard = false, g_freshDownload = false;
@@ -331,7 +332,12 @@ std::string FormatScore(int score) {
 }
 
 void Fetch(const std::string &map) {
-	if (g_boardState == State::Busy) return;
+	if (g_boardState == State::Busy) {
+		// (not dropped: the board on its way would otherwise be shown, and its demos named, as this chamber's)
+		g_pendingMap = map;
+		return;
+	}
+	g_pendingMap.clear();
 	Join(g_boardThread);
 	auto id = kIds.find(map);
 	g_boardMap = map;
@@ -354,10 +360,17 @@ void Fetch(const std::string &map) {
 }
 
 State BoardState() {
-	std::lock_guard<std::mutex> lock(g_gate);
-	if (g_freshBoard) {
-		g_entries = std::move(g_freshEntries);
-		g_freshBoard = false;
+	{
+		std::lock_guard<std::mutex> lock(g_gate);
+		if (g_freshBoard) {
+			g_entries = std::move(g_freshEntries);
+			g_freshBoard = false;
+		}
+	}
+	// the chamber picked while that board was coming
+	if (!g_pendingMap.empty() && g_boardState != State::Busy) {
+		std::string next = g_pendingMap;  // (a copy: Fetch clears g_pendingMap)
+		Fetch(next);
 	}
 	return g_boardState;
 }

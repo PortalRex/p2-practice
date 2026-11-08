@@ -539,7 +539,8 @@ void BoardsPage(Rect area) {
 		return;
 	}
 	ui::Label(maps::ChamberName(g.boardMap), Font::Title);
-	if (state == boards::State::Busy) {
+	// (a board for another chamber, still on screen while this one's comes, is never shown under this name)
+	if (state == boards::State::Busy || boards::BoardMap() != g.boardMap) {
 		ui::Label("Fetching the board...", Font::Normal, theme::kDim);
 		ui::EndArea();
 		return;
@@ -768,6 +769,19 @@ const std::vector<Step> &TakeOverScript() {
 	return script;
 }
 
+// Development (prac_menu_tour boards): picks a chamber and another at once, while the first board is still
+// coming; a screenshot once the second is up (its own runs under its name, not the first's).
+const std::vector<Step> &BoardsRaceScript() {
+	static const std::vector<Step> script = {
+		{'c', "prac_menu boards"}, {'w', "", 20},
+		{'m', "chamber:Container Ride", 15}, {'k'},
+		{'m', "chamber:Portal Carousel", 8}, {'k'},
+		{'w', "", 400}, {'c', "jpeg boards_race 90"}, {'w', "", 10},
+		{'c', "prac_menu close"}, {'e'},
+	};
+	return script;
+}
+
 void EndTour() {
 	if (!g_tour.on) return;
 	g_tour.on = false;
@@ -781,7 +795,8 @@ void CmdTour(const sdk::CCommand &args) {
 	g_tour = Tour{};
 	g_tour.on = true;
 	bool takeOver = args.ArgC() >= 2 && !_stricmp(args.Arg(1), "takeover");
-	g_tour.steps = takeOver ? TakeOverScript() : TourScript();
+	bool boardsRace = args.ArgC() >= 2 && !_stricmp(args.Arg(1), "boards");
+	g_tour.steps = takeOver ? TakeOverScript() : boardsRace ? BoardsRaceScript() : TourScript();
 	g_tour.x = g_tour.fromX = gfx::ScreenWidth() * 0.5f;
 	g_tour.y = g_tour.fromY = gfx::ScreenHeight() * 0.6f;
 	gfx::SetPuppet(true);

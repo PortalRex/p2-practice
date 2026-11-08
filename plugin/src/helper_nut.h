@@ -431,7 +431,12 @@ R"nut(
 	if (portal == null) return
 	if (team != 0) portal.SetTeam(team)
 	if (!open) EntFireByHandle(portal, "SetActivatedState", "1", 0, null, null)
-	EntFireByHandle(portal, "NewLocation", x + " " + y + " " + z + " " + pitch + " " + yaw + " " + roll, 0, null, null)
+	// Twice, as a shot does: the gun's FirePortal places the portal (PlacePortal -> NewLocation) and then runs
+	// DelayedPlacementThink at once, which calls NewLocation again. Each one pushes a player in the portal's way
+	// 100 u/s along its face (the Team Retrieval record's reportal gives orange 200).
+	local where = x + " " + y + " " + z + " " + pitch + " " + yaw + " " + roll
+	EntFireByHandle(portal, "NewLocation", where, 0, null, null)
+	EntFireByHandle(portal, "NewLocation", where, 0, null, null)
 }
 
 ::PP.PortalClose <- function(index) {
