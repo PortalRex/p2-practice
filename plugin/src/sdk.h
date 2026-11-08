@@ -35,6 +35,7 @@ constexpr int UnregisterConCommand = 10;
 constexpr int FindCommandBase = 13;
 // IVEngineClient (SAR)
 constexpr int GetGameDirectory = 35;
+constexpr int IsRecordingDemo = 79;  // (IsPaused 86 in SAR's table; the header has IsPlayingDemo 78, IsRecordingDemo 79 before it)
 constexpr int ExecuteClientCmd = 104;
 // IServerGameDLL (SAR)
 constexpr int GetAllServerClasses = 10;

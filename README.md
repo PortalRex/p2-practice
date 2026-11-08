@@ -18,7 +18,7 @@ it puts you on that run's route, in the real game:
 - **Replay and compare.** Play another run in the level against the loaded one, or print a part-by-part table
   of where it gains and loses.
 - **The route drawn in the level**, with a mark and an aim line for every portal shot (host only).
-- **An in-game menu** (F1): your demos, the leaderboards, how to practice and every setting, without leaving the
+- **An in-game menu** (Insert): your demos, the leaderboards, how to practice and every setting, without leaving the
   game. No launcher needed.
 
 It is a standalone server plugin (`p2practice.dll`), with an optional launcher (`P2Practice.exe`). It works beside
@@ -41,8 +41,8 @@ the game honours only one `+plugin_load` on its command line.
 
 ## The in-game menu
 
-`plugin_load p2practice` (in your autoexec, or the console), then **F1** in the menu or in a level opens P2
-Practice's menu; F1 or Esc closes it. While it is open the game gets no keys or clicks. Four pages:
+`plugin_load p2practice` (in your autoexec, or the console), then **Insert** in the menu or in a level opens P2
+Practice's menu; Insert or Esc closes it (another key: SETTINGS, or `prac_menukey`). While it is open the game gets no keys or clicks. Four pages:
 
 - **PRACTICE**: the loaded run: its time, chamber and parts, a bar of the run with where you take over. Pick a part
   (or drag the take-over point), Practice or Watch, blue or orange, bot or real partner, lead-in and game speed,
@@ -169,8 +169,8 @@ when the level's state changed (SAR's records) and what the level's clock showed
 The launcher's RETRY row picks between these: Auto (as above), Instant (`prac_set reset soft`: no restart for
 the level's sake; buttons, doors and panels stay as the last attempt left them while what the run carried or
 threw is put back, so only for parts where that doesn't matter) and Restart the level (`prac_set reset reload`:
-always). Whatever the choice, the level restarts after a finish at the flags (they are gone) and when it isn't
-in the run's mode. In co-op the driven partner keeps acting the run out after the handover, so with Auto most
+always). Whatever the choice, the level restarts after a finish at the flags (they are gone; with save states
+the retry goes back to the save state instead) and when it isn't in the run's mode. In co-op the driven partner keeps acting the run out after the handover, so with Auto most
 retries of a part with buttons or doors in it restart the level; in single player the level's clock is past the
 part after any attempt, so there Auto restarts every time.
 
@@ -200,6 +200,13 @@ crashed the game a moment after some restores (seen on Laser Stairs). The settin
 It also sets `mat_queue_mode 0` (rendering on the main thread) until practice stops: ChocolateLoading switches
 the render thread off and on around every save and restore, and the game crashed on that thread a few seconds
 after restores (Lasers).
+
+**Demos with save states.** A snapshot keeps every file open that was open when it was taken, the demo being
+recorded too, so the demo is stopped just before each snapshot and before each restore, and a new one starts
+right after (`record ""`, named by SAR as your srconfigs category asks: in Challenge Mode the name the level's
+demo had; without SAR, `demos/p2practice/<map>_<date>_<time>`). Every attempt is in a demo of its own, as when
+the level restarts for each, and SAR stops and renames a finished one at the flags as usual. The plugin only
+starts a demo where one was being recorded.
 
 ## What a demo gives
 

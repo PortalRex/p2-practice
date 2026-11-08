@@ -34,6 +34,7 @@ bool CallCommand(const char *name, const char *arguments);
 bool CommandExists(const char *name);  // a console command of that name is registered (by the game or a plugin)
 bool CheatsOn();
 float CvarFloat(const char *name, float fallback = 0);
+std::string CvarString(const char *name);  // "" when there is no such cvar
 
 // ---- VScript ----
 // Statements are collected and run in as few "script" calls as fit (one call holds about 500 characters).
@@ -46,6 +47,7 @@ int TickCount();
 float TickInterval();
 const char *MapName();             // "" between maps
 std::string GameDirectory();       // ...\Portal 2\portal2
+bool RecordingDemo();              // a demo is being recorded (by the person, SAR or a config)
 
 enum Team { kTeamNone = 0, kTeamOrange = 2, kTeamBlue = 3 };
 

@@ -26,7 +26,7 @@ public:
 		loaded_ = true;
 		bool menu = menu::Init();
 		engine::Print("P2 Practice %s loaded. %s\n", P2PRACTICE_VERSION,
-		              menu ? "F1 (prac_menu) opens its menu; prac_help lists the commands." : "prac_help lists the commands.");
+		              menu ? "Insert (prac_menu) opens its menu; prac_help lists the commands." : "prac_help lists the commands.");
 		return true;
 	}
 

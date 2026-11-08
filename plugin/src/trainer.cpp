@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -98,6 +99,10 @@ struct Session {
 	int snapshotIn = 0;           // ticks until the snapshot of the lead-in that just began is taken (0: none due)
 	bool snapshotLoading = false; // snap_load has been asked for: the level's tick count jumps back when it is done
 	std::chrono::steady_clock::time_point snapshotAskedAt{};
+	bool snapshotHoldsDemo = false;  // a demo was being recorded when it was taken (see DropSnapshotAtFlags)
+	bool demoToRestart = false;   // a demo was stopped for a save state: a new one starts in demoRestartIn frames
+	int demoRestartIn = 0;
+	bool demoSinceSnapshot = false;  // a demo was recorded at some moment since the snapshot (SAR stops it at the flags)
 	int lastTick = 0;
 	bool queuePinned = false;     // queued rendering switched off for save states (see SingleThreadedRendering)
 	int savedQueueMode = -1;      // mat_queue_mode as it was before
@@ -107,6 +112,7 @@ struct Session {
 	bool levelTouched = false;    // the trainer has worked in this map load: nothing done in it may count as a run
 	bool resumeAfterLoad = false; // the level went away in the middle of an attempt: start it again when it is back
 	std::chrono::steady_clock::time_point levelWentAt{};  // when it went (a restart brings it back within seconds)
+	std::chrono::steady_clock::time_point reloadAskedAt{};  // when the trainer last asked for (or waited on) a fresh level
 	bool humanDead = false;       // a person was dead at the last frame (in Challenge Mode the level restarts for it)
 	bool botPartner = false;      // a split-screen bot plays the other robot: the person's view fills the screen
 	std::vector<int> placedBots;  // the bots the trainer put in place this tick, with the game's movement off for them
@@ -1015,6 +1021,59 @@ void RestoreRendering() {
 	if (g.savedQueueMode != 0) engine::Execute("mat_queue_mode %d", g.savedQueueMode);
 }
 
+// Save states and demos. ChocolateLoading keeps every file open that a save state holds, so that a restore can go
+// back to it, and a demo being recorded when the snapshot was taken was one of them: SAR then couldn't rename it
+// at the flags (sar_challenge_autostop 2, set by srconfigs' Challenge Mode category) and its error closed the
+// game. So no snapshot is taken while a demo is recording: the demo is stopped just before the save and a new one
+// starts once the save is done (record "", which SAR names as srconfigs asks; in Challenge Mode the same name the
+// level's own demo had). A restore stops the attempt's demo the same way and starts the next one after it. Every
+// attempt then has a demo of its own, as it would with the level restarted for each; SAR stops and renames a
+// finished one at the flags, and the save state stays for the next attempt.
+constexpr int kDemoAfterSaveFrames = 20;    // (ChocolateLoading takes the snapshot within the next few frames)
+constexpr int kDemoAfterRestoreFrames = 2;
+
+void StopDemoForSnapshot() {
+	if (!engine::RecordingDemo()) return;
+	engine::Execute("stop");
+	g.demoToRestart = true;
+}
+
+// Before a restore: the attempt's demo stops, and the next attempt gets one when there was a demo since the
+// snapshot, recording still or already stopped and renamed by SAR at the flags
+void StopDemoForRestore() {
+	StopDemoForSnapshot();
+	if (g.demoSinceSnapshot) g.demoToRestart = true;
+	g.demoSinceSnapshot = false;
+}
+
+// Starts the demo stopped for a save state again, when it is due (every frame, paused or not)
+void TickDemoRestart() {
+	if (!g.demoToRestart) return;
+	// (not while a restore is on its way: it is started after it)
+	if (g.snapshotLoading && std::chrono::steady_clock::now() - g.snapshotAskedAt < std::chrono::seconds(3)) return;
+	if (--g.demoRestartIn > 0) return;
+	if (!*engine::MapName()) {
+		g.demoRestartIn = 1;
+		return;
+	}
+	g.demoToRestart = false;
+	if (engine::RecordingDemo()) return;  // (one started meanwhile: SAR's own on a level load)
+	if (!engine::CvarString("sar_record_prefix").empty()) {
+		engine::Execute("record \"\"");
+		return;
+	}
+	// Without SAR's naming: demos/p2practice/<map>_<date and time>
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	fs::create_directories(fs::u8path(engine::GameDirectory() + "/demos/p2practice"), ec);
+	char stamp[32];
+	std::time_t now = std::time(nullptr);
+	std::tm local{};
+	localtime_s(&local, &now);
+	std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &local);
+	engine::Execute("record \"demos/p2practice/%s_%s\"", engine::MapName(), stamp);
+}
+
 // Called every tick of a lead-in: takes the snapshot when it is due. The trainer's own bookkeeping is set before
 // the snapshot is stored, so that it holds the same values whether or not a restore brings this plugin's memory
 // back along with the game's.
@@ -1037,7 +1096,11 @@ void TakeSnapshotIfDue() {
 	// next job crashed the game (Coroutine_Create, mp_coop_fling_3 at the flags, a few seconds after a restore).
 	// So the main thread's list is made before every save.
 	engine::MakeCoroutineList();
+	StopDemoForSnapshot();
+	g.snapshotHoldsDemo = engine::RecordingDemo();
+	g.demoSinceSnapshot = false;
 	engine::Execute("snap_save %s", kSnapshotName);
+	g.demoRestartIn = kDemoAfterSaveFrames;
 }
 
 // Returns to the snapshot of this very attempt, if there is one. True when it did.
@@ -1059,9 +1122,11 @@ bool RestoreSnapshot(int handover, bool watch) {
 	}
 	engine::FlushScript();
 	SingleThreadedRendering();
+	StopDemoForRestore();
 	engine::Execute("snap_load %s", kSnapshotName);
 	g.snapshotLoading = true;
 	g.snapshotAskedAt = std::chrono::steady_clock::now();
+	g.demoRestartIn = kDemoAfterRestoreFrames;
 	return true;
 }
 
@@ -1155,6 +1220,7 @@ bool WrongLevelMode() {
 // Loads the level again, in the route's mode. (The game's own restart_level keeps the mode the player is in.)
 void ReloadLevel() {
 	g.mode = Mode::Reloading;
+	g.reloadAskedAt = std::chrono::steady_clock::now();
 	Flash(2, "RESTARTING THE LEVEL");
 	engine::FlushScript();
 	engine::Execute("unpause");  // (the finish board may still be up: the level change needs the game running)
@@ -1605,15 +1671,13 @@ void Finish(bool atFlags) {
 	g.doneTicks = 0;
 }
 
-// The save state goes as soon as anyone reaches the flags. SAR stops the demo being recorded a quarter of a second
-// later and renames it with the time (sar_challenge_autostop 2, set by srconfigs' Challenge Mode category).
-// ChocolateLoading keeps every file open that a save state holds, so that a restore can go back to it: the demo
-// stayed open, the rename failed, and SAR's error closed the game a moment after the finish board came up.
-// Without the save state the demo is closed for real and renamed as usual; a retry after the finish restarts the
-// level, which starts the next demo. (Called from every frame, paused or not, in every mode: the board pauses
-// the game, and a run watched to its end or replayed reaches the flags too.)
+// A save state that holds the demo being recorded (it couldn't be stopped for it: see StopDemoForSnapshot) goes as
+// soon as anyone reaches the flags. SAR stops that demo a quarter of a second later and renames it with the time,
+// which the open file would make fail, and SAR's error closes the game. Without the save state the demo is closed
+// for real and renamed as usual; a retry after the finish restarts the level. (Called from every frame, paused or
+// not, in every mode: the board pauses the game, and a run watched to its end or replayed reaches the flags too.)
 void DropSnapshotAtFlags() {
-	if (g.snapshotHandover < 0 || !g.flagsUp || engine::EntityExists(kEndNode)) return;
+	if (g.snapshotHandover < 0 || !g.snapshotHoldsDemo || !g.flagsUp || engine::EntityExists(kEndNode)) return;
 	g.snapshotHandover = -1;
 	engine::Execute("snap_drop %s", kSnapshotName);
 	engine::Print("At the flags: the save state is dropped so the demo can be closed (the next attempt restarts the level).\n");
@@ -2373,6 +2437,8 @@ void OnLevelInit(const char *mapName) {
 	g.registeredModels.clear();
 	g.slots.clear();
 	g.speedChanged = false;
+	// (a demo still to start again after a save state: SAR's own start on a level load comes first)
+	if (g.demoToRestart) g.demoRestartIn = std::max(g.demoRestartIn, 120);
 	if (g.hasRoute) g.worldReached = g.route.firstTick - 1;
 	// The restart we asked for, or the same level coming back by itself in the middle of an attempt (the player
 	// died, or the level restarted itself): the attempt starts again as soon as everyone is in.
@@ -2383,6 +2449,7 @@ void OnLevelInit(const char *mapName) {
 	if (sameMap && (g.mode == Mode::Reloading || (g.resumeAfterLoad && soon))) {
 		if (g.resumeAfterLoad) engine::Print("The level restarted during the attempt: starting it again.\n");
 		g.mode = Mode::WaitForPlayers;
+		g.reloadAskedAt = std::chrono::steady_clock::now();
 		g.waitTicks = 0;
 	} else {
 		g.mode = Mode::Idle;
@@ -2436,6 +2503,8 @@ void OnFrame(bool simulating) {
 	}
 	if (g_scanEdicts) ScanEdicts(tick, restored);
 	g.lastTick = tick;
+	if (g.snapshotHandover >= 0 && !g.snapshotLoading && engine::RecordingDemo()) g.demoSinceSnapshot = true;
+	TickDemoRestart();
 	ReleaseStaleBoard();
 	if (g.retryAsked) {
 		// (the finish board's Replay Map, or the menu's Restart Level: the board pauses the game, so this runs
@@ -2488,7 +2557,13 @@ void OnFrame(bool simulating) {
 // menu's Restart Level): while practicing in the route's level it is a retry of the attempt instead, which keeps
 // the lead-in, the save state and the bot. Out of practice the game restarts the level as usual.
 bool OnRestartCommand() {
-	if (!g.hasRoute || !MapMatches() || g.attempts == 0 || g.mode == Mode::Reloading || g.mode == Mode::WaitForPlayers) return false;
+	if (!g.hasRoute || !MapMatches() || g.attempts == 0) return false;
+	// The next attempt's level is already on its way (a retry that restarts the level, or the loop after a finish):
+	// the game's own restart on top of it would load the level once more, and the trainer, finding a level it
+	// hadn't asked for, would leave it alone (no ghost, no route). The restart is the one already coming. (Not
+	// for long: a level that never gets its players back can still be restarted.)
+	if (g.mode == Mode::Reloading || g.mode == Mode::WaitForPlayers)
+		return std::chrono::steady_clock::now() - g.reloadAskedAt < std::chrono::seconds(30);
 	g.retryAsked = true;
 	return true;
 }

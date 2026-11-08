@@ -331,6 +331,11 @@ float CvarFloat(const char *name, float fallback) {
 	return var ? var->floatValue : fallback;
 }
 
+std::string CvarString(const char *name) {
+	sdk::ConVar *var = FindVar(name);
+	return var && var->string ? var->string : "";
+}
+
 void Script(const char *format, ...) {
 	char statement[sdk::CCommand::kMaxLength];
 	va_list args;
@@ -383,6 +388,10 @@ const char *MapName() {
 std::string GameDirectory() {
 	const char *dir = g_engineClient ? CallVirtual<const char *>(g_engineClient, sdk::slot::GetGameDirectory) : nullptr;
 	return dir ? dir : "";
+}
+
+bool RecordingDemo() {
+	return g_engineClient && CallVirtual<bool>(g_engineClient, sdk::slot::IsRecordingDemo);
 }
 
 // Prints every nested table on the way to a networked field, with the offset each adds.

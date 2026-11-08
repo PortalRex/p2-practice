@@ -39,10 +39,11 @@ struct Keys {
 	const char *name;
 	int code;
 };
-const Keys kMenuKeys[] = {{"F1", gfx::kKeyF1},      {"F2", gfx::kKeyF1 + 1},  {"F3", gfx::kKeyF1 + 2},  {"F4", gfx::kKeyF1 + 3},
+// (the first is the default)
+const Keys kMenuKeys[] = {{"INSERT", gfx::kKeyInsert}, {"HOME", gfx::kKeyHome}, {"RSHIFT", gfx::kKeyRShift},
+                          {"F1", gfx::kKeyF1},      {"F2", gfx::kKeyF1 + 1},  {"F3", gfx::kKeyF1 + 2},  {"F4", gfx::kKeyF1 + 3},
                           {"F5", gfx::kKeyF1 + 4},  {"F6", gfx::kKeyF1 + 5},  {"F7", gfx::kKeyF1 + 6},  {"F8", gfx::kKeyF1 + 7},
-                          {"F9", gfx::kKeyF1 + 8},  {"F10", gfx::kKeyF1 + 9}, {"F11", gfx::kKeyF1 + 10}, {"F12", gfx::kKeyF1 + 11},
-                          {"INSERT", gfx::kKeyInsert}, {"HOME", gfx::kKeyHome}, {"RSHIFT", gfx::kKeyRShift}};
+                          {"F9", gfx::kKeyF1 + 8},  {"F10", gfx::kKeyF1 + 9}, {"F11", gfx::kKeyF1 + 10}, {"F12", gfx::kKeyF1 + 11}};
 
 struct State {
 	bool ready = false;
@@ -163,7 +164,7 @@ void CmdMenu(const sdk::CCommand &args) {
 
 void CmdMenuKey(const sdk::CCommand &args) {
 	if (args.ArgC() < 2) {
-		engine::Print("prac_menukey <key> - the key that opens P2 Practice's menu (now: %s): F1-F12, INSERT, HOME, RSHIFT\n", kMenuKeys[g.menuKey].name);
+		engine::Print("prac_menukey <key> - the key that opens P2 Practice's menu (now: %s): INSERT, HOME, RSHIFT, F1-F12\n", kMenuKeys[g.menuKey].name);
 		return;
 	}
 	for (int i = 0; i < static_cast<int>(sizeof(kMenuKeys) / sizeof(kMenuKeys[0])); i++)
@@ -663,7 +664,7 @@ void SettingsPage(Rect area, const trainer::Status &s) {
 	if (ui::Toggle("Route line and portal shots in the level", path)) Set(Format("prac_set path %d", path ? 1 : 0));
 	ui::Caption("MENU KEY");
 	int key = g.menuKey;
-	std::vector<std::string> keys = {"F1", "F2", "F3", "F4", "INSERT", "HOME"};
+	std::vector<std::string> keys = {"INSERT", "HOME", "F1", "F2", "F3", "F4"};
 	int shownKey = -1;
 	for (int i = 0; i < static_cast<int>(keys.size()); i++)
 		if (keys[i] == kMenuKeys[key].name) shownKey = i;
@@ -904,7 +905,7 @@ void Draw() {
 bool Init() {
 	if (!gfx::Init()) return false;
 	engine::RegisterCommand("prac_menu", CmdMenu, "prac_menu - open or close P2 Practice's menu");
-	engine::RegisterCommand("prac_menukey", CmdMenuKey, "prac_menukey <key> - the key that opens P2 Practice's menu (F1-F12, INSERT, HOME, RSHIFT)");
+	engine::RegisterCommand("prac_menukey", CmdMenuKey, "prac_menukey <key> - the key that opens P2 Practice's menu (INSERT, HOME, RSHIFT, F1-F12)");
 	engine::RegisterCommand("prac_folder_add", CmdFolderAdd, "prac_folder_add <folder> - a folder of demos for the menu's RUNS page");
 	engine::RegisterCommand("prac_menu_tour", CmdTour, "prac_menu_tour [record <video> | stop] - a scripted walk through the menu, for showing it");
 	engine::RegisterCommand("prac_folders", CmdFolders, "prac_folders - the folders the menu's RUNS page reads");

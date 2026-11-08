@@ -1,6 +1,6 @@
 // The plugin's in-game menu (the launcher's job, inside the game): pick a run from the demos on this computer or
 // from the boards, choose how to practice it, change the settings, set up save states. Opened and closed with its
-// key (F1 unless changed) or prac_menu; it also draws the practice HUD.
+// key (Insert unless changed) or prac_menu; it also draws the practice HUD.
 #pragma once
 
 namespace menu {
