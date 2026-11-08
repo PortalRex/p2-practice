@@ -223,6 +223,7 @@ bool ChallengeMode();
 void RestoreRendering();
 void CloseGameScreens();
 bool WatchFlags();
+void DropSnapshotAtFlags();
 void FinishAtFlags();
 void TellBoard();
 engine::ClientCommandFate HoldBoard(const char *command);
@@ -246,6 +247,7 @@ void OnPausedFrame() {
 	// (a level being loaded doesn't simulate either, before anything ran in it: no board is up then, and
 	// taking those frames for one would count the start board as closed before it comes)
 	if (!g.ranSinceLoad) return;
+	DropSnapshotAtFlags();
 	// The finish board pauses the game the moment the flags are touched: the finish is noticed here, so that
 	// the time is worked out from that moment (it is shown when the game runs again)
 	if (g.mode == Mode::Run && !g.replaying && WatchFlags()) FinishAtFlags();
@@ -1616,12 +1618,27 @@ void Finish(bool atFlags) {
 	g.doneTicks = 0;
 }
 
+// The save state goes as soon as anyone reaches the flags. SAR stops the demo being recorded a quarter of a second
+// later and renames it with the time (sar_challenge_autostop 2, set by srconfigs' Challenge Mode category).
+// ChocolateLoading keeps every file open that a save state holds, so that a restore can go back to it: the demo
+// stayed open, the rename failed, and SAR's error closed the game a moment after the finish board came up.
+// Without the save state the demo is closed for real and renamed as usual; a retry after the finish restarts the
+// level, which starts the next demo. (Called from every frame, paused or not, in every mode: the board pauses
+// the game, and a run watched to its end or replayed reaches the flags too.)
+void DropSnapshotAtFlags() {
+	if (g.snapshotHandover < 0 || !g.flagsUp || engine::EntityExists(kEndNode)) return;
+	g.snapshotHandover = -1;
+	engine::Execute("snap_drop %s", kSnapshotName);
+	engine::Print("At the flags: the save state is dropped so the demo can be closed (the next attempt restarts the level).\n");
+}
+
 // In Challenge Mode the level's finish is its flags: the game puts an end node at the exit, ends the timer when
 // a player touches it (in co-op, when both have), and removes it. With cheats on the game shows no time, so
 // the attempt's own is shown instead: what the flags would have said. The node is watched for its removal (the
 // touch was in the tick just simulated); a finish takes the flags away for good, so the next attempt reloads.
 bool WatchFlags() {
 	if (!g.flagsUp || engine::EntityExists(kEndNode)) return false;
+	DropSnapshotAtFlags();
 	g.flagsUp = false;
 	g.flagsGone = true;
 	return true;
@@ -2452,6 +2469,7 @@ void OnFrame(bool simulating) {
 	OnRunningFrame();
 	KeepCheatsOn();
 	NoteDeaths();
+	DropSnapshotAtFlags();
 	g.placedBots.clear();
 	if (g.mode == Mode::Reloading || g.mode == Mode::Idle) {
 		SetBotMovement();
