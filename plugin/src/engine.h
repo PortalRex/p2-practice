@@ -89,6 +89,10 @@ void MakeCoroutineList();
 // the plugin writes into the game's memory.)
 void SetGodMode(int entIndex, bool on);
 
+// Scales how far the game's own movement takes a player each tick (m_flLaggedMovementValue: 1 normal, 0 not at
+// all), on the server and in the player's predicted copy on screen alike. False when it can't be set.
+bool SetMovementSpeed(int entIndex, float scale);
+
 // The entity indices of the two portals a player's portal gun shoots (-1 where it has none). False when the
 // player holds no portal gun.
 bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary);

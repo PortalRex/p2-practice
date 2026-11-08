@@ -132,6 +132,7 @@ struct Session {
 	std::chrono::steady_clock::time_point levelWentAt{};  // when it went (a restart brings it back within seconds)
 	bool humanDead = false;       // a person was dead at the last frame (in Challenge Mode the level restarts for it)
 	bool botPartner = false;      // a split-screen bot plays the other robot: the person's view fills the screen
+	std::vector<int> placedBots;  // the bots the trainer put in place this tick, with the game's movement off for them
 	int waitTicks = 0;
 	std::vector<Ghost> ghosts;  // one per robot of the run
 	std::set<std::string> registeredModels;  // ghost models registered with the game in this map load
@@ -1269,6 +1270,23 @@ Vec3 AimDirection(const Sample &s) {
 	return {std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), -std::sin(pitch)};
 }
 
+bool g_botPlacedOnly = true;  // development: "prac_debug botmove 1" lets the game move the bot between placements again
+
+bool BotPlacedOnly(const Slot &slot) {
+	return g_botPlacedOnly && !slot.human && !g.replaying && g.mode != Mode::CatchUp;
+}
+
+// The game's own movement for each bot: off for those the trainer placed this tick, on for the rest (practice
+// over, a person in control of it, catching up)
+void SetBotMovement() {
+	for (int i = 1; i <= engine::MaxClients(); i++) {
+		engine::PlayerState state;
+		if (!engine::GetPlayer(i, state) || !state.bot) continue;
+		bool placed = std::find(g.placedBots.begin(), g.placedBots.end(), i) != g.placedBots.end();
+		engine::SetMovementSpeed(i, placed ? 0.0f : 1.0f);
+	}
+}
+
 void DriveSlots() {
 	ReleaseUseKeys();
 	const Route &driver = Driver();
@@ -1287,9 +1305,30 @@ void DriveSlots() {
 		// frame and the same order: a button pressed and released within one frame (which leaves its door open
 		// for good), a trigger skipped at speed, a trip through a portal. Where no frame follows this tick, it
 		// is put where the run's player was now, which is where the next frame begins.
-		int from = FrameStartsNow() && tick > driver.firstTick ? tick - 1 : tick;
-		const Sample &start = driver.At(actor, from);
-		MovePlayer(player, start.present ? start : s, VelocityAt(driver, actor, start.present ? from : tick));
+		//
+		// Not so the bot partner once a person plays beside it. The bot is a split-screen player of the person's own
+		// game, which works out on screen where the game's movement takes it from one frame to the next, and its
+		// guess (the bot pressing nothing) was corrected by the trainer's placement every tick: orange jittered on
+		// the person's screen. The game's movement is switched off for the bot instead and it is put exactly where
+		// the run's player was at every tick; the triggers it stands in still notice it (the game checks them after
+		// every move, whatever the distance). (Not while catching up, where the game skips through the run.)
+		if (BotPlacedOnly(g.slots[i])) {
+			// (Leaving the ground, the demo shows the run's player standing and barely rising for a tick or two
+			// more, and the game, finding the bot a few units above the floor and not rising fast, would put it
+			// back on the floor: it is given the rise it really makes.)
+			Vec3 velocity = VelocityAt(driver, actor, tick);
+			const Sample &previous = driver.At(actor, tick - 1);
+			if (previous.present && tick > driver.firstTick) {
+				float rise = (s.pos.z - previous.pos.z) / driver.tickInterval;
+				if (rise > velocity.z && rise < 64 / driver.tickInterval) velocity.z = rise;
+			}
+			MovePlayer(player, s, velocity);
+			g.placedBots.push_back(player);
+		} else {
+			int from = FrameStartsNow() && tick > driver.firstTick ? tick - 1 : tick;
+			const Sample &start = driver.At(actor, from);
+			MovePlayer(player, start.present ? start : s, VelocityAt(driver, actor, start.present ? from : tick));
+		}
 
 		// The buttons the recorded player pressed on this tick, the driven one presses too. (What the recorded
 		// player picked up is not picked up: the trainer moves the run's objects itself, see MoveObjects.)
@@ -1742,8 +1781,9 @@ void FollowTrace() {
 		if (!slot.human) {
 			// (a driven player: where it is against the run's player at this tick)
 			const Sample &run = Driver().At(DriverActor(a), DriverTick(LiveTick()));
-			engine::Print("[follow] +%d bot off %.2f (live %.3f %.3f %.3f run %.3f %.3f %.3f)\n", since, Distance(state.origin, run.pos), state.origin.x,
-			              state.origin.y, state.origin.z, run.pos.x, run.pos.y, run.pos.z);
+			engine::Print("[follow] +%d bot off %.2f (live %.3f %.3f %.3f run %.3f %.3f %.3f) vz %.0f run vz %.0f ground %d flags %d\n", since,
+			              Distance(state.origin, run.pos), state.origin.x, state.origin.y, state.origin.z, run.pos.x, run.pos.y, run.pos.z, state.velocity.z,
+			              run.vel.z, run.onGround, state.flags);
 			continue;
 		}
 		const Sample &s = g.route.At(static_cast<int>(a), LiveTick());
@@ -2186,6 +2226,10 @@ void CmdDebug(const sdk::CCommand &args) {
 		g_positionDecimals = std::clamp(atoi(args.Arg(2)), 0, 6);
 		return;
 	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "botmove")) {
+		g_botPlacedOnly = atoi(args.Arg(2)) == 0;
+		return;
+	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "snapdelay")) {
 		g_snapshotDelayTicks = std::max(1, atoi(args.Arg(2)));
 		return;
@@ -2408,9 +2452,10 @@ void OnFrame(bool simulating) {
 	OnRunningFrame();
 	KeepCheatsOn();
 	NoteDeaths();
-	if (g.mode == Mode::Reloading) return;
-	if (g.mode == Mode::Idle) {
-		if (g.hasRoute && g.autoPart >= 0) {
+	g.placedBots.clear();
+	if (g.mode == Mode::Reloading || g.mode == Mode::Idle) {
+		SetBotMovement();
+		if (g.mode == Mode::Idle && g.hasRoute && g.autoPart >= 0) {
 			TickAutoStart();
 			engine::FlushScript();
 		}
@@ -2425,6 +2470,7 @@ void OnFrame(bool simulating) {
 	case Mode::Done: TickDone(); break;
 	default: break;
 	}
+	SetBotMovement();
 	engine::FlushScript();
 }
 

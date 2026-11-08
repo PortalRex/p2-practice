@@ -57,6 +57,7 @@ constexpr Color kWarnColor{255, 170, 60, 255};
 // Where the fields we read live inside a player entity
 struct PlayerOffsets {
 	int origin = -1, eyePitch = -1, eyeYaw = -1, velocity = -1, flags = -1, team = -1, viewOffsetZ = -1, lifeState = -1;
+	int laggedMovement = -1;  // optional: m_flLaggedMovementValue, the game's own movement speed for that player
 	int activeWeapon = -1;  // handle of the weapon in hand (the portal gun)
 	int challenge = -1;     // which challenge the player spawned into (0: none)
 	int heldObject = -1;    // handle of the object in the player's hands
@@ -137,6 +138,7 @@ bool FindPlayerOffsets(void *serverGame) {
 	g_player.team = FindPropOffset(cls->table, "m_iTeamNum");
 	g_player.viewOffsetZ = FindPropOffset(cls->table, "m_vecViewOffset[2]");
 	g_player.lifeState = FindPropOffset(cls->table, "m_lifeState");
+	g_player.laggedMovement = FindPropOffset(cls->table, "m_flLaggedMovementValue");
 	return g_player.origin >= 0 && g_player.eyePitch >= 0 && g_player.eyeYaw >= 0 && g_player.velocity >= 0 &&
 	       g_player.flags >= 0 && g_player.team >= 0 && g_player.viewOffsetZ >= 0 && g_player.lifeState >= 0;
 }
@@ -608,6 +610,20 @@ void SetGodMode(int entIndex, bool on) {
 	memcpy(&flags, field, sizeof(flags));
 	flags = on ? flags | kFlagGodMode : flags & ~kFlagGodMode;
 	memcpy(field, &flags, sizeof(flags));
+}
+
+bool SetMovementSpeed(int entIndex, float scale) {
+	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;  // "look at every field of it when sending"
+	if (!g_globals || !g_globals->edicts || g_player.laggedMovement < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;
+	sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse()) return false;
+	char *field = static_cast<char *>(edict.unknown) + g_player.laggedMovement;
+	float now;
+	memcpy(&now, field, sizeof(now));
+	if (now == scale) return true;
+	memcpy(field, &scale, sizeof(scale));
+	edict.stateFlags |= kEdictChanged | kEdictFullyChanged;  // (the screens' copy of the player has to hear of it)
+	return true;
 }
 
 bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary) {
