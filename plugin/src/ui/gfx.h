@@ -30,7 +30,7 @@ enum Key : int {
 	kKey0 = 1,   // ... kKey0 + 9
 	kKeyA = 11,  // ... kKeyA + 25
 	kKeyPad0 = 37,
-	kKeyPadEnter = 51,
+	kKeyPadEnter = 51, kKeyPadDecimal = 52,
 	kKeyLBracket = 53, kKeyRBracket, kKeySemicolon, kKeyApostrophe, kKeyBackquote, kKeyComma, kKeyPeriod, kKeySlash,
 	kKeyBackslash, kKeyMinus, kKeyEqual, kKeyEnter, kKeySpace, kKeyBackspace, kKeyTab,
 	kKeyEscape = 70,

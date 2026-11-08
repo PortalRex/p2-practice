@@ -61,6 +61,7 @@ struct PlayerOffsets {
 	int activeWeapon = -1;  // handle of the weapon in hand (the portal gun)
 	int challenge = -1;     // which challenge the player spawned into (0: none)
 	int heldObject = -1;    // handle of the object in the player's hands
+	int challengeSeconds = -1;  // m_StatsThisLevel.fNumSecondsTaken: the Challenge Mode clock in the corner
 } g_player;
 
 // ... and inside a portal gun: handles of the two portals it shoots
@@ -139,6 +140,7 @@ bool FindPlayerOffsets(void *serverGame) {
 	g_player.viewOffsetZ = FindPropOffset(cls->table, "m_vecViewOffset[2]");
 	g_player.lifeState = FindPropOffset(cls->table, "m_lifeState");
 	g_player.laggedMovement = FindPropOffset(cls->table, "m_flLaggedMovementValue");
+	g_player.challengeSeconds = FindPropOffset(cls->table, "fNumSecondsTaken");
 	return g_player.origin >= 0 && g_player.eyePitch >= 0 && g_player.eyeYaw >= 0 && g_player.velocity >= 0 &&
 	       g_player.flags >= 0 && g_player.team >= 0 && g_player.viewOffsetZ >= 0 && g_player.lifeState >= 0;
 }
@@ -632,6 +634,17 @@ bool SetMovementSpeed(int entIndex, float scale) {
 	if (now == scale) return true;
 	memcpy(field, &scale, sizeof(scale));
 	edict.stateFlags |= kEdictChanged | kEdictFullyChanged;  // (the screens' copy of the player has to hear of it)
+	return true;
+}
+
+bool SetChallengeSeconds(int entIndex, float seconds) {
+	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;
+	if (!g_globals || !g_globals->edicts || g_player.challengeSeconds < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;
+	sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse()) return false;
+	char *field = static_cast<char *>(edict.unknown) + g_player.challengeSeconds;
+	memcpy(field, &seconds, sizeof(seconds));
+	edict.stateFlags |= kEdictChanged | kEdictFullyChanged;
 	return true;
 }
 

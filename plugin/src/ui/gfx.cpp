@@ -153,6 +153,7 @@ void PollInput() {
 		if (key >= kKeyA && key < kKeyA + 26) g_typed += static_cast<char>((shift ? 'A' : 'a') + key - kKeyA);
 		else if (key >= kKey0 && key < kKey0 + 10) g_typed += shift ? ")!@#$%^&*("[key - kKey0] : static_cast<char>('0' + key - kKey0);
 		else if (key >= kKeyPad0 && key < kKeyPad0 + 10) g_typed += static_cast<char>('0' + key - kKeyPad0);
+		else if (key == kKeyPadDecimal) g_typed += '.';
 		else if (key == kKeySpace) g_typed += ' ';
 		else if (key == kKeyMinus) g_typed += shift ? '_' : '-';
 		else if (key == kKeyPeriod) g_typed += shift ? '>' : '.';

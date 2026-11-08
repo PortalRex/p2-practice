@@ -105,6 +105,7 @@ struct Session {
 	bool demoSinceSnapshot = false;  // a demo was recorded at some moment since the snapshot (SAR stops it at the flags)
 	int lastTick = 0;
 	bool queuePinned = false;     // queued rendering switched off for save states (see SingleThreadedRendering)
+	std::chrono::steady_clock::time_point queuePinnedAt;  // when it was switched off
 	int savedQueueMode = -1;      // mat_queue_mode as it was before
 	bool retryAsked = false;      // the game's own restart (the finish board's Replay Map) asked for a retry
 	bool closeScreensAfterRestore = false;  // that retry is a save state on its way: close the boards again when it lands
@@ -1011,11 +1012,27 @@ bool SnapshotsUsable() {
 // seconds after a restore ("pure virtual function call" in the queued render calls, mp_coop_laser_2). With save
 // states in use, rendering stays on the main thread for the whole session instead (the setting isn't saved; it is
 // put back when practice stops).
+//
+// The switch is a queued command and the material system changes over at the end of a frame, so a snapshot taken
+// in the same frame (as the first one of a session was) held the game with its render thread still running, and
+// a restore into that went wrong on the renderer: lightmaps drawn yellow all over Turret Warehouse, then a crash
+// in the video texture update (valve_avi -> shaderapivk, a call through a freed object). So the switch is made as
+// soon as an attempt with save states begins, and a snapshot waits until it has been in effect for a moment
+// (ThreadsSettled). Particles are kept off the job threads the same way: simulated on a worker, they crashed a
+// moment after some restores (CParticleCollection::Simulate, sp_a2_laser_stairs). Neither cvar is saved, so the
+// next game start has the defaults again.
 void SingleThreadedRendering() {
 	if (g.queuePinned) return;
 	g.savedQueueMode = static_cast<int>(engine::CvarFloat("mat_queue_mode", -1));
 	g.queuePinned = true;
+	g.queuePinnedAt = std::chrono::steady_clock::now();
 	if (g.savedQueueMode != 0) engine::Execute("mat_queue_mode 0");
+	engine::Execute("r_threaded_particles 0");
+}
+
+bool ThreadsSettled() {
+	return g.queuePinned && std::chrono::steady_clock::now() - g.queuePinnedAt > std::chrono::milliseconds(250) &&
+	       engine::CvarFloat("mat_queue_mode", -1) == 0 && engine::CvarFloat("r_threaded_particles", 1) == 0;
 }
 
 void RestoreRendering() {
@@ -1081,18 +1098,22 @@ void TickDemoRestart() {
 // the snapshot is stored, so that it holds the same values whether or not a restore brings this plugin's memory
 // back along with the game's.
 void TakeSnapshotIfDue() {
-	if (g.snapshotIn <= 0 || --g.snapshotIn > 0) return;
-	if (!SnapshotsUsable()) return;
+	if (g.snapshotIn <= 0) return;
+	if (!SnapshotsUsable()) {
+		g.snapshotIn = 0;
+		return;
+	}
+	SingleThreadedRendering();  // (normally on already, since the catch-up: see TickCatchUp)
+	if (--g.snapshotIn > 0) return;
+	if (!ThreadsSettled()) {
+		g.snapshotIn = 1;  // (a tick later, until the render thread is gone)
+		return;
+	}
 	g.snapshotHandover = g.handover;
 	g.snapshotStartScreenOpen = !g.startScreenClosed;
 	g.snapshotWatch = g.watch;
 	g.snapshotCursor = g.cursor;
 	engine::FlushScript();
-	// Particles simulated on the job threads crashed a moment after some restores (CParticleCollection::Simulate
-	// on a worker, sp_a2_laser_stairs): with snapshots in use they are simulated on the main thread. The cvar is
-	// not saved, so the next game start has the default again.
-	engine::Execute("r_threaded_particles 0");
-	SingleThreadedRendering();
 	// The game keeps its coroutines (Steam's game coordinator jobs run in them) in a list per thread, made the
 	// first time a thread creates one and found again through a thread-local pointer, which a restore doesn't bring
 	// back: a list first made after the save was freed by the restore while the pointer still led there, and the
@@ -1796,6 +1817,8 @@ void MarkWorld() {
 }
 
 void TickCatchUp() {
+	// (with save states: the render thread goes now, well before the lead-in's snapshot)
+	if (SnapshotsUsable()) SingleThreadedRendering();
 	DriveSlots();
 	MoveObjects(false);
 	PlacePortals();
@@ -1804,7 +1827,18 @@ void TickCatchUp() {
 	if (++g.cursor >= g.leadStart) BeginLeadIn();
 }
 
+// The game's own Challenge Mode clock (bottom right) counts from the level's start, which includes the time
+// before the run's start, waiting for the players, catching up and every retry. It is set to the trainer's
+// clock instead, tick by tick, until the person's flags stop it.
+void SyncChallengeClock() {
+	int tick = g.mode == Mode::Run ? LiveTick() : std::max(g.cursor, g.route.timerStart);
+	float seconds = std::max(0, std::min(tick, g.route.timerEnd) - g.route.timerStart) * g.route.tickInterval;
+	for (const Slot &slot : g.slots)
+		if (slot.entIndex && !slot.finished) engine::SetChallengeSeconds(slot.entIndex, seconds);
+}
+
 void TickLeadIn() {
+	SyncChallengeClock();
 	TakeSnapshotIfDue();
 	DriveSlots();
 	MoveObjects(false);
@@ -1827,6 +1861,7 @@ void TickLeadIn() {
 }
 
 void TickWatch() {
+	SyncChallengeClock();
 	TakeSnapshotIfDue();
 	WatchFlags();
 	DriveSlots();
@@ -1887,6 +1922,7 @@ void FollowTrace() {
 
 void TickRun() {
 	if (g.cursor == g.handover + 2 && !g.replaying) CheckHandover();
+	SyncChallengeClock();
 	FollowTrace();
 	DriveSlots();
 	MoveObjects(false);

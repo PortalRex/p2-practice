@@ -286,9 +286,10 @@ std::string g_edited;
 bool g_editFresh = false;  // nothing typed yet: the first key replaces the value shown
 
 void ApplyEdit(float &value, float lo, float hi) {
+	// ("16." and ".5" read as 16 and 0.5)
 	char *end = nullptr;
 	float typed = std::strtof(g_edited.c_str(), &end);
-	if (!g_edited.empty() && end && *end == '\0') value = std::clamp(typed, lo, hi);
+	if (end && end != g_edited.c_str()) value = std::clamp(typed, lo, hi);
 }
 
 // The typed value of an editable slider, in `box`; true while it is being typed
@@ -307,13 +308,14 @@ bool EditValue(const std::string &focusId, Rect box, float &value, float lo, flo
 	}
 	if (g_editing != focusId) return false;
 	if (g_enabled) {
-		std::string typed;
-		for (char c : gfx::TypedText())
-			if ((c >= '0' && c <= '9') || c == '.') typed += c;
-		if (!typed.empty()) {
+		for (char c : gfx::TypedText()) {
+			if (c == ',') c = '.';  // (a decimal comma counts as the point)
+			if (!((c >= '0' && c <= '9') || c == '.')) continue;
 			if (g_editFresh) g_edited.clear();
 			g_editFresh = false;
-			if (g_edited.size() < 8) g_edited += typed;
+			// (one point: a second one moves it, as "1.2." can't be read)
+			if (c == '.') g_edited.erase(std::remove(g_edited.begin(), g_edited.end(), '.'), g_edited.end());
+			if (g_edited.size() < 8) g_edited += c;
 		}
 		if (Repeats(gfx::kKeyBackspace) && !g_edited.empty()) {
 			g_editFresh = false;
