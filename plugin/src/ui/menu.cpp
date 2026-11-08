@@ -360,7 +360,7 @@ void PracticePage(Rect area, const trainer::Status &s) {
 		ui::Choice("PLAY AS", g.role, {"Blue (ATLAS)", "Orange (P-body)"}, {theme::kBlue, theme::kOrange});
 		ui::Choice("PARTNER", g.partner, {"Bot", "Real partner"});
 	}
-	ui::Slider("TAKE OVER AT", g.takeOver, 0, total, "%.2f s");
+	ui::Slider("TAKE OVER AT", g.takeOver, 0, total, "%.2f s", true);
 	const trainer::Settings &set = trainer::CurrentSettings();
 	float leadIn = set.leadIn, speed = set.speed;
 	if (ui::Stepper("LEAD-IN", leadIn, 0.5f, 0, 10, "%.1f s")) Set(Format("prac_set leadin %g", leadIn));
@@ -755,6 +755,19 @@ const std::vector<Step> &TourScript() {
 	return script;
 }
 
+// Development (prac_menu_tour takeover): types a take-over time into the PRACTICE page's slider, with a screenshot
+// while typing and one after a click elsewhere set it. A run must be loaded.
+const std::vector<Step> &TakeOverScript() {
+	static const std::vector<Step> script = {
+		{'c', "prac_menu practice"}, {'w', "", 20},
+		{'m', "value:TAKE OVER AT", 20}, {'k'},
+		{'t', "8.5", 4}, {'w', "", 10}, {'c', "jpeg takeover_typing 90"}, {'w', "", 10},
+		{'m', "Practice", 20}, {'k'}, {'w', "", 10}, {'c', "jpeg takeover_set 90"}, {'w', "", 10},
+		{'c', "prac_menu close"}, {'e'},
+	};
+	return script;
+}
+
 void EndTour() {
 	if (!g_tour.on) return;
 	g_tour.on = false;
@@ -767,7 +780,8 @@ void CmdTour(const sdk::CCommand &args) {
 	if (args.ArgC() >= 2 && !_stricmp(args.Arg(1), "stop")) return EndTour();
 	g_tour = Tour{};
 	g_tour.on = true;
-	g_tour.steps = TourScript();
+	bool takeOver = args.ArgC() >= 2 && !_stricmp(args.Arg(1), "takeover");
+	g_tour.steps = takeOver ? TakeOverScript() : TourScript();
 	g_tour.x = g_tour.fromX = gfx::ScreenWidth() * 0.5f;
 	g_tour.y = g_tour.fromY = gfx::ScreenHeight() * 0.6f;
 	gfx::SetPuppet(true);

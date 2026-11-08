@@ -280,24 +280,96 @@ bool Stepper(const std::string &caption, float &value, float step, float lo, flo
 	return value != before;
 }
 
-bool Slider(const std::string &caption, float &value, float lo, float hi, const char *format) {
+namespace {
+std::string g_editing;    // the slider whose value is being typed (its focus id), and what was typed
+std::string g_edited;
+bool g_editFresh = false;  // nothing typed yet: the first key replaces the value shown
+
+void ApplyEdit(float &value, float lo, float hi) {
+	char *end = nullptr;
+	float typed = std::strtof(g_edited.c_str(), &end);
+	if (!g_edited.empty() && end && *end == '\0') value = std::clamp(typed, lo, hi);
+}
+
+// The typed value of an editable slider, in `box`; true while it is being typed
+bool EditValue(const std::string &focusId, Rect box, float &value, float lo, float hi, const char *format) {
+	// (focus taken away by a click elsewhere: what was typed is set)
+	if (g_editing == focusId && g_focus != focusId) {
+		ApplyEdit(value, lo, hi);
+		g_editing.clear();
+	}
+	if (g_editing != focusId && Clicked(box)) {
+		char shown[32];
+		snprintf(shown, sizeof(shown), "%.2f", value);
+		g_focus = g_editing = focusId;
+		g_edited = shown;
+		g_editFresh = true;
+	}
+	if (g_editing != focusId) return false;
+	if (g_enabled) {
+		std::string typed;
+		for (char c : gfx::TypedText())
+			if ((c >= '0' && c <= '9') || c == '.') typed += c;
+		if (!typed.empty()) {
+			if (g_editFresh) g_edited.clear();
+			g_editFresh = false;
+			if (g_edited.size() < 8) g_edited += typed;
+		}
+		if (Repeats(gfx::kKeyBackspace) && !g_edited.empty()) {
+			g_editFresh = false;
+			g_edited.pop_back();
+		}
+		if (gfx::KeyPressed(gfx::kKeyEnter) || gfx::KeyPressed(gfx::kKeyPadEnter)) {
+			ApplyEdit(value, lo, hi);
+			g_editing.clear();
+			g_focus.clear();
+			return false;
+		}
+		if (gfx::KeyPressed(gfx::kKeyEscape)) {
+			g_editing.clear();
+			g_focus.clear();
+			return false;
+		}
+	}
+	Panel(box, theme::kFieldHover, theme::kBlue);
+	int pad = Px(6), y = CenterY(box, Font::Normal);
+	if (g_editFresh) {
+		// the value shown, marked as about to be replaced
+		int w = gfx::TextWidth(Font::Normal, g_edited.c_str());
+		gfx::FillRect(box.x + pad - Px(2), box.y + Px(5), w + Px(4), box.h - Px(10), theme::kBlue.Alpha(110));
+	}
+	int w = gfx::Text(box.x + pad, y, Font::Normal, theme::kText, g_edited.c_str());
+	if ((GetTickCount() / 500) % 2 == 0) gfx::FillRect(box.x + pad + w + Px(1), box.y + Px(7), Px(2), box.h - Px(14), theme::kText);
+	(void)format;
+	return true;
+}
+}  // namespace
+
+bool Slider(const std::string &caption, float &value, float lo, float hi, const char *format, bool editable) {
 	Rect r = CaptionColumn(caption, Take(RowHeight()));
 	size_t id = Id(caption, 1);
+	int textWidth = Px(70);
+	float before = value;
+	bool typing = false;
+	if (editable) {
+		Rect box{r.x + r.w - textWidth, r.y + Px(2), textWidth, r.h - Px(4)};
+		Spot("value:" + caption, box);
+		typing = EditValue("slider:" + caption, box, value, lo, hi, format);
+		if (!typing && Hovered(box)) Panel(box, theme::kFieldHover, theme::kLine);
+	}
 	char text[32];
 	snprintf(text, sizeof(text), format, value);
-	int textWidth = Px(70);
 	Rect bar{r.x, r.y + r.h / 2 - Px(3), r.w - textWidth - Px(10), Px(6)};
 	Rect grab{bar.x - Px(6), r.y, bar.w + Px(12), r.h};
 	Spot(caption, bar);
 	if (Clicked(grab)) g_active = id;
-	float before = value;
 	if (g_active == id && g_mouseDown && bar.w > 0) value = lo + (hi - lo) * std::clamp(static_cast<float>(g_mx - bar.x) / bar.w, 0.0f, 1.0f);
 	float t = hi > lo ? std::clamp((value - lo) / (hi - lo), 0.0f, 1.0f) : 0;
 	Panel(bar, theme::kField, Color(0, 0, 0, 0));
 	gfx::FillRect(bar.x, bar.y, static_cast<int>(bar.w * t), bar.h, theme::kBlue);
 	int knob = Px(16);
 	gfx::FillRect(bar.x + static_cast<int>(bar.w * t) - knob / 2, r.y + (r.h - knob) / 2, knob, knob, Hovered(grab) || g_active == id ? Color(255, 255, 255) : Color(215, 220, 228));
-	TextRight(r.x + r.w, CenterY(r, Font::Normal), Font::Normal, theme::kText, text);
+	if (!typing) TextRight(r.x + r.w - (editable ? Px(6) : 0), CenterY(r, Font::Normal), Font::Normal, theme::kText, text);
 	return value != before;
 }
 
@@ -340,7 +412,10 @@ bool TextBox(const char *id, std::string &text, const std::string &placeholder) 
 }
 
 bool AnyTextFocused() { return !g_focus.empty(); }
-void Unfocus() { g_focus.clear(); }
+void Unfocus() {
+	g_focus.clear();
+	g_editing.clear();  // (a number half typed when the menu closes is dropped)
+}
 
 List BeginList(Rect r, int rowHeight, int count, int &scroll) {
 	List list;

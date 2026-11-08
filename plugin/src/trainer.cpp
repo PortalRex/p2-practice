@@ -390,7 +390,10 @@ void ApplyPortalChange(const Route &route, const route::PortalChange &change, bo
 
 // Opens the portals the run had open at `tick` and closes the others the trainer is responsible for: the
 // players' own pairs and the ones it placed itself. Portals the map placed are left alone.
+int g_portalsPlacedTo = -1;  // the run's portal changes up to this tick are in the level (see PlacePortals)
+
 void SetPortals(const Route &route, int tick) {
+	g_portalsPlacedTo = tick;
 	for (const Vec3 &pos : g_orphanPortals) engine::Script("::PP.ClosePortalAt(%.1f,%.1f,%.1f)", pos.x, pos.y, pos.z);
 	g_orphanPortals.clear();
 	std::map<int, const route::PortalChange *> state;  // by demo portal entity
@@ -1551,19 +1554,40 @@ void ShieldPlayers(bool onlyDriven) {
 }
 
 // Portal shots of this tick. Shots by a player who is in control are theirs to make; everyone else's are placed.
+//
+// A demo shows a portal a couple of ticks after it really moved, compared with the players: the recording client
+// sees its own player at once but the world's entities as the server last sent them. Played back at the demo's
+// ticks, a portal shot lands late. Team Retrieval at 13.46 s: blue re-shoots the wall portal orange is just
+// leaving, which pushes orange out at speed towards the exit; two ticks late, orange is already clear of the wall
+// and gets nothing. Shots are placed kPortalLead ticks early, which lines the push up with the record's (it
+// starts on the same tick as the record's).
+constexpr int kPortalLead = 2;
+int g_portalLead = kPortalLead;  // development: "prac_debug portallead N" overrides it
+int g_followTicks = 0;           // development: "prac_debug follow <ticks>", see FollowLog
+
 void PlacePortals() {
 	const Route &driver = Driver();
-	int tick = DriverTick(g.cursor);
+	int tick = DriverTick(g.cursor) + g_portalLead;
+	// Every change up to `tick` not placed yet, each once: the first ones after SetPortals (which put the run's
+	// portals as they were at the attempt's first tick) are already within the lead. Where the run jumped (a retry
+	// back, a skip ahead), only this tick's.
+	int from = g_portalsPlacedTo >= 0 && tick > g_portalsPlacedTo && tick - g_portalsPlacedTo <= g_portalLead + 1 ? g_portalsPlacedTo + 1 : tick;
+	g_portalsPlacedTo = tick;
 	for (const auto &change : driver.portals) {
-		if (change.tick != tick) continue;
-		if (g.mode == Mode::Run && !g.replaying && change.actor >= 0 && change.actor < static_cast<int>(g.slots.size()) &&
-		    g.slots[change.actor].human)
+		if (change.tick < from || change.tick > tick) continue;
+		// (a person's shots from the handover on are theirs, also the ones the lead reaches before it)
+		bool theirs = g.mode == Mode::Run || (g.mode == Mode::LeadIn && change.tick > DriverTick(g.handover));
+		if (theirs && !g.replaying && change.actor >= 0 && change.actor < static_cast<int>(g.slots.size()) && g.slots[change.actor].human)
 			continue;
 		// (the run's previous change of this portal says whether it is open now: the attempt began with the
 		// run's portals as they were, and has followed the run's changes since)
 		bool open = false;
 		for (const auto &before : driver.portals)
 			if (before.tick < change.tick && before.portalEnt == change.portalEnt) open = before.active;
+		if (g_followTicks > 0)
+			engine::Print("[portal] tick %d actor %d ent %d portal2 %d active %d open %d pos %.1f %.1f %.1f ang %.1f %.1f %.1f\n", change.tick,
+			              change.actor, change.portalEnt, change.portal2 ? 1 : 0, change.active ? 1 : 0, open ? 1 : 0, change.pos.x, change.pos.y,
+			              change.pos.z, change.ang.x, change.ang.y, change.ang.z);
 		ApplyPortalChange(driver, change, open);
 	}
 }
@@ -1837,8 +1861,7 @@ void CheckHandover() {
 
 // Development: "prac_debug follow <ticks>" prints, for that many ticks after each handover, every person next to the
 // run's player at the same tick: position, velocity, speed. A person who presses nothing should stay on the run
-// for as long as its player pressed nothing either.
-int g_followTicks = 0;
+// for as long as its player pressed nothing either. (g_followTicks is defined with PlacePortals, which uses it too.)
 void FollowTrace() {
 	int since = LiveTick() - g.handover;
 	if (since < 1 || since > g_followTicks || g.replaying) return;
@@ -2297,6 +2320,10 @@ void CmdDebug(const sdk::CCommand &args) {
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "botmove")) {
 		g_botPlacedOnly = atoi(args.Arg(2)) == 0;
+		return;
+	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "portallead")) {
+		g_portalLead = std::clamp(atoi(args.Arg(2)), 0, 6);
 		return;
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "snapdelay")) {

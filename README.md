@@ -45,7 +45,7 @@ the game honours only one `+plugin_load` on its command line.
 Practice's menu; Insert or Esc closes it (another key: SETTINGS, or `prac_menukey`). While it is open the game gets no keys or clicks. Four pages:
 
 - **PRACTICE**: the loaded run: its time, chamber and parts, a bar of the run with where you take over. Pick a part
-  (or drag the take-over point), Practice or Watch, blue or orange, bot or real partner, lead-in and game speed,
+  (or drag the take-over point, or click the seconds next to TAKE OVER AT and type them), Practice or Watch, blue or orange, bot or real partner, lead-in and game speed,
   then START. When the run's map isn't up, START loads it (`ss_map` for co-op with the bot); with a real partner
   the run is armed and starts once you both are in. RETRY, NEXT PART and STOP while practicing.
 - **RUNS**: every demo in your folders (searched recursively; the game's `demos` folder to begin with), co-op pairs

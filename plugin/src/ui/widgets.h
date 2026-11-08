@@ -77,7 +77,9 @@ bool Toggle(const std::string &text, bool &value);
 bool Choice(const std::string &caption, int &value, const std::vector<std::string> &options, const std::vector<Color> &colors = {});
 // "- value +" with a step, kept within [lo, hi]
 bool Stepper(const std::string &caption, float &value, float step, float lo, float hi, const char *format);
-bool Slider(const std::string &caption, float &value, float lo, float hi, const char *format);
+// A bar to drag. `editable`: a click on the value lets a number be typed (Enter or a click elsewhere sets it,
+// Esc keeps the old one).
+bool Slider(const std::string &caption, float &value, float lo, float hi, const char *format, bool editable = false);
 // One line of text; true when Enter was pressed in it
 bool TextBox(const char *id, std::string &text, const std::string &placeholder);
 bool AnyTextFocused();

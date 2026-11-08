@@ -29,6 +29,7 @@ constexpr int GetTextSize = 77;         // (font, const wchar_t *, int &wide, in
 constexpr int PaintTraverseEx = 117;    // calls the surface's StartDrawing and FinishDrawing (found from it)
 constexpr int DrawFilledRectFade = 121; // (x0, y0, x1, y1, alpha0, alpha1, horizontal)
 constexpr int DrawColoredText = 160;    // __cdecl (this, font, x, y, r, g, b, a, format, ...)
+constexpr int HandleInputEvent = 166;   // (const InputEvent_t &) -> bool: hands the event to VGUI's panels
 // The relative call operands of StartDrawing and FinishDrawing inside PaintTraverseEx
 constexpr int StartDrawingCall = 0x7f;
 constexpr int FinishDrawingCall = 0x25b;
@@ -106,7 +107,7 @@ void Remove(Patch &patch) {
 	patch.slot = nullptr;
 }
 
-Patch g_paint, g_lockCursor, g_keyEvent, g_buttonState;
+Patch g_paint, g_lockCursor, g_keyEvent, g_buttonState, g_inputEvent;
 
 // ---- input state ----
 bool g_down[kButtonCount], g_wasDown[kButtonCount];
@@ -219,6 +220,19 @@ void __fastcall ButtonStateHook(void *self, void *, const void *event) {
 	reinterpret_cast<void(__thiscall *)(void *, const void *)>(g_buttonState.original)(self, event);
 }
 
+// Every mouse move, click, wheel step and typed key on its way to VGUI's panels (the game's main menu, its pause
+// menu). While the menu is open they stop here, so the menu behind it neither highlights nor clicks; the console
+// still gets them when it is open over the menu. (True = handled: the engine's own Esc and console keys are dealt
+// with before this, and key releases still reach the game.)
+bool __fastcall InputEventHook(void *self, void *, const void *event) {
+	if (g_ready && g_capture && !ConsoleVisible()) {
+		int context = *reinterpret_cast<int *>(static_cast<char *>(g_vguiInput) + slot::InputContextField);
+		Call<void, int>(g_vguiInput, slot::ResetInputContext, context);
+		return true;
+	}
+	return reinterpret_cast<bool(__thiscall *)(void *, const void *)>(g_inputEvent.original)(self, event);
+}
+
 // The target of a relative call whose 4-byte operand is at `operand` (after an E8 byte)
 void *CallTarget(const unsigned char *operand) {
 	if (operand[-1] != 0xE8) return nullptr;
@@ -256,7 +270,8 @@ bool Init() {
 	if (!Install(g_paint, g_engineVgui, slot::Paint, reinterpret_cast<void *>(&PaintHook)) ||
 	    !Install(g_lockCursor, g_surface, slot::LockCursor, reinterpret_cast<void *>(&LockCursorHook)) ||
 	    !Install(g_keyEvent, g_client, slot::InKeyEvent, reinterpret_cast<void *>(&KeyEventHook)) ||
-	    !Install(g_buttonState, g_vguiInput, slot::UpdateButtonState, reinterpret_cast<void *>(&ButtonStateHook))) {
+	    !Install(g_buttonState, g_vguiInput, slot::UpdateButtonState, reinterpret_cast<void *>(&ButtonStateHook)) ||
+	    !Install(g_inputEvent, g_surface, slot::HandleInputEvent, reinterpret_cast<void *>(&InputEventHook))) {
 		Shutdown();
 		engine::Warn("In-game menu off: couldn't hook the game's drawing.\n");
 		return false;
@@ -269,6 +284,7 @@ void Shutdown() {
 	if (g_capture) SetCapture(false);
 	g_ready = false;
 	if (g_cursorShown && g_engineClient) ShowCursor(false);
+	Remove(g_inputEvent);
 	Remove(g_buttonState);
 	Remove(g_keyEvent);
 	Remove(g_lockCursor);
