@@ -72,6 +72,8 @@ struct Ghost {
 	float rate = 1;                   // how fast the sequence plays
 };
 
+constexpr int kFlashlightResetFrames = 4;  // game frames with projected lights off after a restore (see OnFrame)
+
 struct Session {
 	Route route;         // the run being practiced against
 	bool hasRoute = false;
@@ -106,6 +108,8 @@ struct Session {
 	int lastTick = 0;
 	bool queuePinned = false;     // queued rendering switched off for save states (see SingleThreadedRendering)
 	std::chrono::steady_clock::time_point queuePinnedAt;  // when it was switched off
+	int flashlightReset = 0;      // after a restore: game frames left with projected lights off (see OnFrame)
+	int flashlightRender = 1;     // r_flashlightrender as it was before
 	int savedQueueMode = -1;      // mat_queue_mode as it was before
 	bool retryAsked = false;      // the game's own restart (the finish board's Replay Map) asked for a retry
 	bool closeScreensAfterRestore = false;  // that retry is a save state on its way: close the boards again when it lands
@@ -971,7 +975,14 @@ void ClearScene() {
 	engine::Execute("clear_debug_overlays");
 }
 
+// A projected-light reset cut short (practice stopped, the level changed) still puts the setting back
+void FinishFlashlightReset() {
+	if (g.flashlightReset > 0 && g.flashlightReset < kFlashlightResetFrames) engine::Execute("r_flashlightrender %d", g.flashlightRender);
+	g.flashlightReset = 0;
+}
+
 void Stop(bool announce) {
+	FinishFlashlightReset();
 	ReleaseUseKeys();
 	bool wasActive = g.mode != Mode::Idle;
 	g.mode = Mode::Idle;
@@ -2531,6 +2542,7 @@ void OnLevelShutdown() {
 		g.levelWentAt = std::chrono::steady_clock::now();
 	}
 	if (g.mode != Mode::Reloading) g.mode = Mode::Idle;
+	FinishFlashlightReset();
 	g.helperLoaded = false;
 	g.slots.clear();
 }
@@ -2554,11 +2566,13 @@ void OnFrame(bool simulating) {
 	if (restored) {
 		g.cursor = g.snapshotCursor;
 		g.snapshotLoading = false;
-		// The lightmaps live on the graphics card, which a restore doesn't take back: after a restore the level
-		// was drawn with some of the lightmap pages from the discarded timeline (Turret Warehouse after the finish
-		// board's Replay Map: lit walls all yellow for 4-5 s, until the game uploaded them again by itself). The
-		// engine is asked to upload them all again from its memory, which the restore did bring back.
-		engine::RebuildLightmaps();
+		// The projected lights (env_projectedtexture) keep their state on the graphics card, which a restore doesn't
+		// take back: after the finish board's Replay Map, Turret Warehouse's big room was drawn flat yellow with
+		// black models for 4-5 s. Rendering one frame without projected lights sets them up again from the
+		// restored game (the player found r_flashlightrender 0 then 1 clears it).
+		// (a reset already under way keeps its saved value: the cvar is 0 because of it)
+		if (g.flashlightReset == 0) g.flashlightReset = kFlashlightResetFrames;
+		else if (g.flashlightReset < kFlashlightResetFrames) g.flashlightReset = kFlashlightResetFrames - 1;
 		// The game is back at the snapshot's moment and the plugin's memory is not: what the plugin knows about
 		// the level is set back to what held then. (The Challenge Mode start board, the flags, the screen fade.)
 		if (g.snapshotStartScreenOpen) g.startScreenClosed = false;
@@ -2573,6 +2587,13 @@ void OnFrame(bool simulating) {
 	g.lastTick = tick;
 	if (g.snapshotHandover >= 0 && !g.snapshotLoading && engine::RecordingDemo()) g.demoSinceSnapshot = true;
 	TickDemoRestart();
+	// (projected lights off for one frame after a restore, then back as they were: see the restore above)
+	// (counted down over a few game frames so at least one frame is drawn without them)
+	if (g.flashlightReset == kFlashlightResetFrames) {
+		g.flashlightRender = static_cast<int>(engine::CvarFloat("r_flashlightrender", 1));
+		engine::Execute("r_flashlightrender 0");
+	}
+	if (g.flashlightReset > 0 && --g.flashlightReset == 0) engine::Execute("r_flashlightrender %d", g.flashlightRender);
 	ReleaseStaleBoard();
 	if (g.retryAsked) {
 		// (the finish board's Replay Map, or the menu's Restart Level: the board pauses the game, so this runs

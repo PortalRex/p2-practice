@@ -95,8 +95,6 @@ void SetGodMode(int entIndex, bool on);
 // Scales how far the game's own movement takes a player each tick (m_flLaggedMovementValue: 1 normal, 0 not at
 // all), on the server and in the player's predicted copy on screen alike. False when it can't be set.
 bool SetMovementSpeed(int entIndex, float scale);
-// Has the engine upload every lightmap page again on its next frame (false: not found in this game version)
-bool RebuildLightmaps();
 // Sets a player's Challenge Mode clock (the time in the corner of the screen) to `seconds`
 bool SetChallengeSeconds(int entIndex, float seconds);
 

@@ -637,34 +637,6 @@ bool SetMovementSpeed(int entIndex, float scale) {
 	return true;
 }
 
-// The engine's g_RebuildLightmaps flag: R_CheckForLightingConfigChanges (engine.dll RVA 0xdd280) re-uploads every
-// lightmap page on the next frame when it is set, and R_RedownloadAllLightmaps clears it again. Found from that
-// function's "test al,al / jne +8 / cmp byte ptr [flag],al" so a relocated engine.dll works too; null if this
-// version of the game has something else there.
-bool *FindRebuildLightmapsFlag() {
-	auto *engineModule = reinterpret_cast<const unsigned char *>(GetModuleHandleA("engine.dll"));
-	if (!engineModule) return nullptr;
-	const unsigned char *code = engineModule + 0xdd280;
-	static const unsigned char kPattern[] = {0x84, 0xC0, 0x75, 0x08, 0x38, 0x05};
-	for (int i = 0; i < 0x60; i++) {
-		if (memcmp(code + i, kPattern, sizeof(kPattern)) != 0) continue;
-		uintptr_t address;
-		memcpy(&address, code + i + sizeof(kPattern), sizeof(address));
-		// (it must lie inside engine.dll's image)
-		auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(engineModule + reinterpret_cast<const IMAGE_DOS_HEADER *>(engineModule)->e_lfanew);
-		uintptr_t start = reinterpret_cast<uintptr_t>(engineModule), end = start + nt->OptionalHeader.SizeOfImage;
-		return address > start && address < end ? reinterpret_cast<bool *>(address) : nullptr;
-	}
-	return nullptr;
-}
-
-bool RebuildLightmaps() {
-	static bool *flag = FindRebuildLightmapsFlag();
-	if (!flag) return false;
-	*flag = true;
-	return true;
-}
-
 bool SetChallengeSeconds(int entIndex, float seconds) {
 	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;
 	if (!g_globals || !g_globals->edicts || g_player.challengeSeconds < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;
