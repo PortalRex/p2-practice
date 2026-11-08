@@ -18,10 +18,12 @@ it puts you on that run's route, in the real game:
 - **Replay and compare.** Play another run in the level against the loaded one, or print a part-by-part table
   of where it gains and loses.
 - **The route drawn in the level**, with a mark and an aim line for every portal shot (host only).
+- **An in-game menu** (F1): your demos, the leaderboards, how to practice and every setting, without leaving the
+  game. No launcher needed.
 
-It is a standalone server plugin (`p2practice.dll`) with a small launcher (`P2Practice.exe`). It works beside
-SAR and p2boost: it installs no hooks and patches nothing. Everything it does goes through the game's own
-plugin callbacks, console commands and VScript, so there is nothing for another plugin to collide with.
+It is a standalone server plugin (`p2practice.dll`), with an optional launcher (`P2Practice.exe`). It works beside
+SAR and p2boost. The practice itself goes through the game's own plugin callbacks, console commands and VScript;
+only the menu and HUD hook the game (see below), the way SAR does, and both work whichever plugin loads first.
 
 Practice moves players, objects and portals, so it turns `sv_cheats` on, and keeps it on in every level it has
 worked in until that level is left or loaded again (also after `prac_stop`, also if you switch it off by hand).
@@ -36,6 +38,44 @@ a practice level can end up on a leaderboard.
 
 Load the plugin from a cfg or the console, not with `+plugin_load` if another plugin is loaded that way too:
 the game honours only one `+plugin_load` on its command line.
+
+## The in-game menu
+
+`plugin_load p2practice` (in your autoexec, or the console), then **F1** in the menu or in a level opens P2
+Practice's menu; F1 or Esc closes it. While it is open the game gets no keys or clicks. Four pages:
+
+- **PRACTICE**: the loaded run: its time, chamber and parts, a bar of the run with where you take over. Pick a part
+  (or drag the take-over point), Practice or Watch, blue or orange, bot or real partner, lead-in and game speed,
+  then START. When the run's map isn't up, START loads it (`ss_map` for co-op with the bot); with a real partner
+  the run is armed and starts once you both are in. RETRY, NEXT PART and STOP while practicing.
+- **RUNS**: every demo in your folders (searched recursively; the game's `demos` folder to begin with), co-op pairs
+  as one run, read in the background and cached in `portal2/p2practice/library.cache`. Type to search; FOLDERS
+  adds a folder (paste its path with Ctrl+V) or removes one. Double-click a run, or LOAD THIS RUN.
+- **BOARDS**: the Challenge Mode leaderboards at board.portal2.sr by chapter. Pick a chamber, double-click a run
+  (or GET DEMO): its demo(s) are downloaded into `portal2/demos/p2practice/boards` and loaded.
+- **SETTINGS**: ghosts (style, colour, opacity), what's on screen, retries, save states and the menu's key.
+
+Settings are kept in `cfg/p2practice/settings.cfg` (run when the plugin loads). The HUD (clock and gap, part,
+speed, flashes) is drawn by the plugin; a partner over the network still gets the game's text lines.
+
+Console: `prac_menu [practice|runs|boards [map]|settings|close]`, `prac_menukey <key>`, `prac_folder_add
+<folder>`, `prac_folders`, `prac_menu_tour [record <video>]` (a scripted walk through the menu, recorded with
+SAR's renderer, for showing it).
+
+**Save states without the launcher.** ChocolateLoading has to start with the game. Copy `chocoload.exe` and
+`chocolateloading.dll` (from the release's `chocolateloading` folder) next to `portal2.exe`, and once, in Steam:
+Portal 2 > Properties > Launch Options, put `"<Portal 2 folder>\chocoload.exe" %command%` first (the menu's
+SETTINGS page shows the exact line and copies it). Steam's Play then starts the game with save states ready.
+With another wrapper already there, chain them: `"...\P2Multi.exe" "...\chocoload.exe" %command% ...`.
+
+How it draws: after the game paints its 2D panels each frame, the plugin draws with the game's own surface
+(`VGUI_Surface031`) and reads the mouse and keys from its input system. While the menu is open it frees the
+cursor and keeps keys and clicks from the game and its menus. That takes four patched function-table slots
+(engine VGUI paint, the surface's cursor lock, the client's key events, VGUI's button input), each patched in
+the table the object uses at that moment (SAR swaps in copies of these tables) and put back when the plugin
+unloads; the DLL then stays loaded until the game closes, as a copy SAR made may still hold its hooks. The
+approach follows [Photon](https://github.com/aIIison/photon)'s menu (written anew, not copied). If any interface
+is missing, the plugin works on without its menu, with the game's text HUD.
 
 ## The launcher
 
@@ -143,13 +183,14 @@ lead-in. The launcher's **SAVE STATES** switch does it all: it puts ChocolateLoa
 `chocolateloading.dll` (shipped in `chocolateloading\` next to the launcher) into the Portal 2 folder, starts
 the game through `chocoload.exe` (Steam must be running: it starts `portal2.exe` itself) and sets
 `prac_set snapshots 1`. From the console it is the same two things: start the game through `chocoload.exe`
-and set `prac_set snapshots 1`.
+and set `prac_set snapshots 1`. Without the launcher: Steam launch options, as in "The in-game menu" above.
 
 ChocolateLoading is Blenderiste09's, shipped with the release with their permission. The build shipped carries
 two fixes (`third_party/chocolateloading/fixes.patch`, explained in `third_party/chocolateloading/README.txt`):
 with the Steam overlay enabled the engine's entity table was left out of snapshots (a crash a moment after a
 restore), and its heap aligned memory to 8 bytes where the game's SSE code needs 16 (a crash on gel maps with
-ChocolateLoading merely loaded). The stock build has both problems.
+ChocolateLoading merely loaded). The stock build has both problems. A third change lets `chocoload.exe` run as
+Portal 2's Steam launch options (`... %command%`), for save states without the launcher.
 
 Snapshots are off with a partner over the network (the snapshot holds this computer's game only): retries then
 restart the level as without save states. Each snapshot takes about 350 MB of memory (pagefile-backed); the

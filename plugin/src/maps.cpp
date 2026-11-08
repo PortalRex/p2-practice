@@ -138,4 +138,20 @@ std::string ChamberName(const std::string &mapFile) {
 	return mapFile;
 }
 
+int ChamberOrder(const std::string &mapFile) {
+	int index = 0;
+	for (const Chamber &chamber : kChambers) {
+		if (!_stricmp(chamber.file, mapFile.c_str())) return index;
+		index++;
+	}
+	return index;
+}
+
+std::vector<std::pair<std::string, std::string>> Chambers(bool coop) {
+	std::vector<std::pair<std::string, std::string>> out;
+	for (const Chamber &chamber : kChambers)
+		if ((strncmp(chamber.file, "mp_coop_", 8) == 0) == coop) out.emplace_back(chamber.file, chamber.name);
+	return out;
+}
+
 }  // namespace maps

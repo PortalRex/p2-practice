@@ -5,6 +5,7 @@
 #include "engine.h"
 #include "sdk.h"
 #include "trainer.h"
+#include "ui/menu.h"
 #include "version.h"
 
 namespace {
@@ -23,7 +24,9 @@ public:
 		if (!engine::Init(interfaceFactory, gameServerFactory)) return false;
 		trainer::Init();
 		loaded_ = true;
-		engine::Print("P2 Practice %s loaded. prac_help lists the commands.\n", P2PRACTICE_VERSION);
+		bool menu = menu::Init();
+		engine::Print("P2 Practice %s loaded. %s\n", P2PRACTICE_VERSION,
+		              menu ? "F1 (prac_menu) opens its menu; prac_help lists the commands." : "prac_help lists the commands.");
 		return true;
 	}
 
@@ -33,6 +36,7 @@ public:
 			return;
 		}
 		if (!loaded_) return;
+		menu::Shutdown();
 		trainer::Shutdown();
 		engine::Shutdown();
 		loaded_ = false;

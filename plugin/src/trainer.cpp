@@ -27,32 +27,9 @@ using route::Route;
 using route::Sample;
 
 // ---------------------------------------------------------------------------------------------------------------
-// Settings (prac_set)
+// Settings (prac_set; the struct is in trainer.h)
 // ---------------------------------------------------------------------------------------------------------------
 
-enum ResetMode { kResetAuto, kResetSoft, kResetReload };
-
-enum GhostStyle { kGhostSolid = 0, kGhostWire = 1, kGhostWireLow = 2, kGhostBasic = 3 };
-
-struct Settings {
-	float leadIn = 1.5f;     // seconds the run plays itself before the players take over
-	bool ghost = true;       // show the recorded players
-	bool challenge = true;   // practice every run in Challenge Mode (flags, the game's timer), not only runs made in it
-	bool ghostColorSet = false;  // the ghosts in one colour of the player's choosing rather than their robots' colours
-	int ghostColor[3] = {255, 255, 255};
-	int ghostOpacity = 100;      // percent; below 100 the ghosts are drawn see-through
-	int ghostStyle = kGhostBasic;  // how: kGhostSolid, kGhostWire, kGhostWireLow, kGhostBasic
-	bool hud = true;         // on-screen clock, delta, part
-	bool path = true;        // draw the route and its portal shots in the world (seen by the host)
-	bool speedometer = true; // show the person's speed next to the record's
-	bool loop = false;       // start again by itself after the finish
-	float autoReset = 0;     // retry by itself when this many seconds behind (0 = never)
-	float speed = 1;         // game speed while practicing
-	int role = 0;            // solo co-op: the robot the player plays (team), 0 = the one they are
-	bool partner = true;     // solo co-op: drive the other robot through its half of the route
-	int reset = kResetAuto;  // how to get back to a part's start: auto, soft (teleport only), reload (map restart)
-	bool snapshots = false;  // retry through ChocolateLoading's memory snapshots when that plugin is running
-};
 Settings g_set;
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -324,7 +301,12 @@ std::string Quote(const std::string &text) {
 	return out + "\"";
 }
 
+// The plugin draws the host's HUD itself (ui/hud.cpp) when it can: the game's text lines are then for the partner
+// over the network only, whose game doesn't run the plugin.
+bool g_drawnHud = false;
+
 void Say(int entIndex, int channel, float hold, const std::string &text) {
+	if (g_drawnHud && entIndex == 1) return;
 	engine::Script("::PP.Say(%d,%d,%.2f,%s)", entIndex, channel, hold, Quote(text).c_str());
 }
 
@@ -889,7 +871,12 @@ void UpdateHud(float hold = -1) {
 	}
 }
 
+std::string g_flashText;
+std::chrono::steady_clock::time_point g_flashUntil;
+
 void Flash(float seconds, const std::string &text) {
+	g_flashText = text;
+	g_flashUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int>(seconds * 1000));
 	for (const Slot &slot : g.slots)
 		if (ShowsHud(slot)) Say(slot.entIndex, kChFlash, seconds, text);
 }
@@ -1989,11 +1976,12 @@ int TickAtSeconds(float seconds) {
 
 void CmdGoto(const sdk::CCommand &args) {
 	if (args.ArgC() < 2 || !g.hasRoute) {
-		engine::Print("prac_goto <seconds> - practice from that time of the run\n");
+		engine::Print("prac_goto <seconds> [watch] - practice from that time of the run (or watch it from there)\n");
 		return;
 	}
 	g.replaying = false;
-	Start(TickAtSeconds(static_cast<float>(atof(args.Arg(1)))), false);
+	bool watch = args.ArgC() >= 3 && !_stricmp(args.Arg(2), "watch");
+	Start(TickAtSeconds(static_cast<float>(atof(args.Arg(1)))), watch);
 }
 
 // The same attempt, taking over a little later (or earlier) in the run: for a pair of binds that move the
@@ -2489,6 +2477,10 @@ void OnFrame(bool simulating) {
 	default: break;
 	}
 	SetBotMovement();
+	// Alone with the bot, the person's view keeps the whole screen in every mode (watching too): the game and SAR
+	// put it back to split at moments of their own (a level's start in Challenge Mode)
+	if (g.botPartner && engine::TickCount() % 8 == 0 && engine::CvarFloat("ss_force_primary_fullscreen", 1) == 0)
+		engine::Execute("ss_force_primary_fullscreen 1");
 	engine::FlushScript();
 }
 
@@ -2499,6 +2491,70 @@ bool OnRestartCommand() {
 	if (!g.hasRoute || !MapMatches() || g.attempts == 0 || g.mode == Mode::Reloading || g.mode == Mode::WaitForPlayers) return false;
 	g.retryAsked = true;
 	return true;
+}
+
+const Settings &CurrentSettings() { return g_set; }
+void UseDrawnHud(bool on) { g_drawnHud = on; }
+
+Status CurrentStatus() {
+	Status s;
+	s.snapshotsReady = engine::CommandExists("snap_save") && engine::CommandExists("snap_load");
+	if (!g.hasRoute) return s;
+	const Route &r = g.route;
+	s.loaded = true;
+	s.chamber = r.name;
+	s.map = r.map;
+	s.files = r.files;
+	s.coop = r.coop;
+	s.runSeconds = r.RunTime();
+	s.recordTime = ShowAt(r.timerEnd);
+	for (const route::Segment &segment : r.segments) s.parts.push_back({segment.name, r.TimeAt(segment.startTick), r.TimeAt(segment.endTick)});
+	s.mapLoaded = MapMatches();
+	s.attempts = g.attempts;
+	static const char *const modes[] = {"idle", "reloading", "waiting", "setting up", "lead-in", "run", "watch", "done"};
+	s.mode = modes[static_cast<int>(g.mode)];
+	s.active = g.mode != Mode::Idle;
+	s.watching = g.watch;
+	if (g.attempts) {
+		s.part = g.segment;
+		s.handoverSeconds = r.TimeAt(g.handover);
+	}
+	if (std::chrono::steady_clock::now() < g_flashUntil) s.flash = g_flashText;
+
+	// The person at this computer: the host's player, or the first one shown text
+	const Slot *person = nullptr;
+	size_t index = 0;
+	for (size_t a = 0; a < g.slots.size(); a++)
+		if (g.slots[a].human && (g.slots[a].entIndex == 1 || !person)) {
+			person = &g.slots[a];
+			index = a;
+		}
+	const float dt = r.tickInterval;
+	char text[64];
+	if (g.mode == Mode::LeadIn || g.mode == Mode::CatchUp) {
+		if (g.mode == Mode::CatchUp) s.note = "setting up the level";
+		else {
+			snprintf(text, sizeof(text), g.replaying ? "replay starts in %.1f" : "you take over in %.1f", (g.handover - g.cursor) * dt);
+			s.note = text;
+			s.clock = ShowAt(std::max(g.cursor, r.timerStart));
+		}
+	} else if (g.mode == Mode::Watch || (g.mode == Mode::Done && g.watch)) {
+		s.clock = ShowAt(std::min(g.cursor, r.timerEnd));
+		s.note = g.mode == Mode::Done ? "end of the record" : "watching the record";
+	} else if ((g.mode == Mode::Run || g.mode == Mode::Done) && person) {
+		int clock = person->finished ? person->finishCursor : LiveTick();
+		s.finished = person->finished;
+		s.clock = ShowAt(clock);
+		s.gap = Gap(clock - r.timerStart, person->progress - r.timerStart);
+		s.gapShown = true;
+		s.ahead = clock < person->progress;
+		engine::PlayerState state;
+		if (!person->finished && engine::GetPlayer(person->entIndex, state)) {
+			s.speed = g.replaying ? GroundSpeed(Driver(), static_cast<int>(index), DriverTick(g.cursor)) : Length({state.velocity.x, state.velocity.y, 0});
+			s.recordSpeed = GroundSpeed(r, static_cast<int>(index), person->progress);
+		}
+	}
+	return s;
 }
 
 bool OnClientCommand(const sdk::CCommand &args) {

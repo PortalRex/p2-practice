@@ -5,8 +5,9 @@ Redistributed with P2 Practice with the author's permission.
 P2 Practice uses it for save states (the launcher's SAVE STATES switch): a retry puts the whole level back as it
 was a moment into the part, in about 10 ms.
 
-This build is ChocolateLoading at commit 9220fe1 (2026-10-20) with two fixes. fixes.patch has both together;
-patches\ has them as two commits (git am). NOTE_FOR_BLENDERISTE09.md explains them for the author.
+This build is ChocolateLoading at commit 9220fe1 (2026-10-20) with two fixes and one addition. fixes.patch has
+all three together; patches\ has them as three commits (git am). NOTE_FOR_BLENDERISTE09.md explains the fixes
+for the author.
 
 1. 16-byte alignment. The heap that holds the game's memory handed out blocks aligned to 8 bytes; tier0's own
    heap aligns to 16, and the game's SSE code relies on it. On gel maps the paint-contact code then faulted
@@ -18,6 +19,11 @@ patches\ has them as two commits (git am). NOTE_FOR_BLENDERISTE09.md explains th
    engine's hunk (where the entity table lives). Snapshots then left the entity table out and the game crashed a
    moment after a restore. An overlay frame that is forwarding a call to kernelbase/kernel32 is now skipped; the
    overlay's own calls are still rejected.
+
+3. Steam launch options. chocoload.exe can stand in Portal 2's launch options ("<Portal 2>\chocoload.exe"
+   %command%), so Steam's Play starts the game with save states ready, no launcher needed. Steam puts the game's
+   own path first: it is skipped. chocoload then hides its console window and waits for the game, as Steam counts
+   the game as running while its launch command does. Run any other way, chocoload behaves as before.
 
 Files: chocoload.exe (starts Portal 2 with the DLL loaded before the engine) and chocolateloading.dll. The
 launcher copies both into the Portal 2 folder when save states are on.

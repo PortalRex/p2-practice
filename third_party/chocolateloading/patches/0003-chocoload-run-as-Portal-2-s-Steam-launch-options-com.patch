@@ -1,0 +1,94 @@
+From fa8b6ec07fed0b648c06fedcd2b4a3bf708ab507 Mon Sep 17 00:00:00 2001
+From: P2 Practice <kagxfreestyle@gmail.com>
+Date: Sat, 7 Nov 2026 22:50:24 -0600
+Subject: [PATCH] chocoload: run as Portal 2's Steam launch options (%command%)
+
+Steam puts the game's own path first: it is skipped. The console window is hidden, and chocoload waits for the game, so Steam counts the game as running.
+---
+ tools/chocoload.cpp | 37 +++++++++++++++++++++++++++++++++----
+ 1 file changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/tools/chocoload.cpp b/tools/chocoload.cpp
+index cd72ec5..8a3f453 100644
+--- a/tools/chocoload.cpp
++++ b/tools/chocoload.cpp
+@@ -2,6 +2,9 @@
+ // snapshots need (the allocator must be hooked before the first engine allocation).
+ //
+ //   chocoload.exe [portal2 arguments...]        e.g.  chocoload.exe -novid +map sp_a1_intro4
++//   "<Portal 2>\chocoload.exe" %command%        as Portal 2's Steam launch options: Steam's Play starts the
++//                                               game through it (it skips the game's path Steam puts first,
++//                                               hides its console and waits for the game, as Steam expects)
+ //
+ // The arguments are passed to portal2.exe unchanged. Game folder: the CHOCO_GAME environment variable,
+ // else the folder of chocoload.exe if portal2.exe is there, else DEFAULT_GAME. chocolateloading.dll must
+@@ -16,6 +19,7 @@
+ #include <windows.h>
+ #include <stdio.h>
+ #include <string.h>
++#pragma comment(lib, "user32.lib")  // ShowWindow
+ 
+ static const char* DEFAULT_GAME = "E:\\Program Files (x86)\\Steam\\steamapps\\common\\Portal 2";
+ 
+@@ -32,15 +36,30 @@ static void find_game_dir(char* game, size_t cap) {
+     game[cap - 1] = 0;
+ }
+ 
+-// Our own command line minus the program name, exactly as typed (quotes preserved).
+-static const char* forwarded_args() {
+-    const char* p = GetCommandLineA();
++// Skips one command-line word (quotes group) and the blanks after it.
++static const char* skip_word(const char* p) {
+     if (*p == '"') { p++; while (*p && *p != '"') p++; if (*p) p++; }
+     else { while (*p && *p != ' ' && *p != '\t') p++; }
+     while (*p == ' ' || *p == '\t') p++;
+     return p;
+ }
+ 
++// True when the command line's first word, after the program name, is a path to portal2.exe: Steam's launch
++// options ran us as a wrapper ("chocoload.exe %command%"), and %command% starts with the game's own path.
++static bool started_by_steam(const char* args) {
++    const char* end = skip_word(args);
++    size_t n = end - args;
++    while (n && (args[n - 1] == ' ' || args[n - 1] == '\t' || args[n - 1] == '"')) n--;
++    return n >= 11 && _strnicmp(args + n - 11, "portal2.exe", 11) == 0;
++}
++
++// Our own command line minus the program name, exactly as typed (quotes preserved).
++static const char* forwarded_args() {
++    const char* p = skip_word(GetCommandLineA());
++    // (as a wrapper, the game's path that Steam put first is not one of the game's arguments)
++    return started_by_steam(p) ? skip_word(p) : p;
++}
++
+ // LoadLibraryA(dll) in the child through a remote thread. kernel32 is mapped at the same address in
+ // every 32-bit process of a session, so our LoadLibraryA address is valid in the child.
+ static bool inject(HANDLE proc, const char* dll) {
+@@ -117,6 +136,10 @@ static bool load_dll_at_entry(const PROCESS_INFORMATION& pi, const char* dll) {
+ }
+ 
+ int main() {
++    bool wrapper = started_by_steam(skip_word(GetCommandLineA()));
++    // (started by Steam, the console window Windows opened for us would stay up beside the game: hidden)
++    DWORD owners[2];
++    if (wrapper && GetConsoleProcessList(owners, 2) == 1) ShowWindow(GetConsoleWindow(), SW_HIDE);
+     char game[MAX_PATH], exe[MAX_PATH], dll[MAX_PATH];
+     find_game_dir(game, sizeof(game));
+     snprintf(exe, sizeof(exe), "%s\\portal2.exe", game);
+@@ -147,6 +170,12 @@ int main() {
+         printf("failed: the game was closed\n");
+     }
+     CloseHandle(pi.hThread);
++    DWORD code = ok ? 0 : 1;
++    // As Steam's wrapper we stay until the game closes: Steam counts the game as running for as long as we do.
++    if (ok && wrapper) {
++        WaitForSingleObject(pi.hProcess, INFINITE);
++        GetExitCodeProcess(pi.hProcess, &code);
++    }
+     CloseHandle(pi.hProcess);
+-    return ok ? 0 : 1;
++    return (int)code;
+ }
+-- 
+2.43.0.windows.1
+

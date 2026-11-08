@@ -1,8 +1,9 @@
 // Everything the trainer needs from the running game, behind plain functions.
 //
 // Reading goes through networked entity fields found by name at load time. Acting goes through the game's own
-// console commands and VScript, so the plugin installs no hooks and patches nothing: it cannot collide with SAR,
-// p2boost or any other plugin, and it keeps working across game updates as long as those names exist.
+// console commands and VScript, so the trainer installs no hooks and patches nothing: it cannot collide with SAR,
+// p2boost or any other plugin, and it keeps working across game updates as long as those names exist. (The
+// in-game menu and HUD are the exception: ui/gfx.cpp hooks the game's drawing and input, and says how.)
 #pragma once
 
 #include <string>

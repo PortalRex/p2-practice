@@ -1,0 +1,929 @@
+#include "ui/menu.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "engine.h"
+#include "maps.h"
+#include "route.h"
+#include "trainer.h"
+#include "ui/boards.h"
+#include "ui/gfx.h"
+#include "ui/hud.h"
+#include "ui/library.h"
+#include "ui/widgets.h"
+#include "version.h"
+
+namespace menu {
+namespace {
+
+using gfx::Color;
+using gfx::Font;
+using ui::Px;
+using ui::Rect;
+namespace theme = ui::theme;
+
+enum class Page { Practice, Runs, Boards, Settings };
+
+struct Keys {
+	const char *name;
+	int code;
+};
+const Keys kMenuKeys[] = {{"F1", gfx::kKeyF1},      {"F2", gfx::kKeyF1 + 1},  {"F3", gfx::kKeyF1 + 2},  {"F4", gfx::kKeyF1 + 3},
+                          {"F5", gfx::kKeyF1 + 4},  {"F6", gfx::kKeyF1 + 5},  {"F7", gfx::kKeyF1 + 6},  {"F8", gfx::kKeyF1 + 7},
+                          {"F9", gfx::kKeyF1 + 8},  {"F10", gfx::kKeyF1 + 9}, {"F11", gfx::kKeyF1 + 10}, {"F12", gfx::kKeyF1 + 11},
+                          {"INSERT", gfx::kKeyInsert}, {"HOME", gfx::kKeyHome}, {"RSHIFT", gfx::kKeyRShift}};
+
+struct State {
+	bool ready = false;
+	bool open = false;
+	Page page = Page::Practice;
+	int menuKey = 0;  // index into kMenuKeys
+	// practice page
+	std::string loadedKey;  // the run the page's choices were set for
+	int part = 0;
+	float takeOver = 0;
+	int mode = 0, role = 0, partner = 0;  // practice/watch, blue/orange, bot/real partner
+	int partsScroll = 0;
+	// runs page
+	std::string search, searchShown = "\x01";
+	int libraryVersion = -1;
+	std::vector<int> shown;  // indices of the runs matching the search
+	int runsScroll = 0, selectedRun = -1;
+	bool foldersOpen = false;
+	std::string newFolder, folderNote;
+	DWORD lastClick = 0;
+	int lastClicked = -1;
+	// boards page
+	std::string boardMap;
+	int chaptersScroll = 0, boardScroll = 0, selectedEntry = -1;
+	std::map<int, bool> downloaded;  // by changelog id, for the board shown
+	bool downloading = false;
+	std::string boardNote;
+	// messages along the bottom
+	std::string note;
+	DWORD noteUntil = 0;
+};
+State g;
+
+void Note(const std::string &text, int seconds = 6) {
+	g.note = text;
+	g.noteUntil = GetTickCount() + seconds * 1000;
+}
+
+std::string Lower(std::string text) {
+	for (char &c : text) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+	return text;
+}
+
+std::string FileName(const std::string &path) {
+	size_t slash = path.find_last_of("\\/");
+	return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+std::string Format(const char *format, ...) {
+	char text[512];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(text, sizeof(text), format, args);
+	va_end(args);
+	return text;
+}
+
+// ---- settings kept between games: cfg/p2practice/settings.cfg, run when the plugin loads ----
+std::string SettingsPath() { return engine::GameDirectory() + "\\cfg\\p2practice\\settings.cfg"; }
+
+void SaveSettings() {
+	const trainer::Settings &s = trainer::CurrentSettings();
+	std::error_code ec;
+	std::filesystem::create_directories(std::filesystem::u8path(engine::GameDirectory() + "\\cfg\\p2practice"), ec);
+	std::ofstream out(std::filesystem::u8path(SettingsPath()), std::ios::trunc);
+	static const char *const resets[] = {"auto", "soft", "reload"};
+	static const char *const styles[] = {"solid", "wire", "wirelow", "basic"};
+	out << "// P2 Practice: the in-game menu's settings (written by the menu; run when the plugin loads)\n";
+	out << Format("prac_set leadin %g\n", s.leadIn) << Format("prac_set ghost %d\n", s.ghost ? 1 : 0)
+	    << Format("prac_set ghoststyle %s\n", styles[std::clamp(s.ghostStyle, 0, 3)]);
+	if (s.ghostColorSet) out << Format("prac_set ghostcolor \"%d %d %d\"\n", s.ghostColor[0], s.ghostColor[1], s.ghostColor[2]);
+	else out << "prac_set ghostcolor team\n";
+	out << Format("prac_set ghostopacity %d\n", s.ghostOpacity) << Format("prac_set hud %d\n", s.hud ? 1 : 0)
+	    << Format("prac_set speedometer %d\n", s.speedometer ? 1 : 0) << Format("prac_set path %d\n", s.path ? 1 : 0)
+	    << Format("prac_set loop %d\n", s.loop ? 1 : 0) << Format("prac_set autoreset %g\n", s.autoReset) << Format("prac_set speed %g\n", s.speed)
+	    << Format("prac_set reset %s\n", resets[std::clamp(s.reset, 0, 2)]) << Format("prac_set challenge %d\n", s.challenge ? 1 : 0)
+	    << Format("prac_set snapshots %d\n", s.snapshots ? 1 : 0) << Format("prac_set partner %d\n", s.partner ? 1 : 0)
+	    << Format("prac_role %s\n", s.role == route::kTeamOrange ? "orange" : s.role == route::kTeamBlue ? "blue" : "auto")
+	    << Format("prac_menukey %s\n", kMenuKeys[g.menuKey].name);
+}
+
+void Set(const std::string &line) {
+	engine::Execute("%s", line.c_str());
+	SaveSettings();
+}
+
+// ---- opening and closing ----
+void Open(bool open) {
+	g.open = open;
+	gfx::SetCapture(open);
+	if (!open) ui::Unfocus();
+}
+
+// prac_menu [practice|runs|boards|settings|close]
+void CmdMenu(const sdk::CCommand &args) {
+	if (args.ArgC() < 2) {
+		Open(!g.open);
+		return;
+	}
+	std::string page = Lower(args.Arg(1));
+	if (page == "close") return Open(false);
+	if (page == "runs") g.page = Page::Runs;
+	else if (page == "boards") {
+		g.page = Page::Boards;
+		// prac_menu boards <map>: that chamber's board
+		if (args.ArgC() >= 3 && boards::OnBoard(args.Arg(2)) && g.boardMap != args.Arg(2)) {
+			g.boardMap = args.Arg(2);
+			g.selectedEntry = -1;
+			g.boardScroll = 0;
+			g.downloaded.clear();
+			boards::Fetch(g.boardMap);
+		}
+	}
+	else if (page == "settings") g.page = Page::Settings;
+	else g.page = Page::Practice;
+	Open(true);
+}
+
+void CmdMenuKey(const sdk::CCommand &args) {
+	if (args.ArgC() < 2) {
+		engine::Print("prac_menukey <key> - the key that opens P2 Practice's menu (now: %s): F1-F12, INSERT, HOME, RSHIFT\n", kMenuKeys[g.menuKey].name);
+		return;
+	}
+	for (int i = 0; i < static_cast<int>(sizeof(kMenuKeys) / sizeof(kMenuKeys[0])); i++)
+		if (!_stricmp(args.Arg(1), kMenuKeys[i].name)) g.menuKey = i;
+}
+
+void CmdFolderAdd(const sdk::CCommand &args) {
+	if (args.ArgC() < 2) {
+		engine::Print("prac_folder_add <folder> - a folder of demos for the menu's RUNS page\n");
+		return;
+	}
+	std::string path = args.ArgS();
+	if (library::AddFolder(path)) engine::Print("Added %s.\n", path.c_str());
+	else engine::Warn("%s doesn't exist or is listed already.\n", path.c_str());
+}
+
+void CmdFolders(const sdk::CCommand &) {
+	const std::vector<std::string> &folders = library::Folders();
+	for (size_t i = 0; i < folders.size(); i++) engine::Print("  %s\n", folders[i].c_str());
+}
+
+// ---- starting a session ----
+void StartSession(const trainer::Status &s) {
+	if (s.coop) {
+		engine::Execute("prac_role %s", g.role == 1 ? "orange" : "blue");
+		engine::Execute("prac_set partner %d", g.partner == 0 ? 1 : 0);
+	}
+	SaveSettings();
+	bool watch = g.mode == 1;
+	if (s.mapLoaded) {
+		engine::CallCommand("prac_goto", Format("%.3f%s", g.takeOver, watch ? " watch" : "").c_str());
+	} else {
+		engine::Execute("prac_stop");
+		engine::CallCommand("prac_auto", Format("%sat %.3f", watch ? "watch " : "", g.takeOver).c_str());
+		if (!s.coop) engine::Execute("map %s", s.map.c_str());
+		else if (g.partner == 0) engine::Execute("ss_map %s", s.map.c_str());
+		else {
+			Note("Host " + s.chamber + " with your partner as usual: practice starts once you're both in.", 10);
+			return;
+		}
+	}
+	Open(false);
+}
+
+void LoadRun(const std::string &arguments, const std::string &what) {
+	engine::CallCommand("prac_load", arguments.c_str());
+	trainer::Status s = trainer::CurrentStatus();
+	if (s.loaded && s.files.size() && arguments.find(s.files[0]) != std::string::npos) {
+		g.page = Page::Practice;
+		g.loadedKey.clear();  // (the practice page sets its choices for the new run)
+		Note("Loaded " + what + ".");
+	} else
+		Note("That demo couldn't be loaded (see the console).", 8);
+}
+
+// ---- drawing ----
+void Header(Rect window) {
+	Rect bar{window.x, window.y, window.w, Px(58)};
+	gfx::FillRect(bar.x, bar.y, bar.w, bar.h, theme::kHeader);
+	int x = bar.x + Px(22);
+	// the mark: two portal rings
+	int r = Px(9), cy = bar.y + bar.h / 2;
+	gfx::FillRect(x, cy - r, Px(6), 2 * r, theme::kBlue);
+	gfx::FillRect(x + Px(9), cy - r, Px(6), 2 * r, theme::kOrange);
+	x += Px(28);
+	x += gfx::Text(x, cy - gfx::FontHeight(Font::Title) / 2, Font::Title, theme::kText, "P2 PRACTICE") + Px(30);
+	struct Tab {
+		Page page;
+		const char *name;
+	};
+	const Tab tabs[] = {{Page::Practice, "PRACTICE"}, {Page::Runs, "RUNS"}, {Page::Boards, "BOARDS"}, {Page::Settings, "SETTINGS"}};
+	for (const Tab &tab : tabs) {
+		int w = gfx::TextWidth(Font::Bold, tab.name) + Px(28);
+		Rect t{x, bar.y, w, bar.h};
+		ui::Spot(tab.name, t);
+		bool on = g.page == tab.page;
+		bool hover = ui::Hovered(t);
+		if (hover && !on) gfx::FillRect(t.x, t.y, t.w, t.h, theme::kField);
+		ui::TextCentered(t, Font::Bold, on ? theme::kText : hover ? Color(210, 214, 222) : theme::kDim, tab.name);
+		if (on) gfx::FillRect(t.x + Px(10), t.y + t.h - Px(4), t.w - Px(20), Px(4), theme::kBlue);
+		if (ui::Clicked(t)) {
+			g.page = tab.page;
+			ui::Unfocus();
+		}
+		x += w;
+	}
+	std::string hint = std::string(kMenuKeys[g.menuKey].name) + " / ESC  close";
+	ui::TextRight(bar.x + bar.w - Px(20), cy - gfx::FontHeight(Font::Small) / 2, Font::Small, theme::kFaint, hint);
+}
+
+void Footer(Rect window, const trainer::Status &s) {
+	Rect bar{window.x, window.y + window.h - Px(34), window.w, Px(34)};
+	gfx::FillRect(bar.x, bar.y, bar.w, bar.h, theme::kHeader);
+	int y = bar.y + (bar.h - gfx::FontHeight(Font::Small)) / 2;
+	std::string left;
+	if (!g.note.empty() && GetTickCount() < g.noteUntil) left = g.note;
+	else if (s.active) left = s.chamber + "  \xC2\xB7  " + s.mode + (s.attempts ? Format("  \xC2\xB7  attempt %d", s.attempts) : "");
+	else if (s.loaded) left = s.chamber + " loaded" + (s.mapLoaded ? "" : "  \xC2\xB7  its map isn't up: START loads it");
+	else left = "No run loaded: pick one in RUNS or BOARDS";
+	ui::TextIn(bar.x + Px(20), y, bar.w / 2 + Px(200), Font::Small, theme::kDim, left);
+	std::string right = std::string("save states ") + (s.snapshotsReady ? "ready" : "off") + "  \xC2\xB7  v" P2PRACTICE_VERSION;
+	ui::TextRight(bar.x + bar.w - Px(20), y, Font::Small, theme::kFaint, right);
+}
+
+// The practice page: the loaded run, its parts, and how to practice it
+void PracticePage(Rect area, const trainer::Status &s) {
+	if (!s.loaded) {
+		ui::BeginArea(area.Inset(Px(40)));
+		ui::Label("No run loaded", Font::Title);
+		ui::Space(Px(6));
+		ui::Label("Pick a demo of yours in RUNS, or fetch one from the leaderboards in BOARDS.", Font::Normal, theme::kDim);
+		ui::Space(Px(20));
+		ui::Rect r = ui::TakeWidth(Px(220), Px(40));
+		if (ui::ButtonIn(r, "BROWSE RUNS", true)) g.page = Page::Runs;
+		ui::SameLine();
+		if (ui::ButtonIn(ui::TakeWidth(Px(220), Px(40)), "BOARDS")) g.page = Page::Boards;
+		ui::EndArea();
+		return;
+	}
+	// choices set fresh for each newly loaded run
+	std::string key = s.files.empty() ? s.map : s.files[0];
+	if (key != g.loadedKey) {
+		g.loadedKey = key;
+		g.part = s.part >= 0 ? s.part : 0;
+		g.takeOver = s.parts.empty() ? 0 : s.parts[g.part].start;
+		const trainer::Settings &set = trainer::CurrentSettings();
+		g.role = set.role == route::kTeamOrange ? 1 : 0;
+		g.partner = set.partner ? 0 : 1;
+		g.partsScroll = 0;
+	}
+
+	int pad = Px(26);
+	Rect left{area.x + pad, area.y + pad, area.w * 52 / 100 - pad, area.h - 2 * pad};
+	Rect right{left.x + left.w + Px(30), area.y + pad, area.x + area.w - pad - (left.x + left.w + Px(30)), area.h - 2 * pad};
+
+	// --- left: the run and its parts ---
+	int tw = gfx::Text(left.x, left.y - Px(10), Font::Huge, theme::kText, s.recordTime.c_str());
+	int tx = left.x + tw + Px(22);
+	ui::TextIn(tx, left.y + Px(8), left.x + left.w - tx, Font::Title, theme::kText, s.chamber);
+	std::string sub = s.map + (s.coop ? "  \xC2\xB7  co-op" : "  \xC2\xB7  single player");
+	ui::TextIn(tx, left.y + Px(8) + gfx::FontHeight(Font::Title), left.x + left.w - tx, Font::Small, theme::kDim, sub);
+	int y = left.y + gfx::FontHeight(Font::Huge);
+	std::string files;
+	for (const std::string &f : s.files) files += (files.empty() ? "" : "  +  ") + FileName(f);
+	ui::TextIn(left.x, y, left.w, Font::Small, theme::kFaint, files);
+	y += gfx::FontHeight(Font::Small) + Px(16);
+
+	// a bar of the run with its parts and where the take-over is
+	Rect bar{left.x, y, left.w, Px(14)};
+	gfx::FillRect(bar.x, bar.y, bar.w, bar.h, theme::kField);
+	float total = std::max(0.01f, s.runSeconds);
+	for (size_t i = 0; i < s.parts.size(); i++) {
+		int x0 = bar.x + static_cast<int>(bar.w * std::clamp(s.parts[i].start / total, 0.0f, 1.0f));
+		gfx::FillRect(x0, bar.y, Px(2), bar.h, theme::kHeader);
+	}
+	int mark = bar.x + static_cast<int>(bar.w * std::clamp(g.takeOver / total, 0.0f, 1.0f));
+	gfx::FillRect(bar.x, bar.y + Px(4), mark - bar.x, bar.h - Px(8), g.mode == 1 ? theme::kDim : theme::kBlue);
+	gfx::FillRect(mark - Px(2), bar.y - Px(4), Px(4), bar.h + Px(8), theme::kText);
+	if (ui::Hovered({bar.x, bar.y - Px(6), bar.w, bar.h + Px(12)}) && gfx::KeyDown(gfx::kMouseLeft))
+		g.takeOver = total * std::clamp(static_cast<float>(gfx::MouseX() - bar.x) / bar.w, 0.0f, 1.0f);
+	y += bar.h + Px(18);
+
+	gfx::Text(left.x, y, Font::Small, theme::kFaint, "START FROM");
+	y += gfx::FontHeight(Font::Small) + Px(6);
+	Rect listArea{left.x, y, left.w, left.y + left.h - y};
+	int rowH = Px(40);
+	ui::List list = ui::BeginList(listArea, rowH, static_cast<int>(s.parts.size()), g.partsScroll);
+	for (int i = list.first; i < list.last; i++) {
+		bool clicked;
+		bool selected = g.takeOver >= s.parts[i].start - 0.001f && (i + 1 >= static_cast<int>(s.parts.size()) || g.takeOver < s.parts[i + 1].start - 0.001f);
+		Rect row = ui::ListRow(list, i, selected, clicked);
+		if (row.y < -1000) continue;
+		ui::Spot("part:" + std::to_string(i), row);
+		Rect num{row.x + Px(10), row.y + Px(8), Px(34), row.h - Px(16)};
+		gfx::FillRect(num.x, num.y, num.w, num.h, selected ? theme::kBlue : theme::kField);
+		ui::TextCentered(num, Font::Bold, selected ? Color(10, 14, 20) : theme::kDim, Format("%02d", i + 1));
+		int ty = row.y + (row.h - gfx::FontHeight(Font::Normal)) / 2;
+		std::string times = route::FormatTime(s.parts[i].start) + " - " + route::FormatTime(s.parts[i].end);
+		int timesW = ui::TextRight(row.x + row.w - Px(12), ty, Font::Small, theme::kDim, times);
+		ui::TextIn(num.x + num.w + Px(14), ty, row.w - num.w - timesW - Px(50), Font::Normal, theme::kText, s.parts[i].name);
+		if (s.active && s.part == i) gfx::FillRect(row.x + row.w - Px(4), row.y, Px(4), row.h, theme::kOrange);
+		if (clicked) {
+			g.part = i;
+			g.takeOver = s.parts[i].start;
+		}
+	}
+	ui::EndList(list);
+
+	// --- right: how to practice it ---
+	ui::BeginArea(right);
+	ui::Choice("MODE", g.mode, {"Practice", "Watch the run"});
+	if (s.coop) {
+		ui::Choice("PLAY AS", g.role, {"Blue (ATLAS)", "Orange (P-body)"}, {theme::kBlue, theme::kOrange});
+		ui::Choice("PARTNER", g.partner, {"Bot", "Real partner"});
+	}
+	ui::Slider("TAKE OVER AT", g.takeOver, 0, total, "%.2f s");
+	const trainer::Settings &set = trainer::CurrentSettings();
+	float leadIn = set.leadIn, speed = set.speed;
+	if (ui::Stepper("LEAD-IN", leadIn, 0.5f, 0, 10, "%.1f s")) Set(Format("prac_set leadin %g", leadIn));
+	if (ui::Stepper("GAME SPEED", speed, 0.05f, 0.1f, 2, "%.2fx")) Set(Format("prac_set speed %g", speed));
+	bool loop = set.loop;
+	if (ui::Toggle("Start again by itself after the finish", loop)) Set(Format("prac_set loop %d", loop ? 1 : 0));
+	ui::Space(Px(10));
+	std::string start = g.mode == 1 ? "WATCH" : "START";
+	if (!s.mapLoaded) start += s.coop && g.partner == 1 ? "  (host the map)" : "  (loads " + s.chamber + ")";
+	Rect startButton = ui::Take(Px(52));
+	ui::Spot("start", startButton);
+	if (ui::ButtonIn(startButton, start, true)) StartSession(s);
+	if (s.active) {
+		int third = (ui::AreaWidth() - 2 * Px(8)) / 3;
+		if (ui::ButtonIn(ui::TakeWidth(third, Px(38)), "RETRY")) {
+			engine::Execute("prac_retry");
+			Open(false);
+		}
+		ui::SameLine();
+		if (ui::ButtonIn(ui::TakeWidth(third, Px(38)), "NEXT PART")) {
+			engine::Execute("prac_next");
+			Open(false);
+		}
+		ui::SameLine();
+		if (ui::ButtonIn(ui::TakeWidth(third, Px(38)), "STOP")) engine::Execute("prac_stop");
+	}
+	ui::EndArea();
+}
+
+// The runs page: every demo in the player's folders
+void RunsPage(Rect area) {
+	const std::vector<library::Run> &runs = library::Runs();
+	int pad = Px(22);
+	ui::BeginArea({area.x + pad, area.y + pad, area.w - 2 * pad, area.h - 2 * pad});
+	Rect top = ui::Take(Px(36));
+	ui::BeginArea({top.x, top.y, top.w - Px(320), top.h});
+	ui::TextBox("search", g.search, "Search: chamber, player, file...");
+	ui::EndArea();
+	if (ui::ButtonIn({top.x + top.w - Px(310), top.y, Px(150), top.h}, g.foldersOpen ? "HIDE FOLDERS" : "FOLDERS")) g.foldersOpen = !g.foldersOpen;
+	if (ui::ButtonIn({top.x + top.w - Px(150), top.y, Px(150), top.h}, "REFRESH")) library::Refresh();
+
+	if (g.foldersOpen) {
+		const std::vector<std::string> &folders = library::Folders();
+		for (size_t i = 0; i < folders.size(); i++) {
+			Rect r = ui::Take(Px(30));
+			ui::TextIn(r.x + Px(6), r.y + (r.h - gfx::FontHeight(Font::Small)) / 2, r.w - Px(140), Font::Small, theme::kText, folders[i]);
+			if (ui::ButtonIn({r.x + r.w - Px(120), r.y, Px(120), r.h}, "REMOVE")) {
+				library::RemoveFolder(i);
+				break;
+			}
+		}
+		Rect add = ui::Take(Px(36));
+		ui::BeginArea({add.x, add.y, add.w - Px(160), add.h});
+		bool enter = ui::TextBox("folder", g.newFolder, "Paste a folder of demos (Ctrl+V) and press Enter");
+		ui::EndArea();
+		if (ui::ButtonIn({add.x + add.w - Px(150), add.y, Px(150), add.h}, "ADD FOLDER") || enter) {
+			g.folderNote = library::AddFolder(g.newFolder) ? "" : "That folder doesn't exist or is listed already.";
+			if (g.folderNote.empty()) g.newFolder.clear();
+		}
+		if (!g.folderNote.empty()) ui::Label(g.folderNote, Font::Small, theme::kOrange);
+		ui::Space(Px(6));
+	}
+
+	// the runs matching the search (worked out again only when the search or the runs change)
+	if (g.searchShown != g.search || g.libraryVersion != library::Version()) {
+		g.searchShown = g.search;
+		g.libraryVersion = library::Version();
+		g.shown.clear();
+		std::string needle = Lower(g.search);
+		for (size_t i = 0; i < runs.size(); i++)
+			if (needle.empty() || runs[i].search.find(needle) != std::string::npos) g.shown.push_back(static_cast<int>(i));
+	}
+
+	// columns
+	Rect head = ui::Take(Px(26));
+	int w = head.w - Px(12);
+	int cx[] = {head.x + Px(12), head.x + w * 30 / 100, head.x + w * 41 / 100, head.x + w * 70 / 100, head.x + w * 82 / 100};
+	const char *names[] = {"CHAMBER", "TIME", "PLAYERS", "MODE", "FILE"};
+	for (int c = 0; c < 5; c++) gfx::Text(cx[c], head.y + Px(4), Font::Small, theme::kFaint, names[c]);
+	Rect listArea = ui::Area();
+	listArea.h -= Px(52);
+	int rowH = Px(34);
+	ui::List list = ui::BeginList(listArea, rowH, static_cast<int>(g.shown.size()), g.runsScroll);
+	for (int i = list.first; i < list.last; i++) {
+		const library::Run &run = runs[g.shown[i]];
+		bool clicked;
+		Rect row = ui::ListRow(list, i, g.selectedRun == g.shown[i], clicked);
+		if (row.y < -1000) continue;
+		ui::Spot("run:" + std::to_string(i), row);
+		int ty = row.y + (row.h - gfx::FontHeight(Font::Normal)) / 2;
+		Color text = run.demo->ok ? theme::kText : theme::kFaint;
+		ui::TextIn(cx[0], ty, cx[1] - cx[0] - Px(10), Font::Bold, text, run.chamber);
+		ui::TextIn(cx[1], ty, cx[2] - cx[1] - Px(10), Font::Normal, text, run.timeText);
+		ui::TextIn(cx[2], ty, cx[3] - cx[2] - Px(10), Font::Normal, text, run.players);
+		if (run.demo->ok && run.demo->coop) {
+			// the robots the demos give: blue (host), orange (client)
+			bool blue = run.partner || run.demo->host, orange = run.partner || !run.demo->host;
+			int sq = Px(10), sy = row.y + (row.h - sq) / 2;
+			if (blue) gfx::FillRect(cx[3], sy, sq, sq, theme::kBlue);
+			if (orange) gfx::FillRect(cx[3] + Px(14), sy, sq, sq, theme::kOrange);
+		} else
+			ui::TextIn(cx[3], ty, cx[4] - cx[3] - Px(10), Font::Normal, theme::kDim, run.demo->ok ? "SP" : "");
+		ui::TextIn(cx[4], ty, row.x + row.w - cx[4] - Px(6), Font::Small, theme::kDim, run.files);
+		if (clicked) {
+			bool twice = g.lastClicked == g.shown[i] && GetTickCount() - g.lastClick < 400;
+			g.selectedRun = g.shown[i];
+			g.lastClicked = g.shown[i];
+			g.lastClick = GetTickCount();
+			if (twice && run.demo->ok) LoadRun(library::LoadCommand(run), run.chamber);
+		}
+	}
+	ui::EndList(list);
+
+	Rect bottom{listArea.x, listArea.y + listArea.h + Px(12), listArea.w, Px(40)};
+	int done, total;
+	library::Progress(done, total);
+	std::string count = Format("%d runs", static_cast<int>(g.shown.size()));
+	if (library::Busy()) count += Format("  \xC2\xB7  reading demos %d / %d", done, total);
+	gfx::Text(bottom.x, bottom.y + (bottom.h - gfx::FontHeight(Font::Small)) / 2, Font::Small, theme::kDim, count.c_str());
+	bool canLoad = g.selectedRun >= 0 && g.selectedRun < static_cast<int>(runs.size()) && runs[g.selectedRun].demo->ok;
+	if (ui::ButtonIn({bottom.x + bottom.w - Px(260), bottom.y, Px(260), bottom.h}, "LOAD THIS RUN", true, canLoad))
+		LoadRun(library::LoadCommand(runs[g.selectedRun]), runs[g.selectedRun].chamber);
+	ui::EndArea();
+}
+
+// The boards page: chambers on the left, the chosen chamber's board on the right
+void BoardsPage(Rect area) {
+	int pad = Px(22);
+	Rect left{area.x + pad, area.y + pad, Px(330), area.h - 2 * pad};
+	Rect right{left.x + left.w + Px(22), left.y, area.x + area.w - pad - (left.x + left.w + Px(22)), left.h};
+
+	// chambers by chapter, one list
+	struct Line {
+		bool chapter;
+		std::string text, map;
+	};
+	static std::vector<Line> lines;
+	if (lines.empty())
+		for (const boards::Chapter &chapter : boards::Chapters()) {
+			lines.push_back({true, chapter.name, ""});
+			for (const auto &chamber : chapter.chambers) lines.push_back({false, chamber.second, chamber.first});
+		}
+	int rowH = Px(30);
+	ui::Spot("chambers", left);
+	ui::List chambers = ui::BeginList(left, rowH, static_cast<int>(lines.size()), g.chaptersScroll);
+	for (int i = chambers.first; i < chambers.last; i++) {
+		const Line &line = lines[i];
+		bool clicked;
+		if (line.chapter) {
+			Rect row{left.x, left.y + i * rowH - g.chaptersScroll, left.w - Px(12), rowH};
+			if (row.y >= left.y && row.y + row.h <= left.y + left.h)
+				ui::TextIn(row.x + Px(4), row.y + row.h - gfx::FontHeight(Font::Small) - Px(2), row.w, Font::Small, theme::kFaint, line.text);
+			continue;
+		}
+		Rect row = ui::ListRow(chambers, i, line.map == g.boardMap, clicked);
+		if (row.y < -1000) continue;
+		ui::Spot("chamber:" + line.text, row);
+		ui::TextIn(row.x + Px(14), row.y + (row.h - gfx::FontHeight(Font::Normal)) / 2, row.w - Px(20), Font::Normal, theme::kText, line.text);
+		if (clicked && line.map != g.boardMap) {
+			g.boardMap = line.map;
+			g.selectedEntry = -1;
+			g.boardScroll = 0;
+			g.downloaded.clear();
+			g.boardNote.clear();
+			boards::Fetch(line.map);
+		}
+	}
+	ui::EndList(chambers);
+
+	boards::State state = boards::BoardState();
+	ui::BeginArea(right);
+	if (g.boardMap.empty()) {
+		ui::Label("Leaderboards", Font::Title);
+		ui::Label("Pick a chamber: every run on its board.portal2.sr board is listed, and its demo is a click away.", Font::Normal, theme::kDim);
+		ui::EndArea();
+		return;
+	}
+	ui::Label(maps::ChamberName(g.boardMap), Font::Title);
+	if (state == boards::State::Busy) {
+		ui::Label("Fetching the board...", Font::Normal, theme::kDim);
+		ui::EndArea();
+		return;
+	}
+	if (state == boards::State::Failed) {
+		ui::Label("Couldn't get the board: " + boards::BoardError(), Font::Normal, theme::kOrange);
+		if (ui::Button("TRY AGAIN")) boards::Fetch(g.boardMap);
+		ui::EndArea();
+		return;
+	}
+	const std::vector<boards::Entry> &entries = boards::Entries();
+	if (g.downloaded.empty())
+		for (const boards::Entry &e : entries) g.downloaded[e.changelogId] = boards::Downloaded(g.boardMap, e);
+
+	Rect head = ui::Take(Px(24));
+	int w = head.w - Px(12);
+	int cx[] = {head.x + Px(10), head.x + w * 8 / 100, head.x + w * 22 / 100, head.x + w * 74 / 100, head.x + w * 88 / 100};
+	const char *names[] = {"#", "TIME", "PLAYERS", "DATE", "DEMO"};
+	for (int c = 0; c < 5; c++) gfx::Text(cx[c], head.y + Px(2), Font::Small, theme::kFaint, names[c]);
+	Rect listArea = ui::Area();
+	listArea.h -= Px(52);
+	int entryH = Px(34);
+	ui::List list = ui::BeginList(listArea, entryH, static_cast<int>(entries.size()), g.boardScroll);
+	for (int i = list.first; i < list.last; i++) {
+		const boards::Entry &e = entries[i];
+		bool clicked;
+		Rect row = ui::ListRow(list, i, g.selectedEntry == i, clicked);
+		if (row.y < -1000) continue;
+		ui::Spot("entry:" + std::to_string(i), row);
+		int ty = row.y + (row.h - gfx::FontHeight(Font::Normal)) / 2;
+		gfx::Text(cx[0], ty, Font::Normal, theme::kDim, std::to_string(e.rank).c_str());
+		gfx::Text(cx[1], ty, Font::Bold, theme::kText, boards::FormatScore(e.score).c_str());
+		ui::TextIn(cx[2], ty, cx[3] - cx[2] - Px(10), Font::Normal, theme::kText, e.Players());
+		gfx::Text(cx[3], ty, Font::Small, theme::kDim, e.date.c_str());
+		bool have = g.downloaded[e.changelogId];
+		gfx::Text(cx[4], ty, Font::Small, have ? theme::kGreen : e.Complete() ? theme::kDim : theme::kFaint, have ? "saved" : e.Complete() ? "yes" : "none");
+		if (clicked) {
+			bool twice = g.selectedEntry == i && GetTickCount() - g.lastClick < 400;
+			g.selectedEntry = i;
+			g.lastClick = GetTickCount();
+			if (twice && e.Complete() && !g.downloading) {
+				boards::Download(g.boardMap, e);
+				g.downloading = true;
+			}
+		}
+	}
+	ui::EndList(list);
+
+	// a finished download is loaded at once
+	boards::State download = boards::DownloadState();
+	if (g.downloading && download != boards::State::Busy) {
+		g.downloading = false;
+		if (download == boards::State::Ready && !boards::DownloadedFiles().empty()) {
+			std::string arguments;
+			for (const std::string &f : boards::DownloadedFiles()) arguments += (arguments.empty() ? "\"" : " \"") + f + "\"";
+			g.downloaded.clear();
+			library::Refresh();
+			LoadRun(arguments, maps::ChamberName(g.boardMap));
+		} else
+			g.boardNote = "Download failed: " + boards::DownloadError();
+	}
+
+	Rect bottom{listArea.x, listArea.y + listArea.h + Px(12), listArea.w, Px(40)};
+	bool canGet = g.selectedEntry >= 0 && g.selectedEntry < static_cast<int>(entries.size()) && entries[g.selectedEntry].Complete();
+	std::string label = g.downloading ? "DOWNLOADING..." : canGet && g.downloaded[entries[g.selectedEntry].changelogId] ? "LOAD THIS RUN" : "GET DEMO";
+	if (ui::ButtonIn({bottom.x + bottom.w - Px(260), bottom.y, Px(260), bottom.h}, label, true, canGet && !g.downloading)) {
+		boards::Download(g.boardMap, entries[g.selectedEntry]);
+		g.downloading = true;
+	}
+	std::string info = g.boardNote.empty() ? Format("%d runs on the board", static_cast<int>(entries.size())) : g.boardNote;
+	ui::TextIn(bottom.x, bottom.y + (bottom.h - gfx::FontHeight(Font::Small)) / 2, bottom.w - Px(280), Font::Small,
+	           g.boardNote.empty() ? theme::kDim : theme::kOrange, info);
+	ui::EndArea();
+}
+
+// "<Portal 2>\chocoload.exe" for Steam's launch options (in front of a wrapper already there, such as P2Multi)
+std::string SteamLaunchLine() {
+	std::string game = engine::GameDirectory();
+	size_t slash = game.find_last_of("\\/");
+	std::string folder = slash == std::string::npos ? game : game.substr(0, slash);
+	return "\"" + folder + "\\chocoload.exe\" %command%";
+}
+
+void CopyText(const std::string &text) {
+	if (!OpenClipboard(nullptr)) return;
+	EmptyClipboard();
+	int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+	if (HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, size * sizeof(wchar_t))) {
+		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, static_cast<wchar_t *>(GlobalLock(memory)), size);
+		GlobalUnlock(memory);
+		if (!SetClipboardData(CF_UNICODETEXT, memory)) GlobalFree(memory);
+	}
+	CloseClipboard();
+}
+
+void SettingsPage(Rect area, const trainer::Status &s) {
+	const trainer::Settings &set = trainer::CurrentSettings();
+	int pad = Px(26);
+	Rect left{area.x + pad, area.y + pad, area.w / 2 - pad - Px(14), area.h - 2 * pad};
+	Rect right{area.x + area.w / 2 + Px(14), left.y, area.w / 2 - pad - Px(14), left.h};
+
+	ui::BeginArea(left);
+	ui::Caption("GHOSTS");
+	bool ghost = set.ghost;
+	if (ui::Toggle("Show the record's players as ghosts", ghost)) Set(Format("prac_set ghost %d", ghost ? 1 : 0));
+	int style = set.ghostStyle == trainer::kGhostSolid ? 3 : set.ghostStyle == trainer::kGhostWire ? 2 : set.ghostStyle == trainer::kGhostWireLow ? 1 : 0;
+	if (ui::Choice("STYLE", style, {"Basic", "Wire low", "Wire", "Solid"})) {
+		static const char *const names[] = {"basic", "wirelow", "wire", "solid"};
+		Set(Format("prac_set ghoststyle %s", names[style]));
+	}
+	int color = !set.ghostColorSet ? 0 : set.ghostColor[0] == 255 && set.ghostColor[1] == 255 && set.ghostColor[2] == 255 ? 1 : 2;
+	if (ui::Choice("COLOUR", color, {"Robots' own", "White", "Green"})) {
+		static const char *const values[] = {"team", "\"255 255 255\"", "\"80 230 120\""};
+		Set(std::string("prac_set ghostcolor ") + values[color]);
+	}
+	float opacity = static_cast<float>(set.ghostOpacity);
+	if (ui::Slider("OPACITY", opacity, 10, 100, "%.0f%%")) Set(Format("prac_set ghostopacity %d", static_cast<int>(opacity + 0.5f)));
+	ui::Caption("ON SCREEN");
+	bool hudOn = set.hud, speedo = set.speedometer, path = set.path;
+	if (ui::Toggle("Clock and gap to the record", hudOn)) Set(Format("prac_set hud %d", hudOn ? 1 : 0));
+	if (ui::Toggle("Speedometer", speedo)) Set(Format("prac_set speedometer %d", speedo ? 1 : 0));
+	if (ui::Toggle("Route line and portal shots in the level", path)) Set(Format("prac_set path %d", path ? 1 : 0));
+	ui::Caption("MENU KEY");
+	int key = g.menuKey;
+	std::vector<std::string> keys = {"F1", "F2", "F3", "F4", "INSERT", "HOME"};
+	int shownKey = -1;
+	for (int i = 0; i < static_cast<int>(keys.size()); i++)
+		if (keys[i] == kMenuKeys[key].name) shownKey = i;
+	if (ui::Choice("", shownKey, keys)) {
+		for (int i = 0; i < static_cast<int>(sizeof(kMenuKeys) / sizeof(kMenuKeys[0])); i++)
+			if (keys[shownKey] == kMenuKeys[i].name) g.menuKey = i;
+		SaveSettings();
+	}
+	ui::EndArea();
+
+	ui::BeginArea(right);
+	ui::Caption("RETRIES");
+	int reset = set.reset == trainer::kResetSoft ? 1 : set.reset == trainer::kResetReload ? 2 : 0;
+	if (ui::Choice("RESET", reset, {"Auto", "Instant", "Restart level"})) {
+		static const char *const names[] = {"auto", "soft", "reload"};
+		Set(Format("prac_set reset %s", names[reset]));
+	}
+	float autoReset = set.autoReset;
+	if (ui::Stepper("AUTO RETRY", autoReset, 0.5f, 0, 10, autoReset > 0 ? "%.1f s" : "off")) Set(Format("prac_set autoreset %g", autoReset));
+	bool challenge = set.challenge;
+	if (ui::Toggle("Practice every run in Challenge Mode (flags)", challenge)) Set(Format("prac_set challenge %d", challenge ? 1 : 0));
+
+	ui::Caption("SAVE STATES");
+	bool snapshots = set.snapshots;
+	if (ui::Toggle("Retry through save states (ChocolateLoading)", snapshots)) Set(Format("prac_set snapshots %d", snapshots ? 1 : 0));
+	if (s.snapshotsReady) {
+		ui::Label("ChocolateLoading is running: retries return in about 10 ms.", Font::Small, theme::kGreen);
+	} else {
+		ui::Label("ChocolateLoading must start with the game. Once, in Steam:", Font::Small, theme::kDim);
+		ui::Label("Portal 2 > Properties > Launch Options, put this first:", Font::Small, theme::kDim);
+		Rect line = ui::Take(Px(34));
+		ui::Panel(line, theme::kField, theme::kLine);
+		ui::TextIn(line.x + Px(10), line.y + (line.h - gfx::FontHeight(Font::Small)) / 2, line.w - Px(20), Font::Small, theme::kText, SteamLaunchLine());
+		if (ui::Button("COPY THE LAUNCH OPTION")) {
+			CopyText(SteamLaunchLine());
+			Note("Copied: paste it in front of Portal 2's launch options in Steam, then restart the game.", 10);
+		}
+		std::error_code ec;
+		std::string folder = engine::GameDirectory();
+		folder = folder.substr(0, folder.find_last_of("\\/"));
+		if (!std::filesystem::exists(std::filesystem::u8path(folder + "\\chocoload.exe"), ec))
+			ui::Label("chocoload.exe isn't in the Portal 2 folder yet: copy it there from P2 Practice's chocolateloading folder.", Font::Small, theme::kOrange);
+		ui::Label("With another wrapper (P2Multi): \"...P2Multi.exe\" \"...chocoload.exe\" %command% ...", Font::Small, theme::kFaint);
+	}
+	ui::EndArea();
+}
+
+// ---- the scripted tour (prac_menu_tour): the menu used by a stand-in cursor, for showing it in a video ----
+struct Step {
+	char kind;      // c command, m move to a spot, k click, d double click, w wait, t type, h wheel, u until, e end
+	std::string a;  // the command, spot, text or condition
+	int n = 0;      // frames (move, wait, per typed character), wheel steps, or the most frames to wait (until)
+};
+
+struct Tour {
+	bool on = false;
+	std::vector<Step> steps;
+	size_t step = 0;
+	int frame = 0;
+	float x = 0, y = 0, fromX = 0, fromY = 0;
+	bool left = false;
+	int waited = 0;
+	int frames = 0;  // frames drawn since the tour began (the video's frame number)
+	std::string record;  // the video SAR renders the tour into ("" for none)
+} g_tour;
+
+const std::vector<Step> &TourScript() {
+	static const std::vector<Step> script = {
+		{'c', "prac_menu practice"}, {'w', "", 50},
+		{'m', "RUNS", 30}, {'k'}, {'w', "", 30},
+		{'m', "search", 25}, {'k'}, {'t', "flings", 6}, {'w', "", 55},
+		{'m', "BOARDS", 30}, {'k'}, {'w', "", 25},
+		{'m', "chambers", 20}, {'h', "", -20}, {'w', "", 20},
+		{'m', "chamber:Flings", 25}, {'k'}, {'w', "", 10},
+		{'m', "entry:0", 35}, {'w', "", 25}, {'d'},
+		{'u', "page:practice", 900}, {'w', "", 50},
+		{'m', "Watch the run", 28}, {'k'}, {'w', "", 15},
+		{'m', "part:0", 25}, {'k'}, {'w', "", 25},
+		{'m', "start", 28}, {'k'},
+		{'u', "mode:lead-in|watch|run", 3000}, {'w', "", 330},
+		{'c', "prac_menu"}, {'w', "", 20},
+		{'m', "SETTINGS", 25}, {'k'}, {'w', "", 20},
+		{'m', "Solid", 22}, {'k'}, {'w', "", 35},
+		{'c', "prac_menu close"},
+		{'u', "mode:done", 1200}, {'w', "", 60},
+		{'e'},
+	};
+	return script;
+}
+
+void EndTour() {
+	if (!g_tour.on) return;
+	g_tour.on = false;
+	gfx::SetPuppet(false);
+	if (!g_tour.record.empty()) engine::Execute("sar_render_finish; host_framerate 0");
+	engine::Print("Menu tour finished.\n");
+}
+
+void CmdTour(const sdk::CCommand &args) {
+	if (args.ArgC() >= 2 && !_stricmp(args.Arg(1), "stop")) return EndTour();
+	g_tour = Tour{};
+	g_tour.on = true;
+	g_tour.steps = TourScript();
+	g_tour.x = g_tour.fromX = gfx::ScreenWidth() * 0.5f;
+	g_tour.y = g_tour.fromY = gfx::ScreenHeight() * 0.6f;
+	gfx::SetPuppet(true);
+	// prac_menu_tour record <video>: rendered by SAR at 60 frames a second, one frame per frame of the tour
+	if (args.ArgC() >= 3 && !_stricmp(args.Arg(1), "record")) {
+		g_tour.record = args.Arg(2);
+		engine::Execute("sv_cheats 1; host_framerate 60");
+		engine::Execute("sar_render_start \"%s\"", g_tour.record.c_str());
+	}
+}
+
+float Ease(float t) { return t < 0.5f ? 4 * t * t * t : 1 - (-2 * t + 2) * (-2 * t + 2) * (-2 * t + 2) / 2; }
+
+// One frame of the tour: moves the stand-in cursor and presses its button
+void TickTour() {
+	if (!g_tour.on) return;
+	if (g_tour.step >= g_tour.steps.size()) return EndTour();
+	const Step &step = g_tour.steps[g_tour.step];
+	bool next = false;
+	int f = g_tour.frame++;
+	if (f == 0 && g_tour.waited == 0) engine::Print("[tour] frame %d: step %d %c %s\n", g_tour.frames, static_cast<int>(g_tour.step), step.kind, step.a.c_str());
+	g_tour.frames++;
+	switch (step.kind) {
+	case 'c':
+		engine::Execute("%s", step.a.c_str());
+		next = true;
+		break;
+	case 'w': next = f + 1 >= step.n; break;
+	case 'm': {
+		Rect r;
+		if (!ui::FindSpot(step.a, r)) {
+			// (not drawn yet: a board still loading; the move starts once it is there)
+			g_tour.frame = 0;
+			if (++g_tour.waited > 900) next = true;
+			break;
+		}
+		if (f == 0) {
+			g_tour.fromX = g_tour.x;
+			g_tour.fromY = g_tour.y;
+		}
+		float tx = r.x + std::min(r.w / 2.0f, static_cast<float>(Px(60))), ty = r.y + r.h / 2.0f;
+		float t = Ease(std::min(1.0f, (f + 1) / static_cast<float>(std::max(1, step.n))));
+		g_tour.x = g_tour.fromX + (tx - g_tour.fromX) * t;
+		g_tour.y = g_tour.fromY + (ty - g_tour.fromY) * t;
+		next = f + 1 >= step.n;
+		break;
+	}
+	case 'k':
+		g_tour.left = f < 3;
+		next = f >= 5;
+		break;
+	case 'd':
+		g_tour.left = f < 2 || (f >= 5 && f < 7);
+		next = f >= 9;
+		break;
+	case 't':
+		if (f % std::max(1, step.n) == 0) {
+			size_t i = f / std::max(1, step.n);
+			if (i < step.a.size()) gfx::PuppetInput(static_cast<int>(g_tour.x), static_cast<int>(g_tour.y), g_tour.left, 0, step.a.substr(i, 1));
+			else next = true;
+		}
+		break;
+	case 'h':
+		if (f % 3 == 0) {
+			int done = f / 3, total = std::abs(step.n);
+			if (done < total) gfx::PuppetInput(static_cast<int>(g_tour.x), static_cast<int>(g_tour.y), g_tour.left, step.n < 0 ? -1 : 1, "");
+			else next = true;
+		}
+		break;
+	case 'u': {
+		bool met = false;
+		if (step.a.compare(0, 5, "page:") == 0) met = g.page == Page::Practice && step.a == "page:practice";
+		else if (step.a.compare(0, 5, "mode:") == 0) {
+			// "mode:watch|lead-in": any of them
+			std::string mode = trainer::CurrentStatus().mode, wanted = "|" + step.a.substr(5) + "|";
+			met = wanted.find("|" + mode + "|") != std::string::npos;
+		}
+		next = met || f >= step.n;
+		break;
+	}
+	case 'e': return EndTour();
+	}
+	gfx::PuppetInput(static_cast<int>(g_tour.x), static_cast<int>(g_tour.y), g_tour.left, 0, "");
+	if (next) {
+		g_tour.step++;
+		g_tour.frame = 0;
+		g_tour.waited = 0;
+		g_tour.left = false;
+	}
+}
+
+// An arrow cursor at the mouse (the game draws none of its own in a level)
+void DrawCursor() {
+	int x = gfx::MouseX(), y = gfx::MouseY(), size = Px(22);
+	for (int row = 0; row < size; row++) {
+		int width = row * 11 / 16 + 1;
+		if (row > size * 3 / 4) width = std::max(1, (size - row) * 2);
+		gfx::FillRect(x - 1, y + row, width + 2, 1, Color(0, 0, 0, 200));
+		gfx::FillRect(x, y + row, width, 1, Color(255, 255, 255));
+	}
+}
+
+void Draw() {
+	TickTour();
+	hud::Draw();
+	if (g_tour.on && !g.open) DrawCursor();
+	if (gfx::ConsoleVisible()) return;
+	// the menu's key, and Esc to close
+	if (!ui::AnyTextFocused() && gfx::KeyPressed(kMenuKeys[g.menuKey].code)) Open(!g.open);
+	else if (g.open && !ui::AnyTextFocused() && gfx::KeyPressed(gfx::kKeyEscape)) Open(false);
+	if (!g.open) return;
+
+	ui::BeginFrame();
+	int sw = gfx::ScreenWidth(), sh = gfx::ScreenHeight();
+	gfx::FillRect(0, 0, sw, sh, theme::kBackdrop);
+	int w = std::min(Px(1240), sw - Px(40)), h = std::min(Px(800), sh - Px(40));
+	Rect window{(sw - w) / 2, (sh - h) / 2, w, h};
+	ui::Panel(window, theme::kWindow, theme::kLine);
+	trainer::Status s = trainer::CurrentStatus();
+	Header(window);
+	Rect body{window.x, window.y + Px(58), window.w, window.h - Px(58) - Px(34)};
+	switch (g.page) {
+	case Page::Practice: PracticePage(body, s); break;
+	case Page::Runs: RunsPage(body); break;
+	case Page::Boards: BoardsPage(body); break;
+	case Page::Settings: SettingsPage(body, s); break;
+	}
+	Footer(window, s);
+	// a cursor of the menu's own where the game draws none (in a level), and for the tour
+	if (gfx::InGame() || g_tour.on) DrawCursor();
+}
+
+}  // namespace
+
+bool Init() {
+	if (!gfx::Init()) return false;
+	engine::RegisterCommand("prac_menu", CmdMenu, "prac_menu - open or close P2 Practice's menu");
+	engine::RegisterCommand("prac_menukey", CmdMenuKey, "prac_menukey <key> - the key that opens P2 Practice's menu (F1-F12, INSERT, HOME, RSHIFT)");
+	engine::RegisterCommand("prac_folder_add", CmdFolderAdd, "prac_folder_add <folder> - a folder of demos for the menu's RUNS page");
+	engine::RegisterCommand("prac_menu_tour", CmdTour, "prac_menu_tour [record <video> | stop] - a scripted walk through the menu, for showing it");
+	engine::RegisterCommand("prac_folders", CmdFolders, "prac_folders - the folders the menu's RUNS page reads");
+	gfx::SetDrawCallback(Draw);
+	trainer::UseDrawnHud(true);
+	std::error_code ec;
+	if (std::filesystem::exists(std::filesystem::u8path(SettingsPath()), ec)) engine::Execute("exec p2practice/settings");
+	g.ready = true;
+	return true;
+}
+
+void Shutdown() {
+	if (!g.ready) return;
+	EndTour();
+	trainer::UseDrawnHud(false);
+	gfx::Shutdown();
+	library::Shutdown();
+	boards::Shutdown();
+	g = State{};
+}
+
+}  // namespace menu

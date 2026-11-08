@@ -20,9 +20,15 @@ add_library(p2practice SHARED
 	src/ghostmodel.cpp
 	src/plugin.cpp
 	src/trainer.cpp
+	src/ui/boards.cpp
+	src/ui/gfx.cpp
+	src/ui/hud.cpp
+	src/ui/library.cpp
+	src/ui/menu.cpp
+	src/ui/widgets.cpp
 )
 target_compile_features(p2practice PRIVATE cxx_std_17)
-target_link_libraries(p2practice PRIVATE p2route_lib)
+target_link_libraries(p2practice PRIVATE p2route_lib winhttp)
 target_compile_definitions(p2practice PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
 	target_compile_options(p2practice PRIVATE /W4 /permissive- /utf-8 /Zi)
