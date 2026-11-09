@@ -66,10 +66,14 @@ struct UseEvent {
 // A floor button a player pressed and released within one tick (the "button glitch"): its pressed output fired
 // and then its released one, and a map whose released output closes something with a delay that the pressed one
 // cancels keeps the thing open for good. Seen in SAR's record of the instance's io proxy firing both relays at once.
+//
+// The other way round too: released and then pressed again a tick or two later by a player already in the air
+// leaving it (Team Retrieval's first button, bounced off at 9.3 s): the button stays pressed with nobody on it.
 struct ButtonGlitch {
 	int tick = 0;
 	int actor = -1;
 	std::string button;  // the floor button's name in the map ("<instance>-button")
+	bool endsPressed = false;  // the released-then-pressed kind
 };
 
 // A portal opening, moving or closing

@@ -137,6 +137,7 @@ struct Session {
 	std::vector<int> useKeyDown;        // players (entity indices) whose use key the trainer is holding this tick
 	std::map<int, int> usePressedAt;    // player (entity index) -> the server tick the trainer last pressed its use key
 	bool jumpKeyDown = false;           // the trainer is holding the jump key of the player at this computer
+	bool duckKeyDown = false;           // ... and its duck key (SetDuckKey)
 	int autoPart = -1;   // prac_auto: start this part by itself once the route's map is up (-1 = not armed)
 	float autoSeconds = -1;  // prac_auto at <seconds>: that moment of the run instead of a part's start (-1 = the part)
 	bool autoWatch = false;
@@ -904,6 +905,7 @@ void MoveObjects(bool all);
 void MakeCatapult();
 void ShieldPlayers(bool onlyDriven);
 void ReleaseUseKeys();
+void SetDuckKey(bool down);
 void DropCarried(const Slot &slot);
 
 // The console command that loads the route's map, for messages
@@ -984,6 +986,7 @@ void ClearScene() {
 
 void Stop(bool announce) {
 	ReleaseUseKeys();
+	SetDuckKey(false);
 	bool wasActive = g.mode != Mode::Idle;
 	g.mode = Mode::Idle;
 	g.resumeAfterLoad = false;
@@ -1401,6 +1404,14 @@ void ReleaseUseKeys() {
 // space (logic_playerproxy OnJump, on every press, in the air too), and without the presses the container ride
 // never starts. (Only the recording player's keys are in a demo, and only the player at this computer can be given
 // a key: a bot moves by being placed, with its own movement off.)
+// The duck key of the player at this computer, held while the run's player crouched (they fit where it did, and
+// what they carry hangs as low). Let go whenever nobody is driven any more: the person's own key is theirs.
+void SetDuckKey(bool down) {
+	if (down == g.duckKeyDown) return;
+	engine::Execute(down ? "+duck" : "-duck");
+	g.duckKeyDown = down;
+}
+
 void PressJump(const Slot &slot, const Sample &now, const Sample &before) {
 	if (slot.entIndex != 1 || now.buttons < 0 || !(now.buttons & p2demo::IN_JUMP)) return;
 	if (before.buttons >= 0 && (before.buttons & p2demo::IN_JUMP)) return;
@@ -1424,6 +1435,9 @@ Vec3 AimDirection(const Sample &s) {
 
 bool g_botPlacedOnly = true;  // development: "prac_debug botmove 1" lets the game move the bot between placements again
 
+constexpr float kStandEyeHeight = 64, kDuckEyeHeight = 28;  // a robot's eyes above its feet
+constexpr int kFlagDucking = 2;                              // FL_DUCKING
+
 bool BotPlacedOnly(const Slot &slot) {
 	return g_botPlacedOnly && !slot.human && !g.replaying && g.mode != Mode::CatchUp;
 }
@@ -1445,6 +1459,8 @@ void SetBotMovement() {
 		if (!engine::GetPlayer(i, state) || !state.bot) continue;
 		bool placed = std::find(g.placedBots.begin(), g.placedBots.end(), i) != g.placedBots.end();
 		engine::SetMovementSpeed(i, placed ? 0.0f : 1.0f);
+		// (a bot moving by itself again stands up: see DriveSlots)
+		if (!placed && !(state.flags & kFlagDucking)) engine::SetEyeHeight(i, kStandEyeHeight);
 	}
 }
 
@@ -1452,6 +1468,11 @@ void DriveSlots() {
 	ReleaseUseKeys();
 	const Route &driver = Driver();
 	int tick = DriverTick(g.cursor);
+	bool duck = false;  // (the duck key of the player at this computer: see SetDuckKey)
+	struct DuckKey {
+		bool &wanted;
+		~DuckKey() { SetDuckKey(wanted); }
+	} duckKey{duck};
 	if (tick > driver.lastTick) return;
 	for (size_t i = 0; i < g.slots.size(); i++) {
 		if (!Driven(g.slots[i])) continue;
@@ -1496,6 +1517,9 @@ void DriveSlots() {
 				if (rise > velocity.z && rise < 64 / driver.tickInterval) velocity.z = rise;
 			}
 			MovePlayer(player, s, velocity);
+			// (crouched where the run's player crouched, as far as its eyes go: what it carries hangs in front of
+			// them, and Separation's cube, carried crouching onto its button, otherwise came in 36 units too high)
+			engine::SetEyeHeight(player, s.ducked ? kDuckEyeHeight : kStandEyeHeight);
 			g.placedBots.push_back(player);
 		} else {
 			int from = FrameStartsNow() && tick > driver.firstTick ? tick - 1 : tick;
@@ -1523,6 +1547,7 @@ void DriveSlots() {
 			engine::Script("::PP.Use(%d,%.4f,%.4f,%.4f)", player, aim.x, aim.y, aim.z);
 		}
 		PressJump(g.slots[i], s, before);
+		if (player == 1 && !BotPlacedOnly(g.slots[i])) duck = s.ducked;
 		// Hands. In co-op the game makes a player who flies fast catch what they are looking at, without any key:
 		// it did so for the run's player, and it does so for the driven one. While the run's player carries
 		// something that is as it should be; as soon as they don't, the driven player lets go.
@@ -1536,7 +1561,7 @@ void DriveSlots() {
 		// driven player already did it, this changes nothing.)
 		for (const route::ButtonGlitch &glitch : driver.buttonGlitches) {
 			if (glitch.actor != actor || glitch.tick + kButtonGlitchDelay != tick) continue;
-			engine::Script("::PP.PressAndRelease(\"%s\")", glitch.button.c_str());
+			engine::Script(glitch.endsPressed ? "::PP.ReleaseAndPress(\"%s\")" : "::PP.PressAndRelease(\"%s\")", glitch.button.c_str());
 		}
 	}
 }
@@ -1600,12 +1625,15 @@ void MoveObjects(bool all) {
 	int tick = DriverTick(g.cursor);
 	if (g.objectLastDriven.size() != driver.movers.size()) g.objectLastDriven.assign(driver.movers.size(), -1);
 	if (all) engine::Script("::PP.ForgetObjects()");
-	// what the people in the game have in their hands is theirs
+	// what the people in the game have in their hands is theirs. (Not what a bot the trainer places holds: the game
+	// makes it catch things as the run's player did, but holds them in front of its own eyes, not the run's player's
+	// - a crouching carrier's cube came onto Separation's button 36 units high. That stays on the run's path.)
 	int inHands[2] = {-1, -1};
 	size_t hands = 0;
 	for (const Slot &slot : g.slots) {
 		engine::PlayerState state;
-		if (slot.entIndex && hands < 2 && engine::GetPlayer(slot.entIndex, state) && state.held > 0) inHands[hands++] = state.held;
+		if (slot.entIndex && hands < 2 && engine::GetPlayer(slot.entIndex, state) && state.held > 0 && !BotPlacedOnly(slot))
+			inHands[hands++] = state.held;
 	}
 	const float dt = driver.tickInterval;
 	for (size_t i = 0; i < driver.movers.size(); i++) {
@@ -1613,8 +1641,13 @@ void MoveObjects(bool all) {
 		Vec3 pos, ang;
 		if (!mover.At(tick, pos, ang)) continue;
 		int id = static_cast<int>(i);
+		// (an object that turns up during the run - a dropper's cube - is taken only by a live one right there, for
+		// its first two seconds: see PP.Claim)
+		constexpr int kNewborn = 120;
+		bool newborn = mover.keys.front().tick > driver.firstTick + 5 && tick - mover.keys.front().tick < kNewborn;
+		float claimRadius = newborn ? 96.0f : 400.0f;
 		if (all || tick == mover.keys.front().tick)
-			engine::Script("::PP.Claim(%d,\"%s\",%.1f,%.1f,%.1f)", id, mover.className.c_str(), pos.x, pos.y, pos.z);
+			engine::Script("::PP.Claim(%d,\"%s\",%.1f,%.1f,%.1f,%.0f)", id, mover.className.c_str(), pos.x, pos.y, pos.z, claimRadius);
 		if (!LooksAfterObject(i, tick)) continue;
 
 		bool carried = false, carriedBefore = false;
@@ -1639,8 +1672,8 @@ void MoveObjects(bool all) {
 		float slack = (all || carried || released) ? 0 : mover.aimsLasers ? kLaserCubeSlack : kSlack;
 		float turnSlack = turning ? 0 : mover.aimsLasers ? kLaserCubeTurnSlack : kTurnSlack;
 		bool launch = !carried && Launchable(mover.className) && Length(velocity) > kMovingSpeed;
-		engine::Script("::PP.Pose(%d,\"%s\",%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f,%d,%d,%.1f,%.1f,%d)", id, mover.className.c_str(), pos.x, pos.y, pos.z,
-		               ang.x, ang.y, ang.z, velocity.x, velocity.y, velocity.z, inHands[0], inHands[1], slack, turnSlack, launch ? 1 : 0);
+		engine::Script("::PP.Pose(%d,\"%s\",%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f,%d,%d,%.1f,%.1f,%d,%.0f)", id, mover.className.c_str(), pos.x, pos.y,
+		               pos.z, ang.x, ang.y, ang.z, velocity.x, velocity.y, velocity.z, inHands[0], inHands[1], slack, turnSlack, launch ? 1 : 0, claimRadius);
 	}
 }
 
@@ -2361,6 +2394,7 @@ void PrintSettings() {
 	              g_set.ghostStyle == kGhostSolid ? "solid" : g_set.ghostStyle == kGhostWire ? "wire" : g_set.ghostStyle == kGhostWireLow ? "wirelow" : "basic");
 	engine::Print("  hud %d           the clock, the gap to the record and the flashes on screen\n", g_set.hud);
 	engine::Print("  speedometer %d   your speed next to the record's, at the bottom left\n", g_set.speedometer);
+	engine::Print("  strafe %d        bhop trainer: speed gained per jump, air time spent gaining, hop timing\n", g_set.strafe);
 	engine::Print("  path %d          draw the route and portal shots in the level (host only)\n", g_set.path);
 	engine::Print("  partner %d       alone in co-op: a bot plays the other robot's half\n", g_set.partner);
 	engine::Print("  loop %d          start again by itself after the finish\n", g_set.loop);
@@ -2387,6 +2421,7 @@ void CmdSet(const sdk::CCommand &args) {
 	else if (name == "ghoststyle") g_set.ghostStyle = value == "solid" ? kGhostSolid : value == "wire" ? kGhostWire : value == "wirelow" ? kGhostWireLow : kGhostBasic;
 	else if (name == "hud") g_set.hud = on;
 	else if (name == "speedometer") g_set.speedometer = on;
+	else if (name == "strafe") g_set.strafe = on;
 	else if (name == "path") g_set.path = on;
 	else if (name == "partner") g_set.partner = on;
 	else if (name == "loop") g_set.loop = on;

@@ -667,6 +667,20 @@ bool ResetRenderState() {
 	return true;
 }
 
+bool SetEyeHeight(int entIndex, float height) {
+	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;
+	if (!g_globals || !g_globals->edicts || g_player.viewOffsetZ < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;
+	sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse()) return false;
+	char *field = static_cast<char *>(edict.unknown) + g_player.viewOffsetZ;
+	float now;
+	memcpy(&now, field, sizeof(now));
+	if (now == height) return true;
+	memcpy(field, &height, sizeof(height));
+	edict.stateFlags |= kEdictChanged | kEdictFullyChanged;
+	return true;
+}
+
 bool SetChallengeSeconds(int entIndex, float seconds) {
 	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;
 	if (!g_globals || !g_globals->edicts || g_player.challengeSeconds < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;

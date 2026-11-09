@@ -819,8 +819,23 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 			const auto &b = primary.sarEntityInputs[j];
 			if (b.target == a.target && b.input == "OnProxyRelay2" && b.slot == a.slot) released = true;
 		}
-		if (!released) continue;
+		// (the released-then-pressed kind: this press follows the same player's release by a tick or two, with no
+		// press of that button in between)
+		constexpr int kReleasedThenPressed = 4;
+		bool endsPressed = false;
+		for (size_t j = i; j-- > 0 && !released && primary.sarEntityInputs[j].tick >= a.tick - kReleasedThenPressed;) {
+			const auto &b = primary.sarEntityInputs[j];
+			if (b.target != a.target) continue;
+			if (b.input == "OnProxyRelay2" && b.slot == a.slot && b.tick < a.tick) endsPressed = true;
+			break;
+		}
+		// (and the button stays pressed: a player hopping on it lets it go again soon after)
+		constexpr int kStaysPressed = 60;
+		for (size_t j = i + 1; endsPressed && j < primary.sarEntityInputs.size() && primary.sarEntityInputs[j].tick <= a.tick + kStaysPressed; j++)
+			if (primary.sarEntityInputs[j].target == a.target && primary.sarEntityInputs[j].input == "OnProxyRelay2") endsPressed = false;
+		if (!released && !endsPressed) continue;
 		ButtonGlitch glitch;
+		glitch.endsPressed = endsPressed;
 		glitch.tick = a.tick;
 		glitch.button = a.target.substr(0, a.target.size() - suffix.size()) + "-button";
 		for (size_t k = 0; k < route.actors.size(); k++)

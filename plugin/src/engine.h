@@ -99,6 +99,8 @@ bool SetMovementSpeed(int entIndex, float scale);
 bool ResetRenderState();
 // Sets a player's Challenge Mode clock (the time in the corner of the screen) to `seconds`
 bool SetChallengeSeconds(int entIndex, float seconds);
+// Sets how high above its origin a player's eyes are (m_vecViewOffset z: 64 standing, 28 crouching)
+bool SetEyeHeight(int entIndex, float height);
 
 // The entity indices of the two portals a player's portal gun shoots (-1 where it has none). False when the
 // player holds no portal gun.

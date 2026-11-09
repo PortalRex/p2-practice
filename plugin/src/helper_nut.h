@@ -47,12 +47,22 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 // How well a player looking from `eye` along `aim` is looking at `thing`: the cosine of the angle between the
 // aim and the direction to it, or -1 when it is out of reach
 ::PP.reach <- 140.0
+// (in reach: its nearest point is, not its middle - Vertical Flings' race buttons are panels 128 units wide,
+// pressed from below while flying past, with their middle out of reach)
 ::PP.LooksAt <- function(eye, aim, thing) {
 	local to = thing.GetCenter() - eye
 	local distance = to.Length()
-	if (distance < 1 || distance > reach) return -1.0
+	if (distance < 1) return -1.0
+	local lo = thing.GetOrigin() + thing.GetBoundingMins()
+	local hi = thing.GetOrigin() + thing.GetBoundingMaxs()
+	local near = Vector(Clamp(eye.x, lo.x, hi.x), Clamp(eye.y, lo.y, hi.y), Clamp(eye.z, lo.z, hi.z))
+	// (with room to spare: only things the run did use are looked for, and a player flying past at 500 u/s is a
+	// tick or two from where the run's was by the time this runs, 10 to 20 units)
+	if ((near - eye).Length() > reach + 48) return -1.0
 	return to.Dot(aim) / distance
 }
+
+::PP.Clamp <- function(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v }
 
 // A floor button pressed and released in the same moment, as a player pressed it with the "button glitch": both
 // inputs go out with no delay, so the button sends its pressed output and then its released one within one tick
@@ -61,6 +71,16 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	if (b == null || b.GetClassname().find("floor_button") == null) return
 	EntFireByHandle(b, "PressIn", "", 0, null, null)
 	EntFireByHandle(b, "PressOut", "", 0, null, null)
+}
+
+// The other way round: released and pressed again, so that it stays pressed with nobody on it. The press comes
+// two ticks after the release, as in the run: given in the same tick, what the release sets off (Team Retrieval's
+// landings closing) would run after what the press does and win.
+::PP.ReleaseAndPress <- function(name) {
+	local b = Entities.FindByName(null, name)
+	if (b == null || b.GetClassname().find("floor_button") == null) return
+	EntFireByHandle(b, "PressOut", "", 0, null, null)
+	EntFireByHandle(b, "PressIn", "", 2.0 / 60, null, null)
 }
 
 // Use something as a player: the thing of that kind (and name, if the run recorded one) that the player is
@@ -155,11 +175,13 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 // of its kind that no other recorded object has taken, at the moment it is first needed (normally when it first
 // appears in the run, when both are at the same spot), and keeps it from then on.
 ::PP.objects <- {}
-::PP.Claim <- function(id, classname, x, y, z) {
+// (within `radius` of where the run's object is: close for one that has only just appeared - a cube a dropper
+// makes - so another cube elsewhere isn't taken for it before it is made; Vertical Flings' dropper made four)
+::PP.Claim <- function(id, classname, x, y, z, radius = 400.0) {
 	if (id in objects && objects[id] != null && objects[id].IsValid()) return objects[id]
 	local spot = Vector(x, y, z)
 	local best = null
-	local bestDistance = 400.0
+	local bestDistance = radius
 	local e = null
 	while (e = Entities.FindByClassname(e, classname)) {
 		local taken = false
@@ -241,8 +263,8 @@ R"nut(
 // moving an object out of a player's hands breaks the game's physics. With `launch`, an object that is put
 // in place is given the run's speed too (the physics carries it on from there).
 // (turnSlack: how many degrees off the way it lies may be; 0 when that doesn't matter)
-::PP.Pose <- function(id, classname, x, y, z, pitch, yaw, roll, vx, vy, vz, held1, held2, slack, turnSlack, launch) {
-	local e = Claim(id, classname, x, y, z)
+::PP.Pose <- function(id, classname, x, y, z, pitch, yaw, roll, vx, vy, vz, held1, held2, slack, turnSlack, launch, radius = 400.0) {
+	local e = Claim(id, classname, x, y, z, radius)
 	if (e == null) return
 	local index = e.entindex()
 	if (index == held1 || index == held2) return
