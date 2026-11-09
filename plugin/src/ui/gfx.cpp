@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -206,7 +207,20 @@ void __fastcall LockCursorHook(void *self, void *) {
 	reinterpret_cast<void(__thiscall *)(void *)>(g_lockCursor.original)(self);
 }
 
+// The strafe keys held now, from the bindings the game passes with every key event (whatever keys they are bound
+// to; two keys bound to one direction are counted)
+std::atomic<int> g_leftKeys{0}, g_rightKeys{0};
+
+void NoteStrafeKey(int down, const char *binding) {
+	if (!binding) return;
+	std::atomic<int> *keys = !strcmp(binding, "+moveleft") ? &g_leftKeys : !strcmp(binding, "+moveright") ? &g_rightKeys : nullptr;
+	if (!keys) return;
+	if (down) ++*keys;
+	else if (*keys > 0) --*keys;
+}
+
 int __fastcall KeyEventHook(void *self, void *, int down, int key, const char *binding) {
+	NoteStrafeKey(down, binding);
 	if (g_ready && g_capture) return 0;
 	return reinterpret_cast<int(__thiscall *)(void *, int, int, const char *)>(g_keyEvent.original)(self, down, key, binding);
 }
@@ -398,6 +412,8 @@ void PuppetInput(int x, int y, bool leftDown, int wheel, const std::string &type
 bool Puppeted() { return g_puppet; }
 
 bool ConsoleVisible() { return g_engineClient && Call<bool>(g_engineClient, slot::ConIsVisible); }
+
+int StrafeKeys() { return (g_leftKeys > 0 ? kStrafeLeft : 0) | (g_rightKeys > 0 ? kStrafeRight : 0); }
 bool InGame() { return engine::MapName()[0] != '\0'; }
 
 }  // namespace gfx

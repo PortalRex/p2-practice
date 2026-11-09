@@ -61,6 +61,16 @@ void DrawBhop() {
 		int percent = jump->GainingPercent();
 		snprintf(text, sizeof(text), "%d%% gaining", percent);
 		gw += Shadowed(x + gw, ty, Font::Normal, percent >= 80 ? ui::theme::kGreen : percent >= 60 ? white : ui::theme::kOrange, text) + ui::Px(12);
+		// key against mouse, once the view has turned in the air
+		if (jump->turningTicks > 0) {
+			int sync = jump->SyncPercent();
+			snprintf(text, sizeof(text), "sync %d%%", sync);
+			gw += Shadowed(x + gw, ty, Font::Normal, sync >= 80 ? ui::theme::kGreen : sync >= 60 ? white : ui::theme::kOrange, text) + ui::Px(12);
+		}
+		if (jump->strafes > 0) {
+			snprintf(text, sizeof(text), "%d strafes", jump->strafes + 1);  // (changes of side, plus the first)
+			gw += Shadowed(x + gw, ty, Font::Small, grey, text) + ui::Px(12);
+		}
 		// (the landing tick counts as one: jumping on the next is as quick as a hop gets. A jump after walking a
 		// while is no hop at all: nothing to say about its timing.)
 		constexpr int kHopAttempt = 10;

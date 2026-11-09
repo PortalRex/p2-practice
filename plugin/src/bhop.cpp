@@ -4,6 +4,7 @@
 
 #include "engine.h"
 #include "trainer.h"
+#include "ui/gfx.h"
 
 namespace bhop {
 namespace {
@@ -15,10 +16,12 @@ constexpr float kChange = 0.05f;    // u/s: a tick's change in speed smaller tha
 constexpr float kThrown = 60;       // u/s in one tick: more than strafing gives (or friction takes) in the air
 constexpr float kTeleported = 128;  // units in one tick: a trip through a portal
 constexpr int kFlagOnGround = 1;
+constexpr float kTurning = 0.01f;   // degrees in a tick: less is holding the mouse still
 
 Status g;
 bool g_hadPlayer = false, g_wasOnGround = true;
-float g_lastSpeed = 0;
+float g_lastSpeed = 0, g_lastYaw = 0;
+int g_lastStrafeKey = 0;            // the strafe key last held alone (to count strafes)
 Vec3 g_lastOrigin;
 int g_groundTicks = -1;  // ticks on the ground since the last landing (-1: none yet, or the chain was broken)
 
@@ -52,6 +55,7 @@ void Tick() {
 		g_wasOnGround = onGround;
 		g_lastSpeed = speed;
 		g_lastOrigin = state.origin;
+		g_lastYaw = state.yaw;
 		return;
 	}
 	float dx = state.origin.x - g_lastOrigin.x, dy = state.origin.y - g_lastOrigin.y, dz = state.origin.z - g_lastOrigin.z;
@@ -62,12 +66,24 @@ void Tick() {
 		g.current = Jump{};
 		g.current.takeOff = g_lastSpeed;
 		g.current.groundTicks = g_groundTicks;
+		g_lastStrafeKey = 0;
 		g.inAir = true;
 		if (g_groundTicks < 0 || g_groundTicks > kChainGroundTicks) g.chain = 0;
 	}
 	if (!onGround && g.inAir) {
 		float change = speed - g_lastSpeed;
 		g.current.airTicks++;
+		// key against mouse (yaw going up is a turn to the left)
+		float turn = std::remainder(state.yaw - g_lastYaw, 360.0f);
+		int keys = gfx::StrafeKeys();
+		if (std::fabs(turn) > kTurning) {
+			g.current.turningTicks++;
+			if ((turn > 0 && keys == gfx::kStrafeLeft) || (turn < 0 && keys == gfx::kStrafeRight)) g.current.syncTicks++;
+		}
+		if ((keys == gfx::kStrafeLeft || keys == gfx::kStrafeRight) && keys != g_lastStrafeKey) {
+			if (g_lastStrafeKey) g.current.strafes++;
+			g_lastStrafeKey = keys;
+		}
 		if (teleported || std::fabs(change) > kThrown) g.current.thrown = true;
 		else if (change > kChange) g.current.gainingTicks++;
 		else if (change < -kChange) g.current.losingTicks++;
@@ -88,6 +104,7 @@ void Tick() {
 	g_wasOnGround = onGround;
 	g_lastSpeed = speed;
 	g_lastOrigin = state.origin;
+	g_lastYaw = state.yaw;
 }
 
 }  // namespace bhop

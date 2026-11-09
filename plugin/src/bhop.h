@@ -4,6 +4,7 @@
 //   - gaining: how much of the time in the air the speed went up (a strafe turned too sharply, or the wrong
 //     key held, loses speed tick by tick: this is the share of ticks that didn't)
 //   - hop: ticks spent on the ground before jumping again (the ground's friction takes speed every one of them)
+//   - sync: how much of the turning in the air had the strafe key of the same side held (and only that one)
 // Jumps something else threw (a portal, a faith plate, gel: the speed jumps by more than strafing can give) are
 // left out of the gain and the share.
 #pragma once
@@ -15,6 +16,11 @@ namespace bhop {
 struct Jump {
 	float takeOff = 0, landing = 0;  // horizontal speeds, u/s
 	int airTicks = 0, gainingTicks = 0, losingTicks = 0;
+	// key against mouse: the air ticks the view turned, and those where only the strafe key of that side was
+	// held (turning left with only +moveleft down, right with only +moveright)
+	int turningTicks = 0, syncTicks = 0;
+	int strafes = 0;      // changes from one strafe key to the other
+	int SyncPercent() const { return turningTicks ? syncTicks * 100 / turningTicks : 0; }
 	int groundTicks = 0;  // on the ground before this jump (since the last landing; -1: the first jump of a chain)
 	bool thrown = false;  // something else changed the speed (see above)
 	float Gain() const { return landing - takeOff; }

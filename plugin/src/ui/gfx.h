@@ -92,6 +92,10 @@ void PuppetInput(int x, int y, bool leftDown, int wheel, const std::string &type
 bool Puppeted();
 
 bool ConsoleVisible();  // the game's console is open (keys typed are the console's)
+
+// The strafe keys the player holds now (whatever keys +moveleft and +moveright are bound to)
+constexpr int kStrafeLeft = 1, kStrafeRight = 2;
+int StrafeKeys();
 bool InGame();          // a level is loaded (else the game's main menu is up)
 
 }  // namespace gfx

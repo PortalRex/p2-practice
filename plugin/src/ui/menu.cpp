@@ -1076,8 +1076,8 @@ void SettingsPage(Rect area, const trainer::Status &s) {
 	if (ui::Toggle("Speedometer", speedo)) Set(Format("prac_set speedometer %d", speedo ? 1 : 0));
 	ui::Hint("Your speed next to the record's at the same point of the run");
 	bool strafe = set.strafe;
-	if (ui::Toggle("Bhop trainer: gain per jump, strafing, hop timing", strafe)) Set(Format("prac_set strafe %d", strafe ? 1 : 0));
-	ui::Hint("Any time you jump: speed gained, how much of the air time gained speed (lower = turning too sharp or the wrong key), ticks lost on the ground");
+	if (ui::Toggle("Bhop trainer: gain, strafe sync, hop timing", strafe)) Set(Format("prac_set strafe %d", strafe ? 1 : 0));
+	ui::Hint("Any time you jump: speed gained, air time gaining speed, key against mouse sync, strafes, ticks lost on the ground");
 	if (ui::Toggle("Route line and portal shots in the level", path)) Set(Format("prac_set path %d", path ? 1 : 0));
 	ui::Hint("The record's path drawn in the level, with where its portals were shot");
 	ui::Caption("MENU KEY");
