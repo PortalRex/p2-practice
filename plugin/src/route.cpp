@@ -806,6 +806,21 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 		if (use.actor >= 0) route.uses.push_back(std::move(use));
 	}
 
+	// Named objects dissolved (once each: the record has an input per entity class that handles it). Not those a
+	// dropper dissolves when it drops the next one (by FireUser1 just before): the new cube has the same name, and
+	// the dropper does that itself anyway.
+	const auto &inputs = primary.sarEntityInputs;
+	for (size_t i = 0; i < inputs.size(); i++) {
+		const auto &input = inputs[i];
+		if (input.input != "Dissolve" || input.target.empty() || input.target.find('&') != std::string::npos) continue;
+		if (input.className != "prop_weighted_cube" && input.className != "prop_monster_box" && input.className != "prop_physics") continue;
+		if (!route.dissolves.empty() && route.dissolves.back().target == input.target && route.dissolves.back().tick == input.tick) continue;
+		bool byDropper = false;
+		for (size_t j = i; j-- > 0 && inputs[j].tick >= input.tick - 2;)
+			if (inputs[j].target == input.target && inputs[j].input == "FireUser1") byDropper = true;
+		if (!byDropper) route.dissolves.push_back({input.tick, input.target});
+	}
+
 	// Floor buttons pressed and released within one tick by a player: the io proxy of the button's instance fires
 	// its first relay (pressed) and its second (released) on the same tick
 	for (size_t i = 0; i < primary.sarEntityInputs.size(); i++) {
@@ -814,8 +829,14 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 		if (a.slot < 0 || a.className != "func_instance_io_proxy" || a.input != "OnProxyRelay1" || a.target.size() <= suffix.size() ||
 		    a.target.compare(a.target.size() - suffix.size(), suffix.size(), suffix) != 0)
 			continue;
+		// (both relays in one tick, in either order: which of the two is the press depends on how the instance is
+		// wired - Future Starter's second button fires its second relay when pressed)
 		bool released = false;
 		for (size_t j = i + 1; j < primary.sarEntityInputs.size() && primary.sarEntityInputs[j].tick == a.tick; j++) {
+			const auto &b = primary.sarEntityInputs[j];
+			if (b.target == a.target && b.input == "OnProxyRelay2" && b.slot == a.slot) released = true;
+		}
+		for (size_t j = i; j-- > 0 && primary.sarEntityInputs[j].tick == a.tick;) {
 			const auto &b = primary.sarEntityInputs[j];
 			if (b.target == a.target && b.input == "OnProxyRelay2" && b.slot == a.slot) released = true;
 		}

@@ -119,6 +119,13 @@ struct Route {
 	std::vector<Mover> movers;          // objects the run moved, with their recorded paths
 	std::vector<UseEvent> uses;         // in tick order
 	std::vector<ButtonGlitch> buttonGlitches;  // in tick order
+	// Objects the run's fizzlers dissolved, by name (a carried cube put along its path by the trainer passes a
+	// fizzler without the fizzler noticing it: Smooth Jazz's box, whose fizzling opens the door)
+	struct Dissolve {
+		int tick = 0;
+		std::string target;
+	};
+	std::vector<Dissolve> dissolves;  // in tick order
 	bool hasUses = false;               // the demo records uses (SAR, host's demo); otherwise they are guessed from the keys
 	std::vector<Event> events;          // in tick order
 	std::vector<Segment> segments;      // consecutive, from the first moment of control to the finish

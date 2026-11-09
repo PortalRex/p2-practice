@@ -73,6 +73,41 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	EntFireByHandle(b, "PressOut", "", 0, null, null)
 }
 
+// The player picks up what the run's player picked up: the thing of that kind (and name) they look at within
+// reach, else the nearest of that name within reach
+::PP.PickUp <- function(index, classname, name, dx, dy, dz) {
+	local p = Player(index)
+	if (p == null) return
+	local eye = p.EyePosition()
+	local aim = Vector(dx, dy, dz)
+	local best = null
+	local bestDot = 0.5
+	local nearest = null
+	local nearestDistance = reach + 48
+	local e = null
+	while (e = Entities.FindByClassname(e, classname)) {
+		if (name != "" && e.GetName() != name) continue
+		local dot = LooksAt(eye, aim, e)
+		if (dot > bestDot) {
+			bestDot = dot
+			best = e
+		}
+		local distance = (e.GetCenter() - eye).Length()
+		if (distance < nearestDistance) {
+			nearest = e
+			nearestDistance = distance
+		}
+	}
+	if (best == null) best = nearest
+	if (best != null) EntFireByHandle(best, "Use", "", 0, p, p)
+}
+
+// A named object the run's fizzler dissolved (one that isn't dissolving already)
+::PP.Dissolve <- function(name) {
+	local e = Entities.FindByName(null, name)
+	if (e != null) EntFireByHandle(e, "Dissolve", "", 0, null, null)
+}
+
 // The other way round: released and pressed again, so that it stays pressed with nobody on it. The press comes
 // two ticks after the release, as in the run: given in the same tick, what the release sets off (Team Retrieval's
 // landings closing) would run after what the press does and win.

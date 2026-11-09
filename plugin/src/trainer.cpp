@@ -1434,6 +1434,7 @@ Vec3 AimDirection(const Sample &s) {
 }
 
 bool g_botPlacedOnly = true;  // development: "prac_debug botmove 1" lets the game move the bot between placements again
+bool g_replayPickups = true;  // development: "prac_debug pickups 0" leaves the run's pick-ups out (see DriveSlots)
 
 constexpr float kStandEyeHeight = 64, kDuckEyeHeight = 28;  // a robot's eyes above its feet
 constexpr int kFlagDucking = 2;                              // FL_DUCKING
@@ -1527,13 +1528,24 @@ void DriveSlots() {
 			MovePlayer(player, start.present ? start : s, VelocityAt(driver, actor, start.present ? from : tick));
 		}
 
-		// The buttons the recorded player pressed on this tick, the driven one presses too. (What the recorded
-		// player picked up is not picked up: the trainer moves the run's objects itself, see MoveObjects.)
+		// The buttons the recorded player pressed on this tick, the driven one presses too. What the recorded player
+		// picked up, the driven one picks up: a level may wait for that (Ricochet's cube, whose pickup opens the
+		// way out); where it goes from there is still the run's path (MoveObjects), and the driven player lets go
+		// when the run's did (below).
 		const Sample &before = driver.At(actor, tick - 1);
 		Vec3 aim = AimDirection(s);
 		if (driver.hasUses) {
 			for (const route::UseEvent &use : driver.uses) {
-				if (use.tick != tick || use.actor != actor || !IsButton(use.className)) continue;
+				if (use.tick != tick || use.actor != actor) continue;
+				if (!IsButton(use.className)) {
+					if (!g_replayPickups) continue;
+					// (a pick-up, not a drop: the run's player holds something a moment later, the driven one nothing yet)
+					engine::PlayerState live;
+					const Sample &after = driver.At(actor, tick + 2);
+					if (after.held >= 0 && engine::GetPlayer(player, live) && live.held < 0)
+						engine::Script("::PP.PickUp(%d,\"%s\",\"%s\",%.4f,%.4f,%.4f)", player, use.className.c_str(), use.target.c_str(), aim.x, aim.y, aim.z);
+					continue;
+				}
 				// (with everyone's portals: a player presses buttons through them)
 				int portals[4] = {-1, -1, -1, -1};
 				size_t pairs = 0;
@@ -1625,17 +1637,21 @@ void MoveObjects(bool all) {
 	int tick = DriverTick(g.cursor);
 	if (g.objectLastDriven.size() != driver.movers.size()) g.objectLastDriven.assign(driver.movers.size(), -1);
 	if (all) engine::Script("::PP.ForgetObjects()");
-	// what the people in the game have in their hands is theirs. (Not what a bot the trainer places holds: the game
-	// makes it catch things as the run's player did, but holds them in front of its own eyes, not the run's player's
-	// - a crouching carrier's cube came onto Separation's button 36 units high. That stays on the run's path.)
+	// what the people in the game have in their hands is theirs. (Not what a player the trainer drives holds: the
+	// game holds it in front of that player's own eyes, not where the run's player had it - a crouching carrier's
+	// cube came onto Separation's button 36 units high. That stays on the run's path.)
 	int inHands[2] = {-1, -1};
 	size_t hands = 0;
 	for (const Slot &slot : g.slots) {
 		engine::PlayerState state;
-		if (slot.entIndex && hands < 2 && engine::GetPlayer(slot.entIndex, state) && state.held > 0 && !BotPlacedOnly(slot))
+		if (slot.entIndex && hands < 2 && engine::GetPlayer(slot.entIndex, state) && state.held > 0 && !Driven(slot))
 			inHands[hands++] = state.held;
 	}
 	const float dt = driver.tickInterval;
+	// what the run's fizzlers dissolved, dissolved here too while the run plays itself (see Route::dissolves)
+	if (g.mode != Mode::Run || g.replaying)
+		for (const route::Route::Dissolve &d : driver.dissolves)
+			if (d.tick == tick) engine::Script("::PP.Dissolve(\"%s\")", d.target.c_str());
 	for (size_t i = 0; i < driver.movers.size(); i++) {
 		const route::Mover &mover = driver.movers[i];
 		Vec3 pos, ang;
@@ -2505,6 +2521,10 @@ void CmdDebug(const sdk::CCommand &args) {
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "decimals")) {
 		g_positionDecimals = std::clamp(atoi(args.Arg(2)), 0, 6);
+		return;
+	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "pickups")) {
+		g_replayPickups = atoi(args.Arg(2)) != 0;
 		return;
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "botmove")) {
