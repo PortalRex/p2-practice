@@ -133,7 +133,8 @@ void SaveSettings(const std::string &path = SettingsPath()) {
 	if (s.ghostColorSet) out << Format("prac_set ghostcolor \"%d %d %d\"\n", s.ghostColor[0], s.ghostColor[1], s.ghostColor[2]);
 	else out << "prac_set ghostcolor team\n";
 	out << Format("prac_set ghostopacity %d\n", s.ghostOpacity) << Format("prac_set hud %d\n", s.hud ? 1 : 0)
-	    << Format("prac_set speedometer %d\n", s.speedometer ? 1 : 0) << Format("prac_set path %d\n", s.path ? 1 : 0)
+	    << Format("prac_set speedometer %d\n", s.speedometer ? 1 : 0) << Format("prac_set strafe %d\n", s.strafe ? 1 : 0)
+	    << Format("prac_set path %d\n", s.path ? 1 : 0)
 	    << Format("prac_set loop %d\n", s.loop ? 1 : 0) << Format("prac_set autoreset %g\n", s.autoReset) << Format("prac_set speed %g\n", s.speed)
 	    << Format("prac_set reset %s\n", resets[std::clamp(s.reset, 0, 2)]) << Format("prac_set challenge %d\n", s.challenge ? 1 : 0)
 	    << Format("prac_set snapshots %d\n", s.snapshots ? 1 : 0) << Format("prac_set partner %d\n", s.partner ? 1 : 0)
@@ -1074,6 +1075,9 @@ void SettingsPage(Rect area, const trainer::Status &s) {
 	ui::Hint("Your time and how far ahead of or behind the record you are, at the top of the screen");
 	if (ui::Toggle("Speedometer", speedo)) Set(Format("prac_set speedometer %d", speedo ? 1 : 0));
 	ui::Hint("Your speed next to the record's at the same point of the run");
+	bool strafe = set.strafe;
+	if (ui::Toggle("Bhop trainer: gain per jump, strafing, hop timing", strafe)) Set(Format("prac_set strafe %d", strafe ? 1 : 0));
+	ui::Hint("Any time you jump: speed gained, how much of the air time gained speed (lower = turning too sharp or the wrong key), ticks lost on the ground");
 	if (ui::Toggle("Route line and portal shots in the level", path)) Set(Format("prac_set path %d", path ? 1 : 0));
 	ui::Hint("The record's path drawn in the level, with where its portals were shot");
 	ui::Caption("MENU KEY");

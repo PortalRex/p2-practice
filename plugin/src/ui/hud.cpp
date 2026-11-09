@@ -1,10 +1,12 @@
 #include "ui/hud.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
+#include "bhop.h"
 #include "trainer.h"
 #include "ui/widgets.h"
 
@@ -27,10 +29,69 @@ int Centered(int y, Font font, Color color, const std::string &text) {
 	return w;
 }
 
+// The bhop trainer, bottom left above the speedometer: the last jump (gain, share of air time gaining, hop timing),
+// the chain of hops, and the latest jumps' gains as bars
+void DrawBhop() {
+	const bhop::Status &b = bhop::Current();
+	const Color white(255, 255, 255), grey(185, 190, 200), faint(120, 125, 135);
+	int x = ui::Px(32), y = gfx::ScreenHeight() - ui::Px(300);
+	char text[96];
+	int w = Shadowed(x, y, Font::Small, grey, "BHOP");
+	if (b.chain > 1) {
+		snprintf(text, sizeof(text), "chain %d", b.chain);
+		Shadowed(x + w + ui::Px(10), y, Font::Small, white, text);
+	}
+	y += gfx::FontHeight(Font::Small);
+	// the jump in the air now, else the last one
+	const bhop::Jump *jump = b.inAir ? &b.current : b.recent.empty() ? nullptr : &b.recent.back();
+	if (!jump) {
+		Shadowed(x, y, Font::Normal, faint, "jump to start");
+		return;
+	}
+	if (jump->thrown) {
+		Shadowed(x, y, Font::Normal, faint, "thrown (portal, plate or gel): not counted");
+	} else {
+		float gain = b.inAir ? 0 : jump->Gain();
+		int gw = 0;
+		if (!b.inAir) {
+			snprintf(text, sizeof(text), "%+.0f", gain);
+			gw = Shadowed(x, y, Font::Title, gain >= 0 ? ui::theme::kGreen : ui::theme::kOrange, text) + ui::Px(12);
+		}
+		int ty = y + (gfx::FontHeight(Font::Title) - gfx::FontHeight(Font::Normal)) / 2;
+		int percent = jump->GainingPercent();
+		snprintf(text, sizeof(text), "%d%% gaining", percent);
+		gw += Shadowed(x + gw, ty, Font::Normal, percent >= 80 ? ui::theme::kGreen : percent >= 60 ? white : ui::theme::kOrange, text) + ui::Px(12);
+		// (the landing tick counts as one: jumping on the next is as quick as a hop gets. A jump after walking a
+		// while is no hop at all: nothing to say about its timing.)
+		constexpr int kHopAttempt = 10;
+		if (jump->groundTicks >= 0 && jump->groundTicks <= kHopAttempt) {
+			bool perfect = jump->groundTicks <= 1;
+			if (perfect) snprintf(text, sizeof(text), "hop: perfect");
+			else snprintf(text, sizeof(text), "hop: %d ticks late", jump->groundTicks - 1);
+			Shadowed(x + gw, ty, Font::Normal, perfect ? ui::theme::kGreen : ui::theme::kOrange, text);
+		}
+	}
+	y += gfx::FontHeight(Font::Title) + ui::Px(4);
+	// the latest jumps' gains, as bars around a middle line (thrown ones grey)
+	constexpr int kBars = 12;  // (as many as bhop keeps)
+	int barW = ui::Px(10), gap = ui::Px(4), half = ui::Px(22);
+	gfx::FillRect(x, y + half, kBars * (barW + gap), 1, Color(255, 255, 255, 70));
+	for (size_t i = 0; i < b.recent.size(); i++) {
+		const bhop::Jump &j = b.recent[i];
+		float g = j.thrown ? 0 : j.Gain();
+		int h = std::clamp(static_cast<int>(std::fabs(g) / 40.0f * half), j.thrown ? 0 : 2, half);
+		Color c = j.thrown ? faint : g >= 0 ? ui::theme::kGreen : ui::theme::kOrange;
+		int bx = x + static_cast<int>(i) * (barW + gap);
+		if (g >= 0) gfx::FillRect(bx, y + half - h, barW, h, c);
+		else gfx::FillRect(bx, y + half, barW, h, c);
+	}
+}
+
 }  // namespace
 
 void Draw() {
 	const trainer::Settings &settings = trainer::CurrentSettings();
+	if (settings.strafe && gfx::InGame()) DrawBhop();
 	if (!settings.hud) return;
 	trainer::Status s = trainer::CurrentStatus();
 	if (!s.loaded || (!s.active && s.flash.empty())) return;

@@ -2,6 +2,7 @@
 // plugin takes part in the game only through them, console commands and VScript.
 #include <cstring>
 
+#include "bhop.h"
 #include "engine.h"
 #include "sdk.h"
 #include "trainer.h"
@@ -47,11 +48,15 @@ public:
 	const char *GetPluginDescription() override { return "P2 Practice " P2PRACTICE_VERSION; }
 
 	void LevelInit(const char *mapName) override {
-		if (loaded_) trainer::OnLevelInit(mapName);
+		if (!loaded_) return;
+		trainer::OnLevelInit(mapName);
+		bhop::Reset();
 	}
 	void ServerActivate(sdk::Edict *, int, int) override {}
 	void GameFrame(bool simulating) override {
-		if (loaded_) trainer::OnFrame(simulating);
+		if (!loaded_) return;
+		trainer::OnFrame(simulating);
+		if (simulating) bhop::Tick();
 	}
 	void LevelShutdown() override {
 		if (loaded_) trainer::OnLevelShutdown();

@@ -16,6 +16,7 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
 endif()
 
 add_library(p2practice SHARED
+	src/bhop.cpp
 	src/engine.cpp
 	src/ghostmodel.cpp
 	src/plugin.cpp
