@@ -1,12 +1,13 @@
 """Picks one good recent run per test map from the local board demo archive and copies it into demos/matrix.
 
-    python pick_runs.py
+    python pick_runs.py [--all]
 
 The archive (H:\\Board-Demos\\demos, named Map_time_steamid_id.dem) is only read; copies go to demos/matrix.
 A run qualifies when its demo is the host's and carries SAR's time (so it has SAR's entity-input records, which
 the map test compares against), and when it was made on the level as installed: the archive also holds runs made
 on altered maps, which no practice session on the real level can follow. For co-op, the partner's demo of the same run is copied too when it exists.
-Writes demos/matrix/cases.json for maptest.py.
+Writes demos/matrix/cases.json for maptest.py (with --all: one case per Challenge Mode map on the boards, written to
+cases_all.json).
 """
 import json
 import os
@@ -77,8 +78,10 @@ def main():
         if not name.endswith('.dem') or len(parts) != 4 or not (parts[1].isdigit() and parts[3].isdigit()):
             continue
         by_map.setdefault(parts[0], []).append((int(parts[1]), int(parts[3]), name))
+    every_map = '--all' in sys.argv
+    plan = [(b, b) for b in sorted(by_map) if b] if every_map else CASES
     cases = []
-    for group, board_names in CASES:
+    for group, board_names in plan:
       picked = None
       for board_name in board_names.split():
         if picked:
@@ -116,7 +119,7 @@ def main():
         cases.append({'group': group, 'board': board_name, 'map': info['map'], 'coop': info['coop'], 'time': info['timeText'],
                       'player': info['player'], 'demos': files})
         print(f"{group}: {board_name} {info['timeText']} by {info['player']} ({info['map']}), {len(files)} demo(s)")
-    with open(os.path.join(OUT, 'cases.json'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(OUT, 'cases_all.json' if every_map else 'cases.json'), 'w', encoding='utf-8') as f:
         json.dump(cases, f, indent=1)
     return 0
 

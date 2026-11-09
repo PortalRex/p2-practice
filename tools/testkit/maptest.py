@@ -199,12 +199,14 @@ def present_events(reference, session):
     return count
 
 
-OBJECT_CLASSES = {'CPropWeightedCube', 'CPropMonsterBox', 'CNPC_Portal_FloorTurret', 'CPhysicsProp', 'CPropGlassFutbol', 'CNPC_Personality_Core'}
+OBJECT_CLASSES = {'CPropWeightedCube', 'CPropMonsterBox', 'CNPC_Portal_FloorTurret', 'CPhysicsProp', 'CPropGlassFutbol', 'CNPC_PersonalityCore'}
 
 
-def final_objects(demo, tick, resting_only):
+def final_objects(demo, tick, resting_only, moved_since=None):
     """Where each movable object is at `tick`: (class, (x, y, z)) for those that still exist. With `resting_only`,
-    only objects lying still by then (one in mid-air is somewhere else a tick later, so can't be compared)."""
+    only objects lying still by then (one in mid-air is somewhere else a tick later, so can't be compared). With
+    `moved_since`, only objects that moved from that tick on (one the run never touched may never come into the
+    session's view at all: a demo holds only what its player could see)."""
     def position(key):
         origin = key['origin']
         return (origin['x'], origin['y'], origin['z']) if isinstance(origin, dict) else tuple(origin)
@@ -215,6 +217,8 @@ def final_objects(demo, tick, resting_only):
             continue
         keys = [k for k in mover['keys'] if k['tick'] <= tick]
         if not keys or keys[-1].get('removed'):
+            continue
+        if moved_since is not None and keys[-1]['tick'] < moved_since:
             continue
         now = position(keys[-1])
         if resting_only:
@@ -333,11 +337,18 @@ def run_case(console, case, state):
     # state a few ticks either side counts too.)
     run_end = int(timer.group(2))
     kMoment = 4
-    run_state = level_state(reference_demo, run_end, first_tick=control)
-    alternatives = [level_state(reference_demo, run_end + d, first_tick=control) for d in (-kMoment, kMoment)]
+    # (from the first moment the session's demo saw, in the run's ticks: what the level did before the recording
+    # began isn't in it)
+    judged_from = max(control, recorded_from(session_demo_data) - session_offset)
+    run_state = level_state(reference_demo, run_end, first_tick=judged_from)
+    alternatives = [level_state(reference_demo, run_end + d, first_tick=judged_from) for d in (-kMoment, kMoment)]
     session_state = level_state(session_demo_data, run_end + session_offset)
     same, wrong = compare_state(run_state, session_state)
     wrong = [(key, value, other) for key, value, other in wrong if all(a.get(key) != other for a in alternatives)]
+    # (what the level set up by itself in its first second is before the session's recording began: the session
+    # demo never sees it, which says nothing about the trainer)
+    level_setup = set(level_state(reference_demo, 60).keys()) - set(level_state(reference_demo, run_end, first_tick=61).keys())
+    wrong = [(key, value, other) for key, value, other in wrong if not (other is None and key in level_setup)]
     same = len(run_state) - len(wrong)
     result.update(states=len(run_state), states_same=same,
                   states_wrong=[f'{key[0]}: run {value[0]} {value[1]}'.strip() + f', session {other[0] + " " + other[1] if other else "never set"}'.strip()
@@ -345,7 +356,7 @@ def run_case(console, case, state):
     if same < len(run_state):
         problems.append(f'{len(run_state) - same} of {len(run_state)} entity states differ from the run at the end')
     # ... and the things the run moved should lie where the run left them
-    run_objects = final_objects(reference_demo, int(timer.group(2)), True)
+    run_objects = final_objects(reference_demo, int(timer.group(2)), True, moved_since=control)
     session_objects = final_objects(session_demo_data, session_demo_data.get('lastTick', 0), False)
     placed = objects_in_place(run_objects, session_objects)
     result.update(objects=len(run_objects), objects_in_place=placed)
@@ -403,13 +414,15 @@ def main():
     ap.add_argument('--port', type=int, default=2141)
     ap.add_argument('--password', default='p2practice')
     ap.add_argument('--only', default='')
+    ap.add_argument('--cases', default='cases.json', help='the case list in demos/matrix (cases_all.json: every map)')
+    ap.add_argument('--skip', type=int, default=0, help='start at this case (to carry on after a stop)')
     ap.add_argument('--out', default=os.path.join(ROOT, 'build', 'test', 'matrix.json'))
     args = ap.parse_args()
 
     with open(os.path.join(ROOT, 'build', 'test', args.job, 'state.json'), encoding='utf-8-sig') as f:
         state = json.load(f)
-    with open(os.path.join(MATRIX, 'cases.json'), encoding='utf-8') as f:
-        cases = [c for c in json.load(f) if args.only.lower() in (c['board'] + c['group']).lower()]
+    with open(os.path.join(MATRIX, args.cases), encoding='utf-8') as f:
+        cases = [c for c in json.load(f) if args.only.lower() in (c['board'] + c['group']).lower()][args.skip:]
     console = Console(args.port, args.password)
     results = []
     for case in cases:
