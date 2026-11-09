@@ -107,7 +107,7 @@ struct Session {
 	int lastTick = 0;
 	bool queuePinned = false;     // queued rendering switched off for save states (see SingleThreadedRendering)
 	std::chrono::steady_clock::time_point queuePinnedAt;  // when it was switched off
-	int savedQueueMode = -1;      // mat_queue_mode as it was before
+	int savedThreadCvars[4] = {}; // mat_queue_mode, host_thread_mode, snd_mix_async, net_queued_packet_thread as they were
 	bool retryAsked = false;      // the game's own restart (the finish board's Replay Map) asked for a retry
 	bool closeScreensAfterRestore = false;  // that retry is a save state on its way: close the boards again when it lands
 	bool savesOff = false;        // the game's saving was switched off for practice (and is switched back on at the end)
@@ -1022,24 +1022,36 @@ bool SnapshotsUsable() {
 // (ThreadsSettled). Particles are kept off the job threads the same way: simulated on a worker, they crashed a
 // moment after some restores (CParticleCollection::Simulate, sp_a2_laser_stairs). Neither cvar is saved, so the
 // next game start has the defaults again.
+//
+// The other threading cvars ChocolateLoading switches off around every save and restore (threaded host, async
+// sound mixer, queued network packets) are kept off for the session too: switched for each operation, the threads
+// started and stopped every time, and ChocolateLoading waited 4 frames before each restore for them to drain;
+// kept off, a retry's restore comes at the next frame.
+const char *const kThreadCvars[] = {"mat_queue_mode", "host_thread_mode", "snd_mix_async", "net_queued_packet_thread"};
+
 void SingleThreadedRendering() {
 	if (g.queuePinned) return;
-	g.savedQueueMode = static_cast<int>(engine::CvarFloat("mat_queue_mode", -1));
 	g.queuePinned = true;
 	g.queuePinnedAt = std::chrono::steady_clock::now();
-	if (g.savedQueueMode != 0) engine::Execute("mat_queue_mode 0");
+	for (size_t i = 0; i < std::size(kThreadCvars); i++) {
+		g.savedThreadCvars[i] = static_cast<int>(engine::CvarFloat(kThreadCvars[i], 0));
+		if (g.savedThreadCvars[i] != 0) engine::Execute("%s 0", kThreadCvars[i]);
+	}
 	engine::Execute("r_threaded_particles 0");
 }
 
 bool ThreadsSettled() {
-	return g.queuePinned && std::chrono::steady_clock::now() - g.queuePinnedAt > std::chrono::milliseconds(250) &&
-	       engine::CvarFloat("mat_queue_mode", -1) == 0 && engine::CvarFloat("r_threaded_particles", 1) == 0;
+	if (!g.queuePinned || std::chrono::steady_clock::now() - g.queuePinnedAt < std::chrono::milliseconds(250)) return false;
+	for (const char *name : kThreadCvars)
+		if (engine::CvarFloat(name, 0) != 0) return false;
+	return engine::CvarFloat("r_threaded_particles", 1) == 0;
 }
 
 void RestoreRendering() {
 	if (!g.queuePinned) return;
 	g.queuePinned = false;
-	if (g.savedQueueMode != 0) engine::Execute("mat_queue_mode %d", g.savedQueueMode);
+	for (size_t i = 0; i < std::size(kThreadCvars); i++)
+		if (g.savedThreadCvars[i] != 0) engine::Execute("%s %d", kThreadCvars[i], g.savedThreadCvars[i]);
 }
 
 // Save states and demos. ChocolateLoading keeps every file open that a save state holds, so that a restore can go

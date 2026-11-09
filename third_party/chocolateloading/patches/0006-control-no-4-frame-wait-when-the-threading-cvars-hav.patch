@@ -1,0 +1,85 @@
+From 998de6dda68e6761f0b949c47746ddc648130e4c Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 20:37:17 -0600
+Subject: [PATCH 6/6] control: no 4-frame wait when the threading cvars have
+ been 0 for a while; frame count in the snap_load line
+
+---
+ src/control.cpp | 29 ++++++++++++++++++++++++++---
+ 1 file changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/src/control.cpp b/src/control.cpp
+index d7713a0..16f77b5 100644
+--- a/src/control.cpp
++++ b/src/control.cpp
+@@ -19,6 +19,7 @@ char     g_pending_name[snapshot::MAX_NAME] = "";
+ uint32_t g_frame = 0;
+ uint32_t g_ready_frame = 0;        // frame at which the pending operation may run
+ double   g_request_time = 0;
++uint32_t g_request_frame = 0;
+ int      g_levelinits = 0;
+ char     g_domain[1024] = "";
+ 
+@@ -59,6 +60,25 @@ void force_threading_off(bool on) {
+     g_forced = on;
+ }
+ 
++// The threading cvars kept at 0 by someone else (P2 Practice keeps them off for a whole practice session): once
++// they have been 0 for a few frames the threads are drained already, and an operation needs no wait of its own.
++ConVar*  g_thread_vars[kThreadCvarCount] = {};
++bool     g_thread_vars_found = false;
++uint32_t g_zero_since = UINT32_MAX;   // first frame of the current run of frames with all of them at 0
++
++bool thread_cvars_zero() {
++    if (!g_thread_vars_found) {
++        for (int i = 0; i < kThreadCvarCount; i++) g_thread_vars[i] = gameapi::FindVar(kThreadCvars[i]);
++        g_thread_vars_found = g_thread_vars[0] != nullptr;   // (not before the console is up)
++        if (!g_thread_vars_found) return false;
++    }
++    for (int i = 0; i < kThreadCvarCount; i++)
++        if (g_thread_vars[i] && g_thread_vars[i]->m_nValue != 0) return false;
++    return true;
++}
++
++bool threads_settled() { return g_zero_since != UINT32_MAX && g_frame - g_zero_since >= 4; }
++
+ void set_name(char* dst, const char* name) {
+     strncpy(dst, name, snapshot::MAX_NAME - 1);
+     dst[snapshot::MAX_NAME - 1] = 0;
+@@ -79,7 +99,7 @@ void run_pending() {
+     }
+     sarlink::UpdateHud();
+     if (!ok) util::ConWarn("[snap] %s of '%s' failed: %s", op == OP_SAVE ? "save" : "restore", name, err);
+-    else if (op == OP_LOAD) util::Con("[snap] snap_load: %.0f ms from the command to the restored state", (util::Now() - g_request_time) * 1000.0);
++    else if (op == OP_LOAD) util::Con("[snap] snap_load: %.0f ms from the command to the restored state (%u frames)", (util::Now() - g_request_time) * 1000.0, g_frame - g_request_frame);
+ }
+ 
+ // ---- console commands ---------------------------------------------------------------------------
+@@ -184,12 +204,13 @@ bool Request(Op op, const char* name) {
+         util::ConWarn("[snap] %d snapshots already exist: drop one first (snap_drop <name>)", snapshot::MAX_SNAPSHOTS);
+         return false;
+     }
+-    bool was_forced = g_forced;
++    bool was_forced = g_forced || threads_settled();
+     force_threading_off(true);
+     g_pending = op;
+     set_name(g_pending_name, name);
+     g_request_time = util::Now();
+-    g_ready_frame = g_frame + (was_forced ? 1 : 4);   // let the worker threads drain first
++    g_request_frame = g_frame;
++    g_ready_frame = g_frame + (was_forced ? 1 : 4);   // let the worker threads drain first (unless they are already)
+     return true;
+ }
+ 
+@@ -198,6 +219,8 @@ uint32_t Frame() { return g_frame; }
+ 
+ void OnFrameStart() {
+     g_frame++;
++    if (!thread_cvars_zero()) g_zero_since = UINT32_MAX;
++    else if (g_zero_since == UINT32_MAX) g_zero_since = g_frame;
+     if (g_test_cycles > 0 && !snapshot::Exists(g_test_name)) {
+         util::ConWarn("[snap] test: snapshot '%s' dropped, test stopped", g_test_name);
+         g_test_cycles = 0;
+-- 
+2.43.0.windows.1
+

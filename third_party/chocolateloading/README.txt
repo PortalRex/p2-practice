@@ -5,8 +5,8 @@ Redistributed with P2 Practice with the author's permission.
 P2 Practice uses it for save states (the launcher's SAVE STATES switch): a retry puts the whole level back as it
 was a moment into the part, in about 10 ms.
 
-This build is ChocolateLoading at commit 9220fe1 (2026-10-20) with two fixes and one addition. fixes.patch has
-all three together; patches\ has them as three commits (git am). NOTE_FOR_BLENDERISTE09.md explains the fixes
+This build is ChocolateLoading at commit 9220fe1 (2026-10-20) with fixes and additions of P2 Practice's. fixes.patch has
+all of them together; patches\ has them as separate commits (git am). NOTE_FOR_BLENDERISTE09.md explains the fixes
 for the author.
 
 1. 16-byte alignment. The heap that holds the game's memory handed out blocks aligned to 8 bytes; tier0's own
@@ -24,6 +24,21 @@ for the author.
    %command%), so Steam's Play starts the game with save states ready, no launcher needed. Steam puts the game's
    own path first: it is skipped. chocoload then hides its console window and waits for the game, as Steam counts
    the game as running while its launch command does. Run any other way, chocoload behaves as before.
+
+4. Heap lock report. A game froze once with every thread waiting for the lock of the heap that holds the game's
+   memory and no holder in sight. The lock now records its holder, and a thread that has waited more than 5 s
+   writes the holder thread, whether it still exists and where it took the lock to chocolateloading.log.
+
+5. Cvars of plugins. A plugin's cvars (SAR's sar_*) are objects in the plugin's memory, which a restore leaves
+   alone, but their value strings are allocated in the snapshotted heap: a value set after the save was freed by
+   the restore and the cvar kept pointing at it. SAR's sar_record_prefix then read as garbage: demos with mangled
+   names, SAR's rename at the flags failing (the game closes), once a CRT fast fail in strftime. Before a restore
+   the text of every such cvar is noted, after it each gets a fresh copy. The same commit copies the arena pages
+   written since the save back with the copy workers, by 32 MB window (5-6 ms on the main thread, now ~3 ms).
+
+6. No wait when the threads are already drained. A save or restore waited 4 frames for the threading cvars to
+   take effect even when they had been 0 all along (P2 Practice keeps them off during a practice session): once
+   they have been 0 for 4 frames, an operation runs at the next frame.
 
 Files: chocoload.exe (starts Portal 2 with the DLL loaded before the engine) and chocolateloading.dll. The
 launcher copies both into the Portal 2 folder when save states are on.

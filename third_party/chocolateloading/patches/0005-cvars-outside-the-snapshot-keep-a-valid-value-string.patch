@@ -1,0 +1,222 @@
+From 14dfb019c999651fe2267a40f9b6f6bce021a6a6 Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 20:37:17 -0600
+Subject: [PATCH 5/6] cvars outside the snapshot keep a valid value string
+ across a restore (SAR's sar_record_prefix pointed at a freed block: mangled
+ demo names, crashes)
+
+---
+ src/gameapi.cpp  |   5 +++
+ src/gameapi.h    |   2 +
+ src/memhook.cpp  |   1 +
+ src/memhook.h    |   2 +
+ src/snapshot.cpp | 104 ++++++++++++++++++++++++++++++++++++++++++++++-
+ 5 files changed, 113 insertions(+), 1 deletion(-)
+
+diff --git a/src/gameapi.cpp b/src/gameapi.cpp
+index 93de1ca..2c8be53 100644
+--- a/src/gameapi.cpp
++++ b/src/gameapi.cpp
+@@ -48,6 +48,11 @@ bool InitConsole() {
+     return true;
+ }
+ 
++ConCommandBase* FirstCommand() {
++    // CCvar::RegisterConCommand links a new one in front of the list head at +0x30 (vstdlib, re/notes.md)
++    return g_cvar ? *(ConCommandBase**)((char*)g_cvar + 0x30) : nullptr;
++}
++
+ ConVar* FindVar(const char* name) {
+     if (!g_cvar) return nullptr;
+     ConVar* v = vfunc<FindVarFn>(g_cvar, icvar::FindVar)(g_cvar, name);
+diff --git a/src/gameapi.h b/src/gameapi.h
+index 11f2908..cdac687 100644
+--- a/src/gameapi.h
++++ b/src/gameapi.h
+@@ -12,6 +12,8 @@ void* Interface(const char* module, const char* name);
+ bool InitConsole();
+ 
+ ConVar* FindVar(const char* name);   // the parent ConVar (the one that holds the value), or null
++// The first of every registered command and cvar (CCvar's list, newest first, linked by m_pNext), or null
++ConCommandBase* FirstCommand();
+ ConCommandBase* FindCommand(const char* name);   // a command or cvar, or null
+ void AddCommand(const char* name, const char* help, FnCommandCallback_t callback);
+ void RemoveCommands();               // unregisters every command added by AddCommand
+diff --git a/src/memhook.cpp b/src/memhook.cpp
+index f3cd7df..54d2d2d 100644
+--- a/src/memhook.cpp
++++ b/src/memhook.cpp
+@@ -351,6 +351,7 @@ void SetCrtThreadDataInArena(bool on) { g_crt_in_arena = on; }
+ bool Installed() { return g_installed; }
+ void SetRouteAll(bool on) { g_route_all = on; }
+ bool RouteAll() { return g_route_all; }
++bool InDomainModule(const void* p) { return g_route[(uintptr_t)p >> 16] != 0; }
+ bool Overflowed() { return g_overflow != 0; }
+ 
+ void SetDomain(const char* list) {
+diff --git a/src/memhook.h b/src/memhook.h
+index 75a4343..97cefbf 100644
+--- a/src/memhook.h
++++ b/src/memhook.h
+@@ -25,6 +25,8 @@ bool Installed();
+ // Route every allocation to the arena regardless of the caller (see the modes above).
+ void SetRouteAll(bool on);
+ bool RouteAll();
++// The address lies in the image of a domain module (whose writable sections a snapshot captures)
++bool InDomainModule(const void* p);
+ 
+ // Domain mode: rebuilds the routing table from a space separated module list
+ // (e.g. "engine.dll client.dll server.dll"). Modules that are not loaded yet are ignored.
+diff --git a/src/snapshot.cpp b/src/snapshot.cpp
+index ff3f2c6..0299808 100644
+--- a/src/snapshot.cpp
++++ b/src/snapshot.cpp
+@@ -3,6 +3,7 @@
+ #include "arena.h"
+ #include "copypool.h"
+ #include "d3dguard.h"
++#include "gameapi.h"
+ #include "fileguard.h"
+ #include "memhook.h"
+ #include "soundguard.h"
+@@ -42,6 +43,61 @@ void stop_all_sounds() {
+     if (g_sound) vfunc<StopAllSoundsFn>(g_sound, soundslot::StopAllSounds)(g_sound, true);
+ }
+ 
++// ---- cvars whose object lives outside the snapshot -------------------------------------------------
++// A plugin's cvars (SAR's sar_*) are ConVar objects in the plugin's own memory, which a restore leaves as it
++// is, but their value strings are allocated by the engine's ConVar code, in the arena, which a restore
++// reverts: a value set after the save was a block the restore freed, so the cvar went on pointing at a freed
++// block that was soon reused. SAR's sar_record_prefix then read as garbage: demos started with mangled
++// names ("9ÿB0....dem"), SAR's rename at the flags failed and closed the game, and once strftime got an
++// invalid format from it and SAR's CRT closed the game (fast fail, invalid parameter). So the text of every
++// such cvar is noted before a restore and given a fresh copy in the arena after it; the object keeps the
++// value it had, as the rest of the plugin's memory does.
++struct KeptVar { ConVar* var; size_t at; size_t len; };
++KeptVar g_kept_vars[2048];
++int     g_kept_count = 0;
++char    g_kept_text[128 * 1024];
++
++bool readable_cvar(const ConCommandBase* b) {
++    MEMORY_BASIC_INFORMATION mbi;
++    return VirtualQuery(b, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
++           !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (uintptr_t)b + sizeof(ConVar) <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
++}
++
++void cvars_before_restore() {
++    g_kept_count = 0;
++    size_t used = 0;
++    int walked = 0;
++    for (ConCommandBase* b = gameapi::FirstCommand(); b && walked < 100000; b = b->m_pNext, walked++) {
++        if (!readable_cvar(b)) break;
++        if (vfunc<bool(__thiscall*)(void*)>(b, 1)(b)) continue;   // IsCommand
++        ConVar* v = (ConVar*)b;
++        if (v->m_pParent != v || arena::Contains(v) || memhook::InDomainModule(v)) continue;   // reverted with the rest
++        const char* s = v->m_pszString;
++        if (!s || !arena::Contains(s)) continue;
++        size_t len = strnlen(s, v->m_StringLength > 0 ? (size_t)v->m_StringLength : 4096);
++        if (g_kept_count == (int)(sizeof(g_kept_vars) / sizeof(g_kept_vars[0])) || used + len + 1 > sizeof(g_kept_text)) break;
++        memcpy(g_kept_text + used, s, len);
++        g_kept_text[used + len] = 0;
++        g_kept_vars[g_kept_count++] = {v, used, len};
++        used += len + 1;
++    }
++}
++
++// After the restore, with the other threads running again (an allocation takes the arena's lock)
++void cvars_after_restore() {
++    for (int i = 0; i < g_kept_count; i++) {
++        KeptVar& k = g_kept_vars[i];
++        char* copy = (char*)arena::Alloc(k.len + 1);
++        if (!copy) break;
++        memcpy(copy, g_kept_text + k.at, k.len + 1);
++        // (the block it pointed to is left alone: freed by the restore, or still the snapshot's own)
++        k.var->m_pszString = copy;
++        k.var->m_StringLength = (int)(k.len + 1);
++    }
++    if (g_kept_count) util::Log("[snap] %d cvars outside the snapshot given their value back", g_kept_count);
++    g_kept_count = 0;
++}
++
+ bool g_pool_suspended = false, g_fs_suspended = false;
+ 
+ // Drain and park the job pool and the async filesystem so no job runs while memory is copied.
+@@ -560,6 +616,49 @@ bool write_image(const Snap& s, uintptr_t end) {
+     return pieces_run(s.section, true) && listed;
+ }
+ 
++// ---- dirty arena pages, copied back by the copy workers ----------------------------------------------
++// The pages written since the save (sorted, from the write watch) are grouped by WINDOW of the image; each
++// window is one job: a worker maps that part of the store and copies its pages back. On the main thread
++// alone, through one sliding view, this was the largest part of a restore (5-6 ms for ~4000 pages).
++const size_t MAX_WINDOWS = 64;   // 2 GB of arena image in 32 MB windows
++size_t g_win_index[MAX_WINDOWS], g_win_first[MAX_WINDOWS], g_win_count[MAX_WINDOWS];
++const Snap* g_dirty_snap = nullptr;
++
++void dirty_window_copy(void*, int w) {
++    const Snap& s = *g_dirty_snap;
++    uintptr_t base = arena::Base();
++    size_t at = g_win_index[w] * WINDOW;
++    size_t vlen = s.section_size - at < WINDOW ? s.section_size - at : WINDOW;
++    const uint8_t* v = (const uint8_t*)MapViewOfFile(s.section, FILE_MAP_READ, 0, (DWORD)at, vlen);
++    if (!v) { InterlockedExchange(&g_job_failed, 1); return; }
++    for (size_t k = g_win_first[w], e = k + g_win_count[w]; k < e; k++) {
++        uintptr_t a = g_dirty[k], b = a + 4096;
++        if (a < base) a = base;
++        if (b > s.image_end) b = s.image_end;
++        if (a < b) memcpy((void*)a, v + (a - base - at), b - a);
++    }
++    UnmapViewOfFile(v);
++}
++
++bool revert_dirty_parallel(const Snap& s, size_t n) {
++    uintptr_t base = arena::Base();
++    int windows = 0;
++    for (size_t i = 0; i < n; i++) {
++        if (g_dirty[i] + 4096 <= base || g_dirty[i] >= s.image_end) continue;
++        size_t index = (g_dirty[i] < base ? 0 : g_dirty[i] - base) / WINDOW;
++        if (windows && g_win_index[windows - 1] == index) { g_win_count[windows - 1]++; continue; }
++        if (windows == (int)MAX_WINDOWS) return false;
++        g_win_index[windows] = index;
++        g_win_first[windows] = i;
++        g_win_count[windows] = 1;
++        windows++;
++    }
++    g_dirty_snap = &s;
++    g_job_failed = 0;
++    copypool::Run(dirty_window_copy, nullptr, windows);
++    return !g_job_failed;
++}
++
+ // ---- restore steps -----------------------------------------------------------------------------------
+ // The current snapshot: copies back the arena pages written since it was saved or restored, skipping the
+ // `kept` zombie ranges `z` (sorted). *pages receives the number of pages examined.
+@@ -572,6 +671,7 @@ bool revert_dirty_pages(const Snap& s, const arena::Range* z, size_t kept, size_
+         return restore_range(s, arena::Base(), s.image_end, z, kept);
+     }
+     *pages = n;
++    if (!kept) return revert_dirty_parallel(s, n);
+     for (size_t i = 0; i < n; i++) {
+         uintptr_t a = g_dirty[i], b = a + 4096;
+         if (a < arena::Base()) a = arena::Base();
+@@ -859,6 +959,7 @@ bool Restore(const char* name, char* err, size_t errlen) {
+ 
+     // 1) let go of the outside objects of the timeline being discarded, with the other threads running
+     stop_all_sounds();
++    cvars_before_restore();
+     guards_before_restore(slot);
+     quiesce_begin();
+     save_preserved();
+@@ -913,7 +1014,8 @@ bool Restore(const char* name, char* err, size_t errlen) {
+     util::MuteConsole(false);
+     quiesce_end();
+     double t2 = util::Now();
+-    if (fail[0]) { snprintf(err, errlen, "%s", fail); return false; }
++    if (fail[0]) { g_kept_count = 0; snprintf(err, errlen, "%s", fail); return false; }
++    cvars_after_restore();
+     ph.log("restore");
+     if (segs.va_recommitted) util::Log("[snap] %u VirtualAlloc ranges decommitted since the save were committed again", (unsigned)segs.va_recommitted);
+     if (segs.va_skipped || segs.mods_skipped)
+-- 
+2.43.0.windows.1
+

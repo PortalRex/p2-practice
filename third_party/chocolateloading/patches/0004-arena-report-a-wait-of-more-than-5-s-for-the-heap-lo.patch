@@ -1,0 +1,242 @@
+From 51a5c3364375a186b5866065c94de729f84b140b Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 19:49:00 -0600
+Subject: [PATCH 4/6] arena: report a wait of more than 5 s for the heap lock
+ (holder thread, whether it is alive, where it took the lock)
+
+---
+ src/arena.cpp   | 67 ++++++++++++++++++++++++++++++++++++-------------
+ src/arena.h     |  6 +++++
+ src/memhook.cpp | 24 ++++++++++++++++++
+ 3 files changed, 80 insertions(+), 17 deletions(-)
+
+diff --git a/src/arena.cpp b/src/arena.cpp
+index aed1490..5f95880 100644
+--- a/src/arena.cpp
++++ b/src/arena.cpp
+@@ -9,6 +9,7 @@
+ // The heap ends with a 0-sized "sentinel" header at ctl->top.
+ #include "arena.h"
+ #include <windows.h>
++#include <intrin.h>
+ #include <string.h>
+ #include <stdio.h>
+ 
+@@ -64,6 +65,11 @@ template <class T> struct VArray {
+ };
+ 
+ SRWLOCK      g_lock = SRWLOCK_INIT;
++// Who holds g_lock, for the report of a thread that has waited for it too long (a game froze once with
++// every thread waiting on it and no holder in sight). Written only by the holder.
++volatile DWORD g_lock_owner = 0;
++void* volatile g_lock_site = nullptr;
++LockWaitFn   g_lock_wait_report = nullptr;
+ uintptr_t    g_base = 0, g_reserve_end = 0, g_commit_end = 0;
+ uintptr_t    g_heap_start = 0;
+ Control*     g_ctl = nullptr;
+@@ -77,6 +83,32 @@ VArray<Range>  g_zombies;               // scratch for CollectZombies
+ VArray<Range>  g_usable;                // scratch: post-snapshot usable ranges
+ OldFreeFn    g_old_free = nullptr;
+ 
++// g_lock, taken the plain way when free; when it is not, waited for in short sleeps so that a wait of more
++// than 5 s can be reported (once per wait) with the holder recorded at its acquisition.
++__declspec(noinline) void lock_heap() {
++    void* site = _ReturnAddress();
++    if (!TryAcquireSRWLockExclusive(&g_lock)) {
++        DWORD start = GetTickCount();
++        bool reported = false;
++        for (unsigned spins = 0; !TryAcquireSRWLockExclusive(&g_lock); spins++) {
++            if (spins < 64) SwitchToThread();
++            else Sleep(1);
++            if (!reported && GetTickCount() - start > 5000) {
++                reported = true;
++                if (g_lock_wait_report) g_lock_wait_report(GetCurrentThreadId(), g_lock_owner, g_lock_site, *(volatile uintptr_t*)&g_lock);
++            }
++        }
++    }
++    g_lock_owner = GetCurrentThreadId();
++    g_lock_site = site;
++}
++
++inline void unlock_heap() {
++    g_lock_owner = 0;
++    g_lock_site = nullptr;
++    ReleaseSRWLockExclusive(&g_lock);
++}
++
+ inline uint32_t bsize(const Hdr* h) { return h->sizef & ~F_MASK; }
+ inline Hdr*     next_phys(Hdr* h) { return (Hdr*)((char*)h + bsize(h)); }
+ inline Hdr*     prev_phys(Hdr* h) { return (Hdr*)((char*)h - h->prev_size); }
+@@ -294,17 +326,17 @@ bool Init(size_t reserve_bytes) {
+ uintptr_t Base() { return g_base; }
+ 
+ void* Alloc(size_t size) {
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     void* p = alloc_locked(size);
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     return p;
+ }
+ 
+ void Free(void* p) {
+     if (!p) return;
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     free_locked(p);
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+ }
+ 
+ size_t UsableSize(const void* p) {
+@@ -318,7 +350,7 @@ void* Realloc(void* p, size_t n) {
+     if (n <= cur) return p;
+     if (n > 0x7FFF0000u) return nullptr;
+     uint32_t need = need_for(n);
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     if (!(b->sizef & F_FROZEN)) {
+         Hdr* nx = next_phys(b);
+         if ((nx->sizef & F_FREE) && bsize(b) + bsize(nx) >= need) {
+@@ -338,7 +370,7 @@ void* Realloc(void* p, size_t n) {
+                 b->sizef = total | keep;
+                 ((Hdr*)((char*)b + total))->sizef &= ~F_PREVFREE;
+             }
+-            ReleaseSRWLockExclusive(&g_lock);
++            unlock_heap();
+             return p;
+         }
+     }
+@@ -347,12 +379,12 @@ void* Realloc(void* p, size_t n) {
+         memcpy(q, p, cur);
+         free_locked(p);
+     }
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     return q;
+ }
+ 
+-void Lock() { AcquireSRWLockExclusive(&g_lock); }
+-void Unlock() { ReleaseSRWLockExclusive(&g_lock); }
++void Lock() { lock_heap(); }
++void Unlock() { unlock_heap(); }
+ bool SnapshotActive() { return g_snapshot; }
+ 
+ static void walk_stats(Stats* st) {
+@@ -376,15 +408,15 @@ static void walk_stats(Stats* st) {
+ 
+ Stats GetStats() {
+     Stats st;
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     walk_stats(&st);
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     return st;
+ }
+ 
+ bool Check(char* err, size_t errlen) {
+     bool ok = true;
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     Hdr* h = (Hdr*)g_heap_start;
+     Hdr* top = (Hdr*)(uintptr_t)g_ctl->top;
+     bool prev_free = false;
+@@ -432,7 +464,7 @@ bool Check(char* err, size_t errlen) {
+             }
+         if (ok && free_lists != free_walk) { snprintf(err, errlen, "free count %u vs lists %u", (unsigned)free_walk, (unsigned)free_lists); ok = false; }
+     }
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     if (ok && errlen) err[0] = 0;
+     return ok;
+ }
+@@ -609,21 +641,22 @@ bool FinishRestore(size_t kept, char* err, size_t errlen) {
+ void HeapSpan(uintptr_t* lo, uintptr_t* hi) { *lo = g_heap_start; *hi = g_ctl->top; }
+ 
+ void DeferOldFree(void* p) {
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     g_deferred_old.push(p);
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+ }
+ 
+ void SetOldFreeFn(OldFreeFn fn) { g_old_free = fn; }
++void SetLockWaitReport(LockWaitFn fn) { g_lock_wait_report = fn; }
+ size_t DeferredOldCount() { return g_deferred_old.count; }
+ 
+ void FlushPendingOld() {
+     // The original allocator takes its own locks: never call this while threads are suspended.
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     size_t n = g_pending_old.count;
+     void** v = g_pending_old.data;
+     g_pending_old.data = nullptr; g_pending_old.count = 0; g_pending_old.cap = 0;
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     if (v) {
+         if (g_old_free) for (size_t i = 0; i < n; i++) g_old_free(v[i]);
+         VirtualFree(v, 0, MEM_RELEASE);
+diff --git a/src/arena.h b/src/arena.h
+index 4ac22d5..b5a7796 100644
+--- a/src/arena.h
++++ b/src/arena.h
+@@ -97,6 +97,12 @@ void   SetOldFreeFn(OldFreeFn fn);
+ size_t DeferredOldCount();
+ void   FlushPendingOld();
+ 
++// Called (once per wait, from the waiting thread) when a thread has waited more than 5 s for the heap lock:
++// the waiter, the thread recorded as holding it (0: none recorded), where that one took it, and the raw
++// SRWLOCK word. Must not allocate from the arena.
++typedef void (*LockWaitFn)(unsigned long waiter, unsigned long owner, void* owner_site, uintptr_t lock_word);
++void   SetLockWaitReport(LockWaitFn fn);
++
+ // internal fast-path data
+ extern uintptr_t g_lo, g_hi;
+ inline bool Contains(const void* p) { return (uintptr_t)p - g_lo < g_hi - g_lo; }
+diff --git a/src/memhook.cpp b/src/memhook.cpp
+index 2a156af..f3cd7df 100644
+--- a/src/memhook.cpp
++++ b/src/memhook.cpp
+@@ -92,6 +92,29 @@ inline void overflow() { InterlockedExchange(&g_overflow, 1); }
+ 
+ void old_free(void* p) { o_Free(g_memalloc, p); }
+ 
++// A thread has waited 5 s for the arena's lock (see arena::SetLockWaitReport): who holds it, whether that
++// thread still exists, and where it took the lock, so that a freeze on it can be traced from the log.
++void report_lock_wait(unsigned long waiter, unsigned long owner, void* owner_site, uintptr_t lock_word) {
++    const char* state = "none recorded";
++    if (owner) {
++        HANDLE t = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, owner);
++        DWORD code = 0;
++        state = !t ? "gone" : (GetExitCodeThread(t, &code) && code == STILL_ACTIVE ? "alive" : "exited");
++        if (t) CloseHandle(t);
++    }
++    char where[64] = "?";
++    HMODULE m = nullptr;
++    if (owner_site && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                                         (LPCSTR)owner_site, &m) && m) {
++        char path[MAX_PATH];
++        GetModuleFileNameA(m, path, MAX_PATH);
++        const char* name = strrchr(path, '\\');
++        snprintf(where, sizeof(where), "%s+0x%x", name ? name + 1 : path, (unsigned)((uintptr_t)owner_site - (uintptr_t)m));
++    }
++    util::Log("arena: thread %lu has waited 5 s for the heap lock; holder thread %lu (%s), taken at %s, lock word %08x",
++              waiter, owner, state, where, (unsigned)lock_word);
++}
++
+ // -- tier0 IMemAlloc hooks (thiscall emulated with fastcall: ecx = this, edx = unused) -------------
+ void* alloc_routed(const void* ra, size_t size) {
+     if (route_in(ra) && !crt_thread_data(size)) {
+@@ -231,6 +254,7 @@ bool ensure_arena(size_t reserve, char* err, size_t errlen) {
+     while (sz >= (256u << 20) && !arena::Init(sz)) sz -= (128u << 20);
+     if (sz < (256u << 20)) { snprintf(err, errlen, "could not reserve the arena"); return false; }
+     arena::SetOldFreeFn(old_free);
++    arena::SetLockWaitReport(report_lock_wait);
+     util::Log("arena reserved: %u MB at %p", (unsigned)(sz >> 20), (void*)arena::Base());
+     g_arena_ok = true;
+     return true;
+-- 
+2.43.0.windows.1
+

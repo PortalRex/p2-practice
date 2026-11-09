@@ -230,8 +230,11 @@ bool Init(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn server
 	// Challenge Mode is the cvar sv_bonus_challenge, which the shipped game hides as development-only: the console
 	// answers "Unknown command" to it unless something has made it usable (SAR does). Without its two hiding flags
 	// it is an ordinary cvar, which the trainer sets when it loads a level in a run's mode.
+	// host_thread_mode is hidden the same way; the trainer keeps it off with save states (see SingleThreadedRendering).
 	constexpr int kFcvarDevelopmentOnly = 1 << 1, kFcvarHidden = 1 << 4;
-	if (void *base = FindCommandBase("sv_bonus_challenge"); base && !IsCommand(base)) {
+	for (const char *name : {"sv_bonus_challenge", "host_thread_mode"}) {
+		void *base = FindCommandBase(name);
+		if (!base || IsCommand(base)) continue;
 		auto *var = static_cast<sdk::ConVar *>(base);
 		var->flags &= ~(kFcvarDevelopmentOnly | kFcvarHidden);
 		if (var->parent) var->parent->flags &= ~(kFcvarDevelopmentOnly | kFcvarHidden);

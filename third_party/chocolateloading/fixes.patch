@@ -1,8 +1,8 @@
-diff --git a/src/arena.cpp b/src/arena.cpp
-index e72b6d3..aed1490 100644
+﻿diff --git a/src/arena.cpp b/src/arena.cpp
+index e72b6d3..5f95880 100644
 --- a/src/arena.cpp
 +++ b/src/arena.cpp
-@@ -1,7 +1,8 @@
+@@ -1,13 +1,15 @@
  #define _CRT_SECURE_NO_WARNINGS
  // Snapshot-aware TLSF heap. See arena.h for the snapshot model.
  //
@@ -12,7 +12,14 @@ index e72b6d3..aed1490 100644
  //   +0 prev_size  size of the previous physical block, valid only when F_PREVFREE is set
  //   +4 sizef      size | flags
  //   +8 payload    (free blocks: next/prev free-list links)
-@@ -18,7 +19,9 @@ uintptr_t g_lo = 1, g_hi = 1;   // [g_lo, g_hi) = heap span used by Contains()
+ // The heap ends with a 0-sized "sentinel" header at ctl->top.
+ #include "arena.h"
+ #include <windows.h>
++#include <intrin.h>
+ #include <string.h>
+ #include <stdio.h>
+ 
+@@ -18,7 +20,9 @@ uintptr_t g_lo = 1, g_hi = 1;   // [g_lo, g_hi) = heap span used by Contains()
  namespace {
  
  enum : uint32_t { F_FREE = 1, F_PREVFREE = 2, F_FROZEN = 4, F_MASK = 7 };
@@ -23,7 +30,52 @@ index e72b6d3..aed1490 100644
  const uint32_t SL_LOG = 4, SL_COUNT = 1u << SL_LOG;
  const uint32_t FL_SHIFT = SL_LOG + 3;        // first FL class starts at 128 bytes
  const uint32_t SMALL = 1u << FL_SHIFT;
-@@ -152,7 +155,7 @@ bool grow(uint32_t need) {
+@@ -61,6 +65,11 @@ template <class T> struct VArray {
+ };
+ 
+ SRWLOCK      g_lock = SRWLOCK_INIT;
++// Who holds g_lock, for the report of a thread that has waited for it too long (a game froze once with
++// every thread waiting on it and no holder in sight). Written only by the holder.
++volatile DWORD g_lock_owner = 0;
++void* volatile g_lock_site = nullptr;
++LockWaitFn   g_lock_wait_report = nullptr;
+ uintptr_t    g_base = 0, g_reserve_end = 0, g_commit_end = 0;
+ uintptr_t    g_heap_start = 0;
+ Control*     g_ctl = nullptr;
+@@ -74,6 +83,32 @@ VArray<Range>  g_zombies;               // scratch for CollectZombies
+ VArray<Range>  g_usable;                // scratch: post-snapshot usable ranges
+ OldFreeFn    g_old_free = nullptr;
+ 
++// g_lock, taken the plain way when free; when it is not, waited for in short sleeps so that a wait of more
++// than 5 s can be reported (once per wait) with the holder recorded at its acquisition.
++__declspec(noinline) void lock_heap() {
++    void* site = _ReturnAddress();
++    if (!TryAcquireSRWLockExclusive(&g_lock)) {
++        DWORD start = GetTickCount();
++        bool reported = false;
++        for (unsigned spins = 0; !TryAcquireSRWLockExclusive(&g_lock); spins++) {
++            if (spins < 64) SwitchToThread();
++            else Sleep(1);
++            if (!reported && GetTickCount() - start > 5000) {
++                reported = true;
++                if (g_lock_wait_report) g_lock_wait_report(GetCurrentThreadId(), g_lock_owner, g_lock_site, *(volatile uintptr_t*)&g_lock);
++            }
++        }
++    }
++    g_lock_owner = GetCurrentThreadId();
++    g_lock_site = site;
++}
++
++inline void unlock_heap() {
++    g_lock_owner = 0;
++    g_lock_site = nullptr;
++    ReleaseSRWLockExclusive(&g_lock);
++}
++
+ inline uint32_t bsize(const Hdr* h) { return h->sizef & ~F_MASK; }
+ inline Hdr*     next_phys(Hdr* h) { return (Hdr*)((char*)h + bsize(h)); }
+ inline Hdr*     prev_phys(Hdr* h) { return (Hdr*)((char*)h - h->prev_size); }
+@@ -152,7 +187,7 @@ bool grow(uint32_t need) {
      uintptr_t delta = ((uintptr_t)need + GROW_MIN + 0xFFFF) & ~(uintptr_t)0xFFFF;
      uintptr_t new_top = old_top + delta;
      if (new_top + HDR > g_reserve_end) {
@@ -32,7 +84,7 @@ index e72b6d3..aed1490 100644
          if (delta < need) return false;
          new_top = old_top + delta;
      }
-@@ -277,7 +280,7 @@ bool Init(size_t reserve_bytes) {
+@@ -277,7 +312,7 @@ bool Init(size_t reserve_bytes) {
      g_ctl = (Control*)g_base;
      memset(g_ctl, 0, sizeof(Control));
      g_ctl->magic = MAGIC;
@@ -41,7 +93,82 @@ index e72b6d3..aed1490 100644
      // initial sentinel only; the first allocation grows the heap
      Hdr* s = (Hdr*)g_heap_start;
      s->prev_size = 0;
-@@ -392,6 +395,9 @@ bool Check(char* err, size_t errlen) {
+@@ -291,17 +326,17 @@ bool Init(size_t reserve_bytes) {
+ uintptr_t Base() { return g_base; }
+ 
+ void* Alloc(size_t size) {
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     void* p = alloc_locked(size);
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     return p;
+ }
+ 
+ void Free(void* p) {
+     if (!p) return;
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     free_locked(p);
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+ }
+ 
+ size_t UsableSize(const void* p) {
+@@ -315,7 +350,7 @@ void* Realloc(void* p, size_t n) {
+     if (n <= cur) return p;
+     if (n > 0x7FFF0000u) return nullptr;
+     uint32_t need = need_for(n);
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     if (!(b->sizef & F_FROZEN)) {
+         Hdr* nx = next_phys(b);
+         if ((nx->sizef & F_FREE) && bsize(b) + bsize(nx) >= need) {
+@@ -335,7 +370,7 @@ void* Realloc(void* p, size_t n) {
+                 b->sizef = total | keep;
+                 ((Hdr*)((char*)b + total))->sizef &= ~F_PREVFREE;
+             }
+-            ReleaseSRWLockExclusive(&g_lock);
++            unlock_heap();
+             return p;
+         }
+     }
+@@ -344,12 +379,12 @@ void* Realloc(void* p, size_t n) {
+         memcpy(q, p, cur);
+         free_locked(p);
+     }
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     return q;
+ }
+ 
+-void Lock() { AcquireSRWLockExclusive(&g_lock); }
+-void Unlock() { ReleaseSRWLockExclusive(&g_lock); }
++void Lock() { lock_heap(); }
++void Unlock() { unlock_heap(); }
+ bool SnapshotActive() { return g_snapshot; }
+ 
+ static void walk_stats(Stats* st) {
+@@ -373,15 +408,15 @@ static void walk_stats(Stats* st) {
+ 
+ Stats GetStats() {
+     Stats st;
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     walk_stats(&st);
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     return st;
+ }
+ 
+ bool Check(char* err, size_t errlen) {
+     bool ok = true;
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     Hdr* h = (Hdr*)g_heap_start;
+     Hdr* top = (Hdr*)(uintptr_t)g_ctl->top;
+     bool prev_free = false;
+@@ -392,6 +427,9 @@ bool Check(char* err, size_t errlen) {
          if (s < MIN_BLOCK || (uintptr_t)h + s > (uintptr_t)top) {
              snprintf(err, errlen, "bad block size %u at %p", s, h); ok = false; break;
          }
@@ -51,6 +178,59 @@ index e72b6d3..aed1490 100644
          if (((h->sizef & F_PREVFREE) != 0) != prev_free) {
              snprintf(err, errlen, "PREVFREE mismatch at %p", h); ok = false; break;
          }
+@@ -426,7 +464,7 @@ bool Check(char* err, size_t errlen) {
+             }
+         if (ok && free_lists != free_walk) { snprintf(err, errlen, "free count %u vs lists %u", (unsigned)free_walk, (unsigned)free_lists); ok = false; }
+     }
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     if (ok && errlen) err[0] = 0;
+     return ok;
+ }
+@@ -603,21 +641,22 @@ bool FinishRestore(size_t kept, char* err, size_t errlen) {
+ void HeapSpan(uintptr_t* lo, uintptr_t* hi) { *lo = g_heap_start; *hi = g_ctl->top; }
+ 
+ void DeferOldFree(void* p) {
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     g_deferred_old.push(p);
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+ }
+ 
+ void SetOldFreeFn(OldFreeFn fn) { g_old_free = fn; }
++void SetLockWaitReport(LockWaitFn fn) { g_lock_wait_report = fn; }
+ size_t DeferredOldCount() { return g_deferred_old.count; }
+ 
+ void FlushPendingOld() {
+     // The original allocator takes its own locks: never call this while threads are suspended.
+-    AcquireSRWLockExclusive(&g_lock);
++    lock_heap();
+     size_t n = g_pending_old.count;
+     void** v = g_pending_old.data;
+     g_pending_old.data = nullptr; g_pending_old.count = 0; g_pending_old.cap = 0;
+-    ReleaseSRWLockExclusive(&g_lock);
++    unlock_heap();
+     if (v) {
+         if (g_old_free) for (size_t i = 0; i < n; i++) g_old_free(v[i]);
+         VirtualFree(v, 0, MEM_RELEASE);
+diff --git a/src/arena.h b/src/arena.h
+index 4ac22d5..b5a7796 100644
+--- a/src/arena.h
++++ b/src/arena.h
+@@ -97,6 +97,12 @@ void   SetOldFreeFn(OldFreeFn fn);
+ size_t DeferredOldCount();
+ void   FlushPendingOld();
+ 
++// Called (once per wait, from the waiting thread) when a thread has waited more than 5 s for the heap lock:
++// the waiter, the thread recorded as holding it (0: none recorded), where that one took it, and the raw
++// SRWLOCK word. Must not allocate from the arena.
++typedef void (*LockWaitFn)(unsigned long waiter, unsigned long owner, void* owner_site, uintptr_t lock_word);
++void   SetLockWaitReport(LockWaitFn fn);
++
+ // internal fast-path data
+ extern uintptr_t g_lo, g_hi;
+ inline bool Contains(const void* p) { return (uintptr_t)p - g_lo < g_hi - g_lo; }
 diff --git a/src/callsite.cpp b/src/callsite.cpp
 index 316de82..2dd6681 100644
 --- a/src/callsite.cpp
@@ -119,26 +299,320 @@ index 7ee1d1f..49ece75 100644
  //
  // Classification is lock-free (VirtualQuery + the module's PE export name, cached), so it is safe in
  // hooks that run while other threads are suspended.
-diff --git a/tests/arena_test.cpp b/tests/arena_test.cpp
-index aa20b42..9401c82 100644
---- a/tests/arena_test.cpp
-+++ b/tests/arena_test.cpp
-@@ -53,6 +53,7 @@ static void random_ops(int n, std::vector<Obj>* outside, bool allow_outside) {
-             Obj o; o.size = rand_size(); o.seed = rnd();
-             o.p = (unsigned char*)arena::Alloc(o.size);
-             if (!o.p) { printf("alloc failed\n"); exit(1); }
-+            if ((uintptr_t)o.p & 15) { printf("alloc not 16-byte aligned: %p\n", o.p); exit(1); }
-             fill(o);
-             if (allow_outside && outside && (rnd() % 20) == 0) outside->push_back(o);
-             else state_push(o);
-@@ -69,6 +70,7 @@ static void random_ops(int n, std::vector<Obj>* outside, bool allow_outside) {
-             uint32_t ns = o.size + rnd() % 3000;
-             unsigned char* np = (unsigned char*)arena::Realloc(o.p, ns);
-             if (!np) { printf("realloc failed\n"); exit(1); }
-+            if ((uintptr_t)np & 15) { printf("realloc not 16-byte aligned: %p\n", np); exit(1); }
-             o.p = np;
-             for (uint32_t j = o.size; j < ns; j++) np[j] = (unsigned char)(o.seed + j * 31);
-             o.size = ns;
+diff --git a/src/control.cpp b/src/control.cpp
+index d7713a0..16f77b5 100644
+--- a/src/control.cpp
++++ b/src/control.cpp
+@@ -19,6 +19,7 @@ char     g_pending_name[snapshot::MAX_NAME] = "";
+ uint32_t g_frame = 0;
+ uint32_t g_ready_frame = 0;        // frame at which the pending operation may run
+ double   g_request_time = 0;
++uint32_t g_request_frame = 0;
+ int      g_levelinits = 0;
+ char     g_domain[1024] = "";
+ 
+@@ -59,6 +60,25 @@ void force_threading_off(bool on) {
+     g_forced = on;
+ }
+ 
++// The threading cvars kept at 0 by someone else (P2 Practice keeps them off for a whole practice session): once
++// they have been 0 for a few frames the threads are drained already, and an operation needs no wait of its own.
++ConVar*  g_thread_vars[kThreadCvarCount] = {};
++bool     g_thread_vars_found = false;
++uint32_t g_zero_since = UINT32_MAX;   // first frame of the current run of frames with all of them at 0
++
++bool thread_cvars_zero() {
++    if (!g_thread_vars_found) {
++        for (int i = 0; i < kThreadCvarCount; i++) g_thread_vars[i] = gameapi::FindVar(kThreadCvars[i]);
++        g_thread_vars_found = g_thread_vars[0] != nullptr;   // (not before the console is up)
++        if (!g_thread_vars_found) return false;
++    }
++    for (int i = 0; i < kThreadCvarCount; i++)
++        if (g_thread_vars[i] && g_thread_vars[i]->m_nValue != 0) return false;
++    return true;
++}
++
++bool threads_settled() { return g_zero_since != UINT32_MAX && g_frame - g_zero_since >= 4; }
++
+ void set_name(char* dst, const char* name) {
+     strncpy(dst, name, snapshot::MAX_NAME - 1);
+     dst[snapshot::MAX_NAME - 1] = 0;
+@@ -79,7 +99,7 @@ void run_pending() {
+     }
+     sarlink::UpdateHud();
+     if (!ok) util::ConWarn("[snap] %s of '%s' failed: %s", op == OP_SAVE ? "save" : "restore", name, err);
+-    else if (op == OP_LOAD) util::Con("[snap] snap_load: %.0f ms from the command to the restored state", (util::Now() - g_request_time) * 1000.0);
++    else if (op == OP_LOAD) util::Con("[snap] snap_load: %.0f ms from the command to the restored state (%u frames)", (util::Now() - g_request_time) * 1000.0, g_frame - g_request_frame);
+ }
+ 
+ // ---- console commands ---------------------------------------------------------------------------
+@@ -184,12 +204,13 @@ bool Request(Op op, const char* name) {
+         util::ConWarn("[snap] %d snapshots already exist: drop one first (snap_drop <name>)", snapshot::MAX_SNAPSHOTS);
+         return false;
+     }
+-    bool was_forced = g_forced;
++    bool was_forced = g_forced || threads_settled();
+     force_threading_off(true);
+     g_pending = op;
+     set_name(g_pending_name, name);
+     g_request_time = util::Now();
+-    g_ready_frame = g_frame + (was_forced ? 1 : 4);   // let the worker threads drain first
++    g_request_frame = g_frame;
++    g_ready_frame = g_frame + (was_forced ? 1 : 4);   // let the worker threads drain first (unless they are already)
+     return true;
+ }
+ 
+@@ -198,6 +219,8 @@ uint32_t Frame() { return g_frame; }
+ 
+ void OnFrameStart() {
+     g_frame++;
++    if (!thread_cvars_zero()) g_zero_since = UINT32_MAX;
++    else if (g_zero_since == UINT32_MAX) g_zero_since = g_frame;
+     if (g_test_cycles > 0 && !snapshot::Exists(g_test_name)) {
+         util::ConWarn("[snap] test: snapshot '%s' dropped, test stopped", g_test_name);
+         g_test_cycles = 0;
+diff --git a/src/gameapi.cpp b/src/gameapi.cpp
+index 93de1ca..2c8be53 100644
+--- a/src/gameapi.cpp
++++ b/src/gameapi.cpp
+@@ -48,6 +48,11 @@ bool InitConsole() {
+     return true;
+ }
+ 
++ConCommandBase* FirstCommand() {
++    // CCvar::RegisterConCommand links a new one in front of the list head at +0x30 (vstdlib, re/notes.md)
++    return g_cvar ? *(ConCommandBase**)((char*)g_cvar + 0x30) : nullptr;
++}
++
+ ConVar* FindVar(const char* name) {
+     if (!g_cvar) return nullptr;
+     ConVar* v = vfunc<FindVarFn>(g_cvar, icvar::FindVar)(g_cvar, name);
+diff --git a/src/gameapi.h b/src/gameapi.h
+index 11f2908..cdac687 100644
+--- a/src/gameapi.h
++++ b/src/gameapi.h
+@@ -12,6 +12,8 @@ void* Interface(const char* module, const char* name);
+ bool InitConsole();
+ 
+ ConVar* FindVar(const char* name);   // the parent ConVar (the one that holds the value), or null
++// The first of every registered command and cvar (CCvar's list, newest first, linked by m_pNext), or null
++ConCommandBase* FirstCommand();
+ ConCommandBase* FindCommand(const char* name);   // a command or cvar, or null
+ void AddCommand(const char* name, const char* help, FnCommandCallback_t callback);
+ void RemoveCommands();               // unregisters every command added by AddCommand
+diff --git a/src/memhook.cpp b/src/memhook.cpp
+index 2a156af..54d2d2d 100644
+--- a/src/memhook.cpp
++++ b/src/memhook.cpp
+@@ -92,6 +92,29 @@ inline void overflow() { InterlockedExchange(&g_overflow, 1); }
+ 
+ void old_free(void* p) { o_Free(g_memalloc, p); }
+ 
++// A thread has waited 5 s for the arena's lock (see arena::SetLockWaitReport): who holds it, whether that
++// thread still exists, and where it took the lock, so that a freeze on it can be traced from the log.
++void report_lock_wait(unsigned long waiter, unsigned long owner, void* owner_site, uintptr_t lock_word) {
++    const char* state = "none recorded";
++    if (owner) {
++        HANDLE t = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, owner);
++        DWORD code = 0;
++        state = !t ? "gone" : (GetExitCodeThread(t, &code) && code == STILL_ACTIVE ? "alive" : "exited");
++        if (t) CloseHandle(t);
++    }
++    char where[64] = "?";
++    HMODULE m = nullptr;
++    if (owner_site && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                                         (LPCSTR)owner_site, &m) && m) {
++        char path[MAX_PATH];
++        GetModuleFileNameA(m, path, MAX_PATH);
++        const char* name = strrchr(path, '\\');
++        snprintf(where, sizeof(where), "%s+0x%x", name ? name + 1 : path, (unsigned)((uintptr_t)owner_site - (uintptr_t)m));
++    }
++    util::Log("arena: thread %lu has waited 5 s for the heap lock; holder thread %lu (%s), taken at %s, lock word %08x",
++              waiter, owner, state, where, (unsigned)lock_word);
++}
++
+ // -- tier0 IMemAlloc hooks (thiscall emulated with fastcall: ecx = this, edx = unused) -------------
+ void* alloc_routed(const void* ra, size_t size) {
+     if (route_in(ra) && !crt_thread_data(size)) {
+@@ -231,6 +254,7 @@ bool ensure_arena(size_t reserve, char* err, size_t errlen) {
+     while (sz >= (256u << 20) && !arena::Init(sz)) sz -= (128u << 20);
+     if (sz < (256u << 20)) { snprintf(err, errlen, "could not reserve the arena"); return false; }
+     arena::SetOldFreeFn(old_free);
++    arena::SetLockWaitReport(report_lock_wait);
+     util::Log("arena reserved: %u MB at %p", (unsigned)(sz >> 20), (void*)arena::Base());
+     g_arena_ok = true;
+     return true;
+@@ -327,6 +351,7 @@ void SetCrtThreadDataInArena(bool on) { g_crt_in_arena = on; }
+ bool Installed() { return g_installed; }
+ void SetRouteAll(bool on) { g_route_all = on; }
+ bool RouteAll() { return g_route_all; }
++bool InDomainModule(const void* p) { return g_route[(uintptr_t)p >> 16] != 0; }
+ bool Overflowed() { return g_overflow != 0; }
+ 
+ void SetDomain(const char* list) {
+diff --git a/src/memhook.h b/src/memhook.h
+index 75a4343..97cefbf 100644
+--- a/src/memhook.h
++++ b/src/memhook.h
+@@ -25,6 +25,8 @@ bool Installed();
+ // Route every allocation to the arena regardless of the caller (see the modes above).
+ void SetRouteAll(bool on);
+ bool RouteAll();
++// The address lies in the image of a domain module (whose writable sections a snapshot captures)
++bool InDomainModule(const void* p);
+ 
+ // Domain mode: rebuilds the routing table from a space separated module list
+ // (e.g. "engine.dll client.dll server.dll"). Modules that are not loaded yet are ignored.
+diff --git a/src/snapshot.cpp b/src/snapshot.cpp
+index ff3f2c6..0299808 100644
+--- a/src/snapshot.cpp
++++ b/src/snapshot.cpp
+@@ -3,6 +3,7 @@
+ #include "arena.h"
+ #include "copypool.h"
+ #include "d3dguard.h"
++#include "gameapi.h"
+ #include "fileguard.h"
+ #include "memhook.h"
+ #include "soundguard.h"
+@@ -42,6 +43,61 @@ void stop_all_sounds() {
+     if (g_sound) vfunc<StopAllSoundsFn>(g_sound, soundslot::StopAllSounds)(g_sound, true);
+ }
+ 
++// ---- cvars whose object lives outside the snapshot -------------------------------------------------
++// A plugin's cvars (SAR's sar_*) are ConVar objects in the plugin's own memory, which a restore leaves as it
++// is, but their value strings are allocated by the engine's ConVar code, in the arena, which a restore
++// reverts: a value set after the save was a block the restore freed, so the cvar went on pointing at a freed
++// block that was soon reused. SAR's sar_record_prefix then read as garbage: demos started with mangled
++// names ("9ÿB0....dem"), SAR's rename at the flags failed and closed the game, and once strftime got an
++// invalid format from it and SAR's CRT closed the game (fast fail, invalid parameter). So the text of every
++// such cvar is noted before a restore and given a fresh copy in the arena after it; the object keeps the
++// value it had, as the rest of the plugin's memory does.
++struct KeptVar { ConVar* var; size_t at; size_t len; };
++KeptVar g_kept_vars[2048];
++int     g_kept_count = 0;
++char    g_kept_text[128 * 1024];
++
++bool readable_cvar(const ConCommandBase* b) {
++    MEMORY_BASIC_INFORMATION mbi;
++    return VirtualQuery(b, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
++           !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (uintptr_t)b + sizeof(ConVar) <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
++}
++
++void cvars_before_restore() {
++    g_kept_count = 0;
++    size_t used = 0;
++    int walked = 0;
++    for (ConCommandBase* b = gameapi::FirstCommand(); b && walked < 100000; b = b->m_pNext, walked++) {
++        if (!readable_cvar(b)) break;
++        if (vfunc<bool(__thiscall*)(void*)>(b, 1)(b)) continue;   // IsCommand
++        ConVar* v = (ConVar*)b;
++        if (v->m_pParent != v || arena::Contains(v) || memhook::InDomainModule(v)) continue;   // reverted with the rest
++        const char* s = v->m_pszString;
++        if (!s || !arena::Contains(s)) continue;
++        size_t len = strnlen(s, v->m_StringLength > 0 ? (size_t)v->m_StringLength : 4096);
++        if (g_kept_count == (int)(sizeof(g_kept_vars) / sizeof(g_kept_vars[0])) || used + len + 1 > sizeof(g_kept_text)) break;
++        memcpy(g_kept_text + used, s, len);
++        g_kept_text[used + len] = 0;
++        g_kept_vars[g_kept_count++] = {v, used, len};
++        used += len + 1;
++    }
++}
++
++// After the restore, with the other threads running again (an allocation takes the arena's lock)
++void cvars_after_restore() {
++    for (int i = 0; i < g_kept_count; i++) {
++        KeptVar& k = g_kept_vars[i];
++        char* copy = (char*)arena::Alloc(k.len + 1);
++        if (!copy) break;
++        memcpy(copy, g_kept_text + k.at, k.len + 1);
++        // (the block it pointed to is left alone: freed by the restore, or still the snapshot's own)
++        k.var->m_pszString = copy;
++        k.var->m_StringLength = (int)(k.len + 1);
++    }
++    if (g_kept_count) util::Log("[snap] %d cvars outside the snapshot given their value back", g_kept_count);
++    g_kept_count = 0;
++}
++
+ bool g_pool_suspended = false, g_fs_suspended = false;
+ 
+ // Drain and park the job pool and the async filesystem so no job runs while memory is copied.
+@@ -560,6 +616,49 @@ bool write_image(const Snap& s, uintptr_t end) {
+     return pieces_run(s.section, true) && listed;
+ }
+ 
++// ---- dirty arena pages, copied back by the copy workers ----------------------------------------------
++// The pages written since the save (sorted, from the write watch) are grouped by WINDOW of the image; each
++// window is one job: a worker maps that part of the store and copies its pages back. On the main thread
++// alone, through one sliding view, this was the largest part of a restore (5-6 ms for ~4000 pages).
++const size_t MAX_WINDOWS = 64;   // 2 GB of arena image in 32 MB windows
++size_t g_win_index[MAX_WINDOWS], g_win_first[MAX_WINDOWS], g_win_count[MAX_WINDOWS];
++const Snap* g_dirty_snap = nullptr;
++
++void dirty_window_copy(void*, int w) {
++    const Snap& s = *g_dirty_snap;
++    uintptr_t base = arena::Base();
++    size_t at = g_win_index[w] * WINDOW;
++    size_t vlen = s.section_size - at < WINDOW ? s.section_size - at : WINDOW;
++    const uint8_t* v = (const uint8_t*)MapViewOfFile(s.section, FILE_MAP_READ, 0, (DWORD)at, vlen);
++    if (!v) { InterlockedExchange(&g_job_failed, 1); return; }
++    for (size_t k = g_win_first[w], e = k + g_win_count[w]; k < e; k++) {
++        uintptr_t a = g_dirty[k], b = a + 4096;
++        if (a < base) a = base;
++        if (b > s.image_end) b = s.image_end;
++        if (a < b) memcpy((void*)a, v + (a - base - at), b - a);
++    }
++    UnmapViewOfFile(v);
++}
++
++bool revert_dirty_parallel(const Snap& s, size_t n) {
++    uintptr_t base = arena::Base();
++    int windows = 0;
++    for (size_t i = 0; i < n; i++) {
++        if (g_dirty[i] + 4096 <= base || g_dirty[i] >= s.image_end) continue;
++        size_t index = (g_dirty[i] < base ? 0 : g_dirty[i] - base) / WINDOW;
++        if (windows && g_win_index[windows - 1] == index) { g_win_count[windows - 1]++; continue; }
++        if (windows == (int)MAX_WINDOWS) return false;
++        g_win_index[windows] = index;
++        g_win_first[windows] = i;
++        g_win_count[windows] = 1;
++        windows++;
++    }
++    g_dirty_snap = &s;
++    g_job_failed = 0;
++    copypool::Run(dirty_window_copy, nullptr, windows);
++    return !g_job_failed;
++}
++
+ // ---- restore steps -----------------------------------------------------------------------------------
+ // The current snapshot: copies back the arena pages written since it was saved or restored, skipping the
+ // `kept` zombie ranges `z` (sorted). *pages receives the number of pages examined.
+@@ -572,6 +671,7 @@ bool revert_dirty_pages(const Snap& s, const arena::Range* z, size_t kept, size_
+         return restore_range(s, arena::Base(), s.image_end, z, kept);
+     }
+     *pages = n;
++    if (!kept) return revert_dirty_parallel(s, n);
+     for (size_t i = 0; i < n; i++) {
+         uintptr_t a = g_dirty[i], b = a + 4096;
+         if (a < arena::Base()) a = arena::Base();
+@@ -859,6 +959,7 @@ bool Restore(const char* name, char* err, size_t errlen) {
+ 
+     // 1) let go of the outside objects of the timeline being discarded, with the other threads running
+     stop_all_sounds();
++    cvars_before_restore();
+     guards_before_restore(slot);
+     quiesce_begin();
+     save_preserved();
+@@ -913,7 +1014,8 @@ bool Restore(const char* name, char* err, size_t errlen) {
+     util::MuteConsole(false);
+     quiesce_end();
+     double t2 = util::Now();
+-    if (fail[0]) { snprintf(err, errlen, "%s", fail); return false; }
++    if (fail[0]) { g_kept_count = 0; snprintf(err, errlen, "%s", fail); return false; }
++    cvars_after_restore();
+     ph.log("restore");
+     if (segs.va_recommitted) util::Log("[snap] %u VirtualAlloc ranges decommitted since the save were committed again", (unsigned)segs.va_recommitted);
+     if (segs.va_skipped || segs.mods_skipped)
 diff --git a/tools/chocoload.cpp b/tools/chocoload.cpp
 index cd72ec5..8a3f453 100644
 --- a/tools/chocoload.cpp
