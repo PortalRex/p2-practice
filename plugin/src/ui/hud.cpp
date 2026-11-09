@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "trainer.h"
@@ -66,7 +67,17 @@ void Draw() {
 		Shadowed(x, py + gfx::FontHeight(Font::Small), Font::Bold, white, s.parts[s.part].name);
 		if (s.attempts > 0) {
 			snprintf(text, sizeof(text), "attempt %d", s.attempts);
-			Shadowed(x, py + gfx::FontHeight(Font::Small) + gfx::FontHeight(Font::Bold), Font::Small, grey, text);
+			int ay = py + gfx::FontHeight(Font::Small) + gfx::FontHeight(Font::Bold);
+			int w = Shadowed(x, ay, Font::Small, grey, text);
+			// the best finish of the session from this part, against the record (what this attempt is up against)
+			const trainer::Result *best = nullptr;
+			for (const trainer::Result &r : s.results)
+				if (r.part == s.part && (!best || r.gap < best->gap)) best = &r;
+			if (best) {
+				int hundredths = static_cast<int>(best->gap * 100 + (best->gap < 0 ? -0.5f : 0.5f));
+				snprintf(text, sizeof(text), "best %c%d.%02d", hundredths < 0 ? '-' : '+', std::abs(hundredths) / 100, std::abs(hundredths) % 100);
+				Shadowed(x + w + ui::Px(14), ay, Font::Small, best->gap <= 0 ? ui::theme::kGreen : ui::theme::kOrange, text);
+			}
 		}
 	}
 

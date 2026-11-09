@@ -25,6 +25,7 @@ add_library(p2practice SHARED
 	src/ui/hud.cpp
 	src/ui/library.cpp
 	src/ui/menu.cpp
+	src/ui/recents.cpp
 	src/ui/widgets.cpp
 )
 target_compile_features(p2practice PRIVATE cxx_std_17)

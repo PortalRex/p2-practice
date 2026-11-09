@@ -25,6 +25,7 @@ bool g_mousePressed = false, g_mouseDown = false;
 int g_mx = 0, g_my = 0;
 size_t g_active = 0;        // the control being dragged (slider, scroll bar), by id
 std::string g_focus;        // the text box being typed into
+std::string g_hint;         // the hint of the control under the mouse, this frame
 int g_repeatKey = -1;       // a key held down in a text box repeats
 DWORD g_repeatAt = 0;
 
@@ -91,6 +92,7 @@ void BeginFrame(bool enabled) {
 	g_mouseDown = enabled && gfx::KeyDown(gfx::kMouseLeft);
 	g_mousePressed = enabled && gfx::KeyPressed(gfx::kMouseLeft);
 	if (!g_mouseDown) g_active = 0;
+	g_hint.clear();
 	// a click anywhere else takes the focus off a text box (the box itself takes it back below)
 	if (g_mousePressed) g_focus.clear();
 }
@@ -182,6 +184,22 @@ bool FindSpot(const std::string &name, Rect &r) {
 	if (it == g_lastSpots.end()) return false;
 	r = it->second;
 	return true;
+}
+
+void HintFor(Rect r, const std::string &text) {
+	if (r.Contains(g_mx, g_my)) g_hint = text;
+}
+void Hint(const std::string &text) { HintFor(Current().last, text); }
+const std::string &HoverHint() { return g_hint; }
+
+void Tooltip(const std::string &text) {
+	int pad = Px(8);
+	int w = gfx::TextWidth(Font::Small, text.c_str()) + 2 * pad, h = gfx::FontHeight(Font::Small) + 2 * pad;
+	// above and right of the cursor, kept on the screen
+	int x = std::clamp(g_mx + Px(14), 0, std::max(0, gfx::ScreenWidth() - w));
+	int y = std::clamp(g_my - h - Px(6), 0, std::max(0, gfx::ScreenHeight() - h));
+	Panel({x, y, w, h}, theme::kHeader, theme::kLine);
+	gfx::Text(x + pad, y + pad, Font::Small, theme::kText, text.c_str());
 }
 
 bool Hovered(Rect r) { return g_enabled && r.Contains(g_mx, g_my); }

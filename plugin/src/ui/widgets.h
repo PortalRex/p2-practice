@@ -65,6 +65,14 @@ std::string Fit(Font font, const std::string &text, int width);
 void Spot(const std::string &name, Rect r);
 bool FindSpot(const std::string &name, Rect &r);
 
+// ---- hints: a line saying what the control under the mouse does (the menu shows it along the bottom) ----
+void Hint(const std::string &text);  // for the control placed last
+void HintFor(Rect r, const std::string &text);
+const std::string &HoverHint();      // this frame's, or ""
+
+// A small box of text next to the mouse (drawn at once: call it after what it may cover)
+void Tooltip(const std::string &text);
+
 // ---- controls ----
 bool Hovered(Rect r);
 bool Clicked(Rect r);             // pressed with the left button inside `r` this frame
