@@ -135,12 +135,16 @@ struct Session {
 	int attempts = 0;
 	std::vector<int> objectLastDriven;  // per route object: the last tick a driven player carried it
 	std::vector<int> useKeyDown;        // players (entity indices) whose use key the trainer is holding this tick
+	std::map<int, int> usePressedAt;    // player (entity index) -> the server tick the trainer last pressed its use key
+	bool jumpKeyDown = false;           // the trainer is holding the jump key of the player at this computer
 	int autoPart = -1;   // prac_auto: start this part by itself once the route's map is up (-1 = not armed)
 	float autoSeconds = -1;  // prac_auto at <seconds>: that moment of the run instead of a part's start (-1 = the part)
 	bool autoWatch = false;
 	std::map<int, int> bestFromPart;  // part an attempt started from -> best ticks to the finish
 	std::map<int, int> bestPart;      // part -> best ticks through it
+	std::vector<Result> results;      // finished attempts, for the menu (the latest kResultsKept)
 };
+constexpr size_t kResultsKept = 100;
 Session g;
 
 constexpr int kHudInterval = 6;  // ticks between text updates
@@ -917,6 +921,12 @@ bool MapMatches() {
 // where the two counts agree, everything the level does by itself happens exactly when it did in the run.
 // kNoClock in co-op (there the level waits for both players before it starts, a different wait every time)
 // and for demos that don't carry the count.
+//
+// (Measured 2026-11-09: in co-op the machinery that starts with the map does run on that count - Bridge Testing's
+// conveyor of light bridges passes the same track within a third of a second of the run's - but the players
+// arrive at a different moment of it: the split-screen bot came in 2.6 s later by that count than the run's
+// partner did, so joining the clock skipped the run's first seconds, Team Retrieval's button among them. The
+// conveyor's bridges are met at another point of their round instead: a known limit.)
 constexpr int kNoClock = INT_MIN;
 constexpr const char *kEndNode = "challenge_mode_end_node";  // the Challenge Mode flags
 int LevelClock() {
@@ -1281,6 +1291,32 @@ int BeforePortalTrip(int handover) {
 	return handover;
 }
 
+// A handover while one of the run's players hangs in place with speed piling up (Conversion Intro: held at a
+// portal's edge for three seconds, the speed growing with every portal shot until it lets go at 2240 u/s) can't
+// be handed over: put where they were with that speed, a player flies off at once instead of staying stuck. Such a
+// handover moves to just before the player stopped there, so the person gets stuck the way the run's player did.
+int BeforeStuck(int handover) {
+	constexpr int kStuckTicks = 6;      // still this long at the handover: stuck, not just turning around
+	constexpr float kStill = 2;         // units a stuck player still moves per tick (the game nudges it to and fro)
+	constexpr float kStuckSpeed = 50;   // the speed it has while not moving (from the first push on)
+	constexpr int kBeforeStuck = 2;
+	auto still = [&](int actor, int tick) {
+		const Sample &s = g.route.At(actor, tick), &before = g.route.At(actor, tick - 1);
+		return s.present && before.present && Distance(s.pos, before.pos) < kStill && Length(s.vel) > kStuckSpeed;
+	};
+	int moved = handover;
+	for (size_t a = 0; a < g.route.actors.size(); a++) {
+		int actor = static_cast<int>(a);
+		bool stuck = handover - kStuckTicks > g.route.firstTick;
+		for (int t = handover - kStuckTicks + 1; stuck && t <= handover; t++) stuck = still(actor, t);
+		if (!stuck) continue;
+		int t = handover;
+		while (t > g.route.firstTick + 1 && still(actor, t)) t--;
+		moved = std::min(moved, t - kBeforeStuck);
+	}
+	return moved;
+}
+
 // Starts an attempt whose handover is at `handover`; reloads the map first when its state is past that point.
 void Start(int handover, bool watch) {
 	// (a snapshot restore asked for a moment ago is still on its way: ChocolateLoading holds one request at a time,
@@ -1295,7 +1331,7 @@ void Start(int handover, bool watch) {
 		engine::Warn("The route is for %s: load it first (%s).\n", g.route.name.c_str(), LoadCommand().c_str());
 		return;
 	}
-	handover = std::clamp(BeforePortalTrip(handover), FirstCommonTick(g.route), g.route.timerEnd - 1);
+	handover = std::clamp(BeforePortalTrip(BeforeStuck(handover)), FirstCommonTick(g.route), g.route.timerEnd - 1);
 	if (RestoreSnapshot(handover, watch)) return;
 	RestoreSpeed();
 	g.watch = watch;
@@ -1332,9 +1368,16 @@ void StartPart(int part, bool watch) {
 // key is pressed with a console command: "+use" for the player at this computer, "cmd2 +use" for the second
 // split-screen player, and released on the next tick. A partner on another computer has no key the host can
 // press: for them the controller is removed, which is the best that can be done from here.
+//
+// The game acts on the key going down, so after a press the key stays up for a whole tick before the next one: a
+// release and a new press within one tick (asked for again on the tick after, the object not yet let go) cancel
+// out, and the key would look held for good - a bot kept a cube for a second that way in Bridge Testing.
 void DropCarried(const Slot &slot) {
 	engine::PlayerState state;
 	if (!engine::GetPlayer(slot.entIndex, state) || state.held < 0) return;
+	auto pressed = g.usePressedAt.find(slot.entIndex);
+	// (the tick count starts again with each level: an older press from before a load doesn't count)
+	if (pressed != g.usePressedAt.end() && engine::TickCount() >= pressed->second && engine::TickCount() - pressed->second < 2) return;
 	if (slot.entIndex == 1) engine::Execute("+use");
 	else if (state.bot) engine::Execute("cmd2 +use");
 	else {
@@ -1342,17 +1385,34 @@ void DropCarried(const Slot &slot) {
 		return;
 	}
 	g.useKeyDown.push_back(slot.entIndex);
+	g.usePressedAt[slot.entIndex] = engine::TickCount();
 }
 
-// Releases the use keys pressed on the previous tick.
+// Releases the use keys pressed on the previous tick (and the jump key: see PressJump).
 void ReleaseUseKeys() {
 	for (int entIndex : g.useKeyDown) engine::Execute(entIndex == 1 ? "-use" : "cmd2 -use");
 	g.useKeyDown.clear();
+	if (g.jumpKeyDown) engine::Execute("-jump");
+	g.jumpKeyDown = false;
 }
 
-// Things a player presses, as opposed to things a player picks up
+// A driven player at this computer presses jump where the run's player did. Moving the player is done by
+// placing it, but a level may listen for the key itself: Container Ride's opening waits for the player to press
+// space (logic_playerproxy OnJump, on every press, in the air too), and without the presses the container ride
+// never starts. (Only the recording player's keys are in a demo, and only the player at this computer can be given
+// a key: a bot moves by being placed, with its own movement off.)
+void PressJump(const Slot &slot, const Sample &now, const Sample &before) {
+	if (slot.entIndex != 1 || now.buttons < 0 || !(now.buttons & p2demo::IN_JUMP)) return;
+	if (before.buttons >= 0 && (before.buttons & p2demo::IN_JUMP)) return;
+	engine::Execute("+jump");
+	g.jumpKeyDown = true;
+}
+
+// Things a player presses, as opposed to things a player picks up: buttons (func_button, prop_button,
+// prop_under_button, func_rot_button) and the co-op levers, whose knob is a func_door_rotating used by the player
+// (Behind the Scenes, Bridge Testing, Industrial Fan)
 bool IsButton(const std::string &className) {
-	return className.find("button") != std::string::npos;
+	return className.find("button") != std::string::npos || className == "func_door_rotating";
 }
 
 // The direction a recorded player looks in
@@ -1366,6 +1426,15 @@ bool g_botPlacedOnly = true;  // development: "prac_debug botmove 1" lets the ga
 
 bool BotPlacedOnly(const Slot &slot) {
 	return g_botPlacedOnly && !slot.human && !g.replaying && g.mode != Mode::CatchUp;
+}
+
+// Whether the run's player went through a portal between the tick before and this one (moved farther than anyone
+// runs or flies in a tick)
+bool PortalTrip(const Route &driver, int actor, int tick) {
+	if (tick <= driver.firstTick) return false;
+	const Sample &before = driver.At(actor, tick - 1), &now = driver.At(actor, tick);
+	constexpr float kFastest = 3500;  // u/s: the game's speed limit
+	return before.present && now.present && Distance(before.pos, now.pos) > 64 + kFastest * driver.tickInterval;
 }
 
 // The game's own movement for each bot: off for those the trainer placed this tick, on for the rest (practice
@@ -1404,7 +1473,19 @@ void DriveSlots() {
 		// the person's screen. The game's movement is switched off for the bot instead and it is put exactly where
 		// the run's player was at every tick; the triggers it stands in still notice it (the game checks them after
 		// every move, whatever the distance). (Not while catching up, where the game skips through the run.)
+		//
+		// A placed bot goes through a portal by being put on the far side: what it carries would be dragged
+		// straight across the level after it, through whatever is in between (Catapult Catch's fizzler). It lets
+		// go a few ticks before (the use key acts only on the bot's next move, and a single tick of being dragged
+		// at that speed is enough to lose the object), and the trainer moves the object along the run's path
+		// through the portal (MoveObjects), as it moves everything nobody holds.
 		if (BotPlacedOnly(g.slots[i])) {
+			constexpr int kDropBeforeTrip = 4;
+			for (int ahead = 1; ahead <= kDropBeforeTrip && tick + ahead <= driver.lastTick; ahead++)
+				if (PortalTrip(driver, actor, tick + ahead)) {
+					DropCarried(g.slots[i]);
+					break;
+				}
 			// (Leaving the ground, the demo shows the run's player standing and barely rising for a tick or two
 			// more, and the game, finding the bot a few units above the floor and not rising fast, would put it
 			// back on the floor: it is given the rise it really makes.)
@@ -1441,6 +1522,7 @@ void DriveSlots() {
 			// no record of what was used: a button in front of them, if there is one
 			engine::Script("::PP.Use(%d,%.4f,%.4f,%.4f)", player, aim.x, aim.y, aim.z);
 		}
+		PressJump(g.slots[i], s, before);
 		// Hands. In co-op the game makes a player who flies fast catch what they are looking at, without any key:
 		// it did so for the run's player, and it does so for the driven one. While the run's player carries
 		// something that is as it should be; as soon as they don't, the driven player lets go.
@@ -1509,6 +1591,9 @@ bool LooksAfterObject(size_t index, int tick) {
 // With `all` (the start of a replayed stretch) every object is tied and put in place.
 void MoveObjects(bool all) {
 	constexpr float kSlack = 4;            // how far an object moving on its own may be from the run's path
+	constexpr float kTurnSlack = 5;        // and how many degrees off the way it lies, once it has stopped turning
+	constexpr float kLaserCubeSlack = 1;   // the same for a reflection cube
+	constexpr float kLaserCubeTurnSlack = 0.5f;
 	constexpr int kLookAtResting = 30;     // ticks between looks at an object that lies still
 	constexpr float kMovingSpeed = 30;     // slower than this, an object is left to settle on its own
 	const Route &driver = Driver();
@@ -1548,11 +1633,14 @@ void MoveObjects(bool all) {
 		constexpr float kPortalTrip = 64;
 		Vec3 velocity{};
 		if (mover.At(tick + 1, after, afterAng) && Distance(pos, after) < kPortalTrip) velocity = {(after.x - pos.x) / dt, (after.y - pos.y) / dt, (after.z - pos.z) / dt};
-		// (how an object lies matters once it has stopped turning: a rolling ball may roll its own way)
-		float slack = (all || carried || released) ? 0 : kSlack;
+		// (how an object lies matters once it has stopped turning: a rolling ball may roll its own way. A
+		// reflection cube is held to the run far more closely: a laser leaves it the way it faces, and Dual Lasers'
+		// cube lying 4 degrees off sent the beam past its catcher.)
+		float slack = (all || carried || released) ? 0 : mover.aimsLasers ? kLaserCubeSlack : kSlack;
+		float turnSlack = turning ? 0 : mover.aimsLasers ? kLaserCubeTurnSlack : kTurnSlack;
 		bool launch = !carried && Launchable(mover.className) && Length(velocity) > kMovingSpeed;
-		engine::Script("::PP.Pose(%d,\"%s\",%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.0f,%.0f,%.0f,%d,%d,%.0f,%d,%d)", id, mover.className.c_str(), pos.x, pos.y, pos.z,
-		               ang.x, ang.y, ang.z, velocity.x, velocity.y, velocity.z, inHands[0], inHands[1], slack, turning ? 0 : 1, launch ? 1 : 0);
+		engine::Script("::PP.Pose(%d,\"%s\",%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f,%d,%d,%.1f,%.1f,%d)", id, mover.className.c_str(), pos.x, pos.y, pos.z,
+		               ang.x, ang.y, ang.z, velocity.x, velocity.y, velocity.z, inHands[0], inHands[1], slack, turnSlack, launch ? 1 : 0);
 	}
 }
 
@@ -1717,7 +1805,17 @@ void Finish(bool atFlags) {
 		if (slot.finished) finish = std::max(finish, slot.finishCursor);
 	int ticks = finish - g.handover;
 	bool best = false;
-	if (!g.replaying) RecordBest(g.bestFromPart, g.segment, ticks, best);
+	if (!g.replaying) {
+		RecordBest(g.bestFromPart, g.segment, ticks, best);
+		Result result;
+		result.part = g.segment;
+		result.seconds = (finish - g.route.timerStart) * g.route.tickInterval;
+		result.gap = (finish - g.route.timerEnd) * g.route.tickInterval;
+		result.best = best;
+		result.flags = atFlags;
+		if (g.results.size() >= kResultsKept) g.results.erase(g.results.begin());
+		g.results.push_back(result);
+	}
 	// (the clock and the gap stay up with their final values; the flash says what ended the attempt)
 	UpdateHud(kLingerSeconds);
 	Flash(4, std::string(atFlags ? "FLAGS" : "FINISH") + kDot + ShowAt(finish) +
@@ -1902,8 +2000,11 @@ void CheckHandover() {
 		engine::PlayerState state;
 		if (!slot.human || !engine::GetPlayer(slot.entIndex, state)) continue;
 		const Sample &expected = g.route.At(static_cast<int>(a), next);
-		engine::Debug("handover: player %d is %.1f units and %.1f u/s from the run", slot.entIndex, Distance(state.origin, expected.pos),
-		              Distance(state.velocity, VelocityAt(g.route, static_cast<int>(a), next)));
+		// (the speed against the run's a tick either side too, the nearest of the three: a demo now and then
+		// holds a speed that is off for one tick - half of those around it in Cooperative Bridges)
+		float speedOff = Distance(state.velocity, VelocityAt(g.route, static_cast<int>(a), next));
+		for (int d : {-1, 1}) speedOff = std::min(speedOff, Distance(state.velocity, VelocityAt(g.route, static_cast<int>(a), next + d)));
+		engine::Debug("handover: player %d is %.1f units and %.1f u/s from the run", slot.entIndex, Distance(state.origin, expected.pos), speedOff);
 	}
 }
 
@@ -2073,6 +2174,7 @@ void CmdLoad(const sdk::CCommand &args) {
 	g.replaying = false;
 	g.bestFromPart.clear();
 	g.bestPart.clear();
+	g.results.clear();
 	g.attempts = 0;
 	g.snapshotHandover = -1;
 	g.worldReached = g.route.firstTick - 1;
@@ -2369,6 +2471,19 @@ void CmdDebug(const sdk::CCommand &args) {
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "botmove")) {
 		g_botPlacedOnly = atoi(args.Arg(2)) == 0;
+		return;
+	}
+	// prac_debug result <part> <seconds> [flags]: a finished attempt as if played, for the menu's session panel
+	if (args.ArgC() >= 4 && !strcmp(args.Arg(1), "result") && g.hasRoute) {
+		Result result;
+		result.part = std::clamp(atoi(args.Arg(2)) - 1, 0, static_cast<int>(g.route.segments.size()) - 1);
+		result.seconds = static_cast<float>(atof(args.Arg(3)));
+		result.gap = result.seconds - (g.route.timerEnd - g.route.timerStart) * g.route.tickInterval;
+		result.flags = args.ArgC() >= 5 && atoi(args.Arg(4)) != 0;
+		int ticks = static_cast<int>(std::lround(result.seconds / g.route.tickInterval));
+		RecordBest(g.bestFromPart, result.part, ticks, result.best);
+		g.results.push_back(result);
+		g.attempts++;
 		return;
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "portallead")) {
@@ -2668,6 +2783,7 @@ Status CurrentStatus() {
 	for (const route::Segment &segment : r.segments) s.parts.push_back({segment.name, r.TimeAt(segment.startTick), r.TimeAt(segment.endTick)});
 	s.mapLoaded = MapMatches();
 	s.attempts = g.attempts;
+	s.results = g.results;
 	static const char *const modes[] = {"idle", "reloading", "waiting", "setting up", "lead-in", "run", "watch", "done"};
 	s.mode = modes[static_cast<int>(g.mode)];
 	s.active = g.mode != Mode::Idle;

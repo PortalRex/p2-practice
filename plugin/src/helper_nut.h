@@ -83,9 +83,11 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	local bestDot = 0.5
 	local nearest = null
 	local nearestDistance = 0.0
+	local count = 0
 	local e = null
 	while (e = Entities.FindByClassname(e, classname)) {
 		if (name != "" && e.GetName() != name) continue
+		count++
 		foreach (view in views) {
 			local dot = LooksAt(view[0], view[1], e)
 			if (dot > bestDot) {
@@ -99,8 +101,10 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 			nearestDistance = distance
 		}
 	}
-	// (a thing the run named, with nothing in view: the nearest of that name, as long as it is within reach)
-	if (best == null && name != "" && nearest != null && nearestDistance <= reach) best = nearest
+	// (a thing the run named, with nothing in view: the nearest of that name, as long as it is within reach. The
+	// only one of its kind in the level: that one, wherever it is - the run did use it, from wherever the game
+	// let it (Fling Block's restart button, used by orange from across the room))
+	if (best == null && nearest != null && ((name != "" && nearestDistance <= reach) || count == 1)) best = nearest
 	if (best != null) EntFireByHandle(best, "Use", "", 0, p, p)
 }
 
@@ -236,16 +240,17 @@ R"nut(
 // numbers of what the people in the game have in their hands (-1: nothing): those are never touched, since
 // moving an object out of a player's hands breaks the game's physics. With `launch`, an object that is put
 // in place is given the run's speed too (the physics carries it on from there).
-::PP.Pose <- function(id, classname, x, y, z, pitch, yaw, roll, vx, vy, vz, held1, held2, slack, turnMatters, launch) {
+// (turnSlack: how many degrees off the way it lies may be; 0 when that doesn't matter)
+::PP.Pose <- function(id, classname, x, y, z, pitch, yaw, roll, vx, vy, vz, held1, held2, slack, turnSlack, launch) {
 	local e = Claim(id, classname, x, y, z)
 	if (e == null) return
 	local index = e.entindex()
 	if (index == held1 || index == held2) return
 	local spot = Vector(x, y, z)
 	if (slack > 0 && (e.GetOrigin() - spot).Length() <= slack) {
-		if (!turnMatters) return
+		if (turnSlack <= 0) return
 		local angles = e.GetAngles()
-		if (AngleApart(angles.x, pitch) < 5 && AngleApart(angles.y, yaw) < 5 && AngleApart(angles.z, roll) < 5) return
+		if (AngleApart(angles.x, pitch) < turnSlack && AngleApart(angles.y, yaw) < turnSlack && AngleApart(angles.z, roll) < turnSlack) return
 	}
 	e.SetOrigin(spot)
 	e.SetAngles(pitch, yaw, roll)

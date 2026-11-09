@@ -58,6 +58,15 @@ struct Part {
 	float start = 0, end = 0;  // seconds of the run's time
 };
 
+// A finished attempt (practice, not watching or replaying)
+struct Result {
+	int part = 0;          // the part it started from
+	float seconds = 0;     // its time on the run's clock
+	float gap = 0;         // against the record's time (negative: faster)
+	bool best = false;     // the best from that part so far, when it finished
+	bool flags = false;    // ended at the Challenge Mode flags
+};
+
 struct Status {
 	// the loaded run
 	bool loaded = false;
@@ -81,6 +90,7 @@ struct Status {
 	bool finished = false;
 	float speed = -1, recordSpeed = -1;  // ground speeds; -1 when not shown
 	std::string flash;        // the last message flashed (finish, part times), while it is up
+	std::vector<Result> results;  // this run's finished attempts, oldest first (the latest 100)
 };
 Status CurrentStatus();
 

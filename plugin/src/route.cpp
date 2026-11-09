@@ -202,6 +202,8 @@ void ApplyHeld(const p2demo::PlayerTrack &track, int tickOffset, int firstTick, 
 const char *MoverClass(const std::string &serverClass, const std::string &model) {
 	// (a frankenturret is networked as a plain physics prop)
 	if (serverClass == "CPhysicsProp" && model.find("npcs/monsters/monster_") != std::string::npos) return "prop_monster_box";
+	// (Wheatley's bombs are networked as paint bombs, with the football's model)
+	if (serverClass == "CPropPaintBomb" && model.find("futbol") != std::string::npos) return "prop_exploding_futbol";
 	static const struct {
 		const char *server, *map;
 	} classes[] = {
@@ -211,7 +213,7 @@ const char *MoverClass(const std::string &serverClass, const std::string &model)
 		{"CPhysicsProp", "prop_physics"},
 		{"CPhysicsPropMultiplayer", "prop_physics_multiplayer"},
 		{"CPropGlassFutbol", "prop_glass_futbol"},
-		{"CNPC_Personality_Core", "npc_personality_core"},
+		{"CNPC_PersonalityCore", "npc_personality_core"},  // (as the game networks it: no underscore before Core)
 		{"CPropPaintBomb", "prop_paint_bomb"},
 	};
 	for (const auto &c : classes)
@@ -506,9 +508,14 @@ bool Mover::At(int tick, Vec3 &pos, Vec3 &ang) const {
 	if (!a.present) return false;
 	pos = a.pos;
 	ang = a.ang;
-	// Snapshots come a few ticks apart: between two close ones the object was moving, so glide between them
+	// Snapshots come a few ticks apart: between two close ones the object was moving, so glide between them. Not
+	// across a trip through a portal (farther than anything flies in the time): halfway between the two portals is
+	// somewhere in the middle of the level, where a cube put for a tick may land in a fizzler or a pit's respawn
+	// trigger (Catapult Catch). It stays at the entrance until it shows at the exit.
 	constexpr int kSnapshotGap = 6;
-	if (lo + 1 < keys.size() && keys[lo + 1].present && keys[lo + 1].tick - a.tick <= kSnapshotGap) {
+	constexpr float kMaxUnitsPerTick = 80;  // (faster than the game lets anything fly, 3500 u/s at 60 ticks)
+	if (lo + 1 < keys.size() && keys[lo + 1].present && keys[lo + 1].tick - a.tick <= kSnapshotGap &&
+	    Distance(a.pos, keys[lo + 1].pos) <= kMaxUnitsPerTick * (keys[lo + 1].tick - a.tick)) {
 		const MoverKey &b = keys[lo + 1];
 		float t = static_cast<float>(tick - a.tick) / (b.tick - a.tick);
 		pos = Lerp(a.pos, b.pos, t);
@@ -831,6 +838,7 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 		Mover mover;
 		mover.entIndex = track.entIndex;
 		mover.className = mapClass;
+		mover.aimsLasers = model.find("reflection_cube") != std::string::npos;
 		for (const auto &k : track.keys) {
 			if (k.parent >= 0 && !k.removed) continue;
 			MoverKey key;

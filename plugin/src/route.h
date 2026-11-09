@@ -46,6 +46,7 @@ struct MoverKey {
 struct Mover {
 	int entIndex = 0;       // the object's entity index in the demo (map objects keep theirs from load to load)
 	std::string className;  // the entity class in the map: prop_weighted_cube, npc_portal_turret_floor, ...
+	bool aimsLasers = false;  // a reflection cube: a laser leaves it the way it faces, so how it lies matters to the degree
 	std::vector<MoverKey> keys;  // one per change, in tick order
 
 	// Where the object is at `tick`; false before it first appears or once it is gone
