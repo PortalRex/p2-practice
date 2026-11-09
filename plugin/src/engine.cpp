@@ -637,6 +637,27 @@ bool SetMovementSpeed(int entIndex, float scale) {
 	return true;
 }
 
+// IShaderAPI::ResetRenderState(bool bFullReset), slot 144 of ShaderApi029 in Portal 2's shaderapidx9.dll: the
+// slot holds an adjustor thunk (sub ecx,0x248; jmp CShaderAPIDx8::ResetRenderState), checked byte for byte so a
+// different build or another shader API (shaderapivk with -vulkan) is left alone.
+bool ResetRenderState() {
+	static void *shaderApi = nullptr;
+	static bool looked = false;
+	if (!looked) {
+		looked = true;
+		HMODULE module = GetModuleHandleA("shaderapidx9.dll");
+		using Factory = void *(__cdecl *)(const char *, int *);
+		auto factory = module ? reinterpret_cast<Factory>(GetProcAddress(module, "CreateInterface")) : nullptr;
+		void *api = factory ? factory("ShaderApi029", nullptr) : nullptr;
+		static const unsigned char kThunk[] = {0x81, 0xE9, 0x48, 0x02, 0x00, 0x00, 0xE9};
+		if (api && memcmp((*static_cast<void ***>(api))[144], kThunk, sizeof(kThunk)) == 0) shaderApi = api;
+		else Warn("The renderer couldn't be reset after save states (not Portal 2's DirectX 9 shader API).\n");
+	}
+	if (!shaderApi) return false;
+	reinterpret_cast<void(__thiscall *)(void *, bool)>((*static_cast<void ***>(shaderApi))[144])(shaderApi, true);
+	return true;
+}
+
 bool SetChallengeSeconds(int entIndex, float seconds) {
 	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;
 	if (!g_globals || !g_globals->edicts || g_player.challengeSeconds < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;

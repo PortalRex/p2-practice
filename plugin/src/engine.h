@@ -95,6 +95,8 @@ void SetGodMode(int entIndex, bool on);
 // Scales how far the game's own movement takes a player each tick (m_flLaggedMovementValue: 1 normal, 0 not at
 // all), on the server and in the player's predicted copy on screen alike. False when it can't be set.
 bool SetMovementSpeed(int entIndex, float scale);
+// Has the shader API send all of its render state to the graphics card again (false: not on DirectX 9)
+bool ResetRenderState();
 // Sets a player's Challenge Mode clock (the time in the corner of the screen) to `seconds`
 bool SetChallengeSeconds(int entIndex, float seconds);
 
