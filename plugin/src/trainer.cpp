@@ -2007,14 +2007,17 @@ void TickLeadIn() {
 void TickWatch() {
 	SyncChallengeClock();
 	TakeSnapshotIfDue();
-	WatchFlags();
+	bool atFlags = WatchFlags();
 	DriveSlots();
 	MoveObjects(false);
 	PlacePortals();
 	MoveGhosts();
 	MarkWorld();
 	if (g.cursor % kHudInterval == 0) UpdateHud();
-	if (++g.cursor > g.route.timerEnd) {
+	// (the run's players reaching the flags is its end too: the finish board pauses the game right after, so a last
+	// tick or two of the run may never come - Ceiling Button's ride hung there, one tick short)
+	constexpr int kFlagsBeforeEnd = 3;
+	if (++g.cursor > g.route.timerEnd || (atFlags && g.cursor >= g.route.timerEnd - kFlagsBeforeEnd)) {
 		Flash(3, "END OF THE RECORD" + std::string(kDot) + ShowAt(g.route.timerEnd));
 		engine::Print("Watched the run to its end (%s).%c", ShowAt(g.route.timerEnd).c_str(), 10);
 		g.mode = Mode::Done;
