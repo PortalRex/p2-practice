@@ -1,4 +1,4 @@
-"""Runs test runs through a running test copy of Portal 2 and reports, per map, whether practice works on it.
+﻿"""Runs test runs through a running test copy of Portal 2 and reports, per map, whether practice works on it.
 
     python maptest.py --job t3 [--port 2141] [--only Buttons] [--cm] [--out build/test/matrix.json]
 
@@ -36,6 +36,8 @@ COSMETIC = {
     'env_shake', 'ambient_music', 'info_overlay_accessor', 'vgui_movie_display', 'logic_autosave',
 }
 COSMETIC_INPUTS = {'EnableRefire', 'CancelPending', 'SetDefaultAnimation', 'Skin'}
+# Script functions the game's maps call that its own scripts don't define (checked on fresh levels, no plugin)
+GAME_SCRIPT_ERRORS = {'mpcoopfling1buttons', 'TrustFlingCatapultMalfunctionEnd'}
 
 
 class Console:
@@ -399,7 +401,9 @@ def run_case(console, case, state):
         with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
             f.seek(log_start)
             text = f.read()
-        result['script_errors'] = text.count('AN ERROR HAS OCCURED')
+        # (less the game's own: dialogue functions its maps call that its scripts never define, which fail the same
+        # with no plugin loaded)
+        result['script_errors'] = text.count('AN ERROR HAS OCCURED') - sum(text.count(f"[the index '{name}' does not exist]") for name in GAME_SCRIPT_ERRORS)
         if result['script_errors']:
             problems.append(f"{result['script_errors']} VScript errors")
     if not console.alive:
@@ -416,13 +420,14 @@ def main():
     ap.add_argument('--only', default='')
     ap.add_argument('--cases', default='cases.json', help='the case list in demos/matrix (cases_all.json: every map)')
     ap.add_argument('--skip', type=int, default=0, help='start at this case (to carry on after a stop)')
+    ap.add_argument('--board', default='', help='only this board (exact name)')
     ap.add_argument('--out', default=os.path.join(ROOT, 'build', 'test', 'matrix.json'))
     args = ap.parse_args()
 
     with open(os.path.join(ROOT, 'build', 'test', args.job, 'state.json'), encoding='utf-8-sig') as f:
         state = json.load(f)
     with open(os.path.join(MATRIX, args.cases), encoding='utf-8') as f:
-        cases = [c for c in json.load(f) if args.only.lower() in (c['board'] + c['group']).lower()][args.skip:]
+        cases = [c for c in json.load(f) if args.only.lower() in (c['board'] + c['group']).lower() and (not args.board or c['board'] == args.board)][args.skip:]
     console = Console(args.port, args.password)
     results = []
     for case in cases:
