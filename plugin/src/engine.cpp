@@ -25,6 +25,13 @@ void *g_commandVtable = nullptr;  // an engine ConCommand's vtable, shared by ou
 std::vector<sdk::ConCommand *> g_commands;
 sdk::ConVar *g_svCheats = nullptr;
 
+// The hiding flags Init took off cvars, to put back should Init give up
+struct UnhiddenCvar {
+	sdk::ConVar *var;
+	int flags;  // (the ones taken off)
+};
+std::vector<UnhiddenCvar> g_unhidden;
+
 std::string g_scriptBatch;
 
 // Development trace: with the environment variable P2PRACTICE_LOG set to a file path, everything the plugin
@@ -74,6 +81,8 @@ sdk::ServerClass *g_dynamicPropClass = nullptr;
 int g_poseParameterOffset = -1;
 
 constexpr int kMaxEdicts = 2048;
+constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;  // "look at every field of it when sending"
+constexpr int kGetClassName = 3;  // IServerNetworkable's slot
 constexpr unsigned kHandleIndexMask = 0xFFF;  // an entity handle is its index in the low 12 bits, a serial above
 
 sdk::ServerClass *FindServerClass(void *serverGame, const char *name) {
@@ -198,6 +207,34 @@ bool Tokenize(sdk::CCommand &cmd, const char *name, const char *arguments) {
 	return cmd.argc > 0;
 }
 
+// Takes the flags that hide a cvar from the console off it, remembering which of them it had
+void Unhide(sdk::ConVar *var) {
+	constexpr int kFcvarDevelopmentOnly = 1 << 1, kFcvarHidden = 1 << 4;
+	int hiding = var->flags & (kFcvarDevelopmentOnly | kFcvarHidden);
+	if (!hiding) return;
+	var->flags &= ~hiding;
+	g_unhidden.push_back({var, hiding});
+}
+
+// Only for an Init that gives up. Unloading leaves the cvars usable: SAR makes the same ones usable, and when it
+// was loaded after this plugin it found them so already and relies on that from then on.
+void HideCvarsAgain() {
+	for (const UnhiddenCvar &unhidden : g_unhidden) unhidden.var->flags |= unhidden.flags;
+	g_unhidden.clear();
+}
+
+void CloseTrace() {
+	if (g_trace) fclose(g_trace);
+	g_trace = nullptr;
+}
+
+// Init gave up: nothing it changed or opened stays that way
+bool FailInit() {
+	HideCvarsAgain();
+	CloseTrace();
+	return false;
+}
+
 void Dispatch(sdk::ConCommand *command, const sdk::CCommand &args) {
 	if (command->usingNewCommandCallback && !command->usingCommandCallbackInterface && command->callback)
 		command->callback(args);
@@ -221,7 +258,7 @@ bool Init(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn server
 	if (!g_cvar || !g_engineClient || !serverGame || !g_playerInfoManager) {
 		Warn("This game doesn't offer the interfaces P2 Practice needs (cvar %p, client %p, server %p, players %p).\n",
 		     g_cvar, g_engineClient, serverGame, g_playerInfoManager);
-		return false;
+		return FailInit();
 	}
 	g_globals = CallVirtual<sdk::GlobalVars *>(g_playerInfoManager, sdk::slot::GetGlobalVars);
 
@@ -231,21 +268,21 @@ bool Init(sdk::CreateInterfaceFn interfaceFactory, sdk::CreateInterfaceFn server
 	// answers "Unknown command" to it unless something has made it usable (SAR does). Without its two hiding flags
 	// it is an ordinary cvar, which the trainer sets when it loads a level in a run's mode.
 	// host_thread_mode is hidden the same way; the trainer keeps it off with save states (see SingleThreadedRendering).
-	constexpr int kFcvarDevelopmentOnly = 1 << 1, kFcvarHidden = 1 << 4;
+	// (They stay usable when the plugin is unloaded: see HideCvarsAgain.)
 	for (const char *name : {"sv_bonus_challenge", "host_thread_mode"}) {
 		void *base = FindCommandBase(name);
 		if (!base || IsCommand(base)) continue;
 		auto *var = static_cast<sdk::ConVar *>(base);
-		var->flags &= ~(kFcvarDevelopmentOnly | kFcvarHidden);
-		if (var->parent) var->parent->flags &= ~(kFcvarDevelopmentOnly | kFcvarHidden);
+		Unhide(var);
+		if (var->parent && var->parent != var) Unhide(var->parent);
 	}
 	if (!g_globals || !g_commandVtable || !g_svCheats || !FindCommandBase("script")) {
 		Warn("Not a game P2 Practice understands (no VScript console or cvar system as expected).\n");
-		return false;
+		return FailInit();
 	}
 	if (!FindPlayerOffsets(serverGame)) {
 		Warn("Couldn't find the player's networked fields; this game version isn't supported.\n");
-		return false;
+		return FailInit();
 	}
 	FindPropFields(serverGame);  // (optional: without them ghosts aren't animated)
 	return true;
@@ -261,8 +298,8 @@ void Shutdown() {
 	}
 	g_commands.clear();
 	g_scriptBatch.clear();
-	if (g_trace) fclose(g_trace);
-	g_trace = nullptr;
+	g_unhidden.clear();
+	CloseTrace();
 }
 
 void Print(const char *format, ...) {
@@ -390,9 +427,21 @@ const char *MapName() {
 	return g_globals && g_globals->mapname ? g_globals->mapname : "";
 }
 
+// The engine gives the folder in Windows' ANSI code page; the plugin's paths are UTF-8 (std::filesystem::u8path
+// throws on anything else), so it is converted here, once for every caller.
 std::string GameDirectory() {
 	const char *dir = g_engineClient ? CallVirtual<const char *>(g_engineClient, sdk::slot::GetGameDirectory) : nullptr;
-	return dir ? dir : "";
+	if (!dir || !*dir) return "";
+	int wideLength = MultiByteToWideChar(CP_ACP, 0, dir, -1, nullptr, 0);
+	if (wideLength <= 0) return "";
+	std::vector<wchar_t> wide(static_cast<size_t>(wideLength));
+	MultiByteToWideChar(CP_ACP, 0, dir, -1, wide.data(), wideLength);
+	int length = WideCharToMultiByte(CP_UTF8, 0, wide.data(), -1, nullptr, 0, nullptr, nullptr);
+	if (length <= 0) return "";
+	std::string utf8(static_cast<size_t>(length), '\0');
+	WideCharToMultiByte(CP_UTF8, 0, wide.data(), -1, utf8.data(), length, nullptr, nullptr);
+	utf8.resize(static_cast<size_t>(length) - 1);  // (the count included the terminator)
+	return utf8;
 }
 
 bool RecordingDemo() {
@@ -400,7 +449,7 @@ bool RecordingDemo() {
 }
 
 // Prints every nested table on the way to a networked field, with the offset each adds.
-bool PrintPropPath(const sdk::SendTable *table, const char *name, int depth = 0) {
+static bool PrintPropPath(const sdk::SendTable *table, const char *name, int depth = 0) {
 	if (!table || !table->props || depth > 12) return false;
 	for (int i = 0; i < table->propCount; i++) {
 		const sdk::SendProp &prop = table->props[i];
@@ -552,6 +601,12 @@ void HoldClientCommands(ClientCommandFate (*hold)(const char *command)) {
 	if (g_clientCommandSlot || !g_engineServer) return;
 	void **slot = *static_cast<void ***>(g_engineServer) + sdk::slot::ClientCommand;
 	void *original = *slot;
+	// (already there after a reload, in a copy of the table another plugin made while the hook was in it: the
+	// engine's own function is still the one remembered then, and taking the hook for it would call itself)
+	if (original == reinterpret_cast<void *>(&HookedClientCommand)) {
+		if (g_clientCommand) g_clientCommandSlot = slot;
+		return;
+	}
 	if (!WriteSlot(slot, reinterpret_cast<void *>(&HookedClientCommand))) return;
 	g_clientCommand = reinterpret_cast<ClientCommandFn>(original);
 	g_clientCommandSlot = slot;
@@ -603,7 +658,6 @@ bool SendTestChat(const char *text) {
 }
 
 bool EntityExists(const char *className) {
-	constexpr int kGetClassName = 3;  // IServerNetworkable
 	if (!g_globals || !g_globals->edicts) return false;
 	for (int i = g_globals->maxClients + 1; i < g_globals->maxEntities && i < kMaxEdicts; i++) {
 		const sdk::Edict &edict = g_globals->edicts[i];
@@ -627,7 +681,6 @@ void SetGodMode(int entIndex, bool on) {
 }
 
 bool SetMovementSpeed(int entIndex, float scale) {
-	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;  // "look at every field of it when sending"
 	if (!g_globals || !g_globals->edicts || g_player.laggedMovement < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;
 	sdk::Edict &edict = g_globals->edicts[entIndex];
 	if (!edict.InUse()) return false;
@@ -668,7 +721,6 @@ bool ResetRenderState() {
 }
 
 bool SetEyeHeight(int entIndex, float height) {
-	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;
 	if (!g_globals || !g_globals->edicts || g_player.viewOffsetZ < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;
 	sdk::Edict &edict = g_globals->edicts[entIndex];
 	if (!edict.InUse()) return false;
@@ -682,7 +734,6 @@ bool SetEyeHeight(int entIndex, float height) {
 }
 
 bool SetChallengeSeconds(int entIndex, float seconds) {
-	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;
 	if (!g_globals || !g_globals->edicts || g_player.challengeSeconds < 0 || entIndex < 1 || entIndex > g_globals->maxClients) return false;
 	sdk::Edict &edict = g_globals->edicts[entIndex];
 	if (!edict.InUse()) return false;
@@ -705,9 +756,9 @@ bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary) {
 }
 
 bool SetPoseParameters(int entIndex, const float values[kPoseParameters]) {
-	constexpr int kEdictChanged = 1 << 0, kEdictFullyChanged = 1 << 8;  // "look at every field of it when sending"
-	constexpr int kGetServerClass = 1;                                  // IServerNetworkable
-	if (!g_globals || !g_globals->edicts || g_poseParameterOffset < 0 || entIndex <= g_globals->maxClients || entIndex >= kMaxEdicts) return false;
+	constexpr int kGetServerClass = 1;  // IServerNetworkable
+	if (!g_globals || !g_globals->edicts || g_poseParameterOffset < 0) return false;
+	if (entIndex <= g_globals->maxClients || entIndex >= kMaxEdicts || entIndex >= g_globals->maxEntities) return false;
 	sdk::Edict &edict = g_globals->edicts[entIndex];
 	if (!edict.InUse() || !edict.networkable) return false;
 	if (CallVirtual<sdk::ServerClass *>(edict.networkable, kGetServerClass) != g_dynamicPropClass) return false;
@@ -755,7 +806,6 @@ bool g_marksTaken = false;
 }  // namespace
 
 int NoteEdictChanges(char *out, size_t size) {
-	constexpr int kGetClassName = 3;  // IServerNetworkable
 	if (!g_globals || !g_globals->edicts) return 0;
 	int changes = 0;
 	size_t used = 0;

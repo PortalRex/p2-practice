@@ -5,8 +5,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cwchar>
 #include <functional>
 #include <map>
+#include <string>
+#include <vector>
 
 namespace ui {
 namespace {
@@ -45,22 +48,54 @@ Layout &Current() {
 
 int CenterY(Rect r, Font font) { return r.y + (r.h - gfx::FontHeight(font)) / 2; }
 
+// The most a text box holds, in bytes: room for any folder's path, and little enough to measure every frame
+constexpr size_t kMostText = 512;
+
+bool ContinuesChar(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }  // (not the first byte of a UTF-8 character)
+
+// Where the UTF-8 characters of `text` begin, and its end
+std::vector<size_t> CharStarts(const std::string &text) {
+	std::vector<size_t> starts;
+	for (size_t i = 0; i < text.size(); i++)
+		if (!ContinuesChar(text[i])) starts.push_back(i);
+	starts.push_back(text.size());
+	return starts;
+}
+
+void DropLastChar(std::string &text) {
+	while (!text.empty()) {
+		char last = text.back();
+		text.pop_back();
+		if (!ContinuesChar(last)) break;
+	}
+}
+
+// Adds to a text box's text as much of `more` as it has room for, in whole characters
+void Append(std::string &text, const std::string &more) {
+	if (text.size() >= kMostText) return;
+	size_t count = std::min(more.size(), kMostText - text.size());
+	while (count > 0 && count < more.size() && ContinuesChar(more[count])) count--;
+	text.append(more, 0, count);
+}
+
+// The clipboard's text as one line: no line ends, tabs or other control characters (the menu's files keep a line
+// per entry, with tabs between its fields), and no more of it than a text box holds
 std::string Clipboard() {
 	std::string out;
 	if (!OpenClipboard(nullptr)) return out;
 	if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
 		if (auto *wide = static_cast<const wchar_t *>(GlobalLock(data))) {
-			int size = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
-			if (size > 1) {
-				out.resize(size);
-				WideCharToMultiByte(CP_UTF8, 0, wide, -1, &out[0], size, nullptr, nullptr);
-				out.resize(size - 1);
+			int count = static_cast<int>(wcsnlen(wide, kMostText));
+			int size = count > 0 ? WideCharToMultiByte(CP_UTF8, 0, wide, count, nullptr, 0, nullptr, nullptr) : 0;
+			if (size > 0) {
+				out.resize(static_cast<size_t>(size));
+				WideCharToMultiByte(CP_UTF8, 0, wide, count, &out[0], size, nullptr, nullptr);
 			}
 			GlobalUnlock(data);
 		}
 	}
 	CloseClipboard();
-	out.erase(std::remove_if(out.begin(), out.end(), [](char c) { return c == '\r' || c == '\n'; }), out.end());
+	out.erase(std::remove_if(out.begin(), out.end(), [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7F; }), out.end());
 	return out;
 }
 
@@ -149,15 +184,17 @@ void Panel(Rect r, Color fill, Color border) {
 std::string Fit(Font font, const std::string &text, int width) {
 	if (width <= 0) return "";
 	if (gfx::TextWidth(font, text.c_str()) <= width) return text;
-	std::string cut = text;
-	while (!cut.empty()) {
-		// (drop whole UTF-8 characters)
-		do cut.pop_back();
-		while (!cut.empty() && (static_cast<unsigned char>(cut.back()) & 0xC0) == 0x80);
-		if (!cut.empty() && (static_cast<unsigned char>(cut.back()) & 0x80)) cut.pop_back();
-		if (gfx::TextWidth(font, (cut + "...").c_str()) <= width) return cut + "...";
+	// The longest beginning, in whole characters, that fits with "..." after it. A longer beginning is never
+	// narrower, so it is found by halving: `fits` characters do fit (none at first), `tooMany` don't.
+	std::vector<size_t> starts = CharStarts(text);
+	size_t fits = 0, tooMany = starts.size() - 1;
+	while (fits + 1 < tooMany) {
+		size_t middle = (fits + tooMany) / 2;
+		if (gfx::TextWidth(font, (text.substr(0, starts[middle]) + "...").c_str()) <= width) fits = middle;
+		else tooMany = middle;
 	}
-	return "";
+	if (fits == 0) return gfx::TextWidth(font, "...") <= width ? "..." : "";
+	return text.substr(0, starts[fits]) + "...";
 }
 
 int TextIn(int x, int y, int width, Font font, Color color, const std::string &text) {
@@ -311,7 +348,7 @@ void ApplyEdit(float &value, float lo, float hi) {
 }
 
 // The typed value of an editable slider, in `box`; true while it is being typed
-bool EditValue(const std::string &focusId, Rect box, float &value, float lo, float hi, const char *format) {
+bool EditValue(const std::string &focusId, Rect box, float &value, float lo, float hi) {
 	// (focus taken away by a click elsewhere: what was typed is set)
 	if (g_editing == focusId && g_focus != focusId) {
 		ApplyEdit(value, lo, hi);
@@ -360,7 +397,6 @@ bool EditValue(const std::string &focusId, Rect box, float &value, float lo, flo
 	}
 	int w = gfx::Text(box.x + pad, y, Font::Normal, theme::kText, g_edited.c_str());
 	if ((GetTickCount() / 500) % 2 == 0) gfx::FillRect(box.x + pad + w + Px(1), box.y + Px(7), Px(2), box.h - Px(14), theme::kText);
-	(void)format;
 	return true;
 }
 }  // namespace
@@ -374,7 +410,7 @@ bool Slider(const std::string &caption, float &value, float lo, float hi, const 
 	if (editable) {
 		Rect box{r.x + r.w - textWidth, r.y + Px(2), textWidth, r.h - Px(4)};
 		Spot("value:" + caption, box);
-		typing = EditValue("slider:" + caption, box, value, lo, hi, format);
+		typing = EditValue("slider:" + caption, box, value, lo, hi);
 		if (!typing && Hovered(box)) Panel(box, theme::kFieldHover, theme::kLine);
 	}
 	char text[32];
@@ -405,15 +441,11 @@ bool TextBox(const char *id, std::string &text, const std::string &placeholder) 
 	bool entered = false;
 	if (focused && g_enabled) {
 		bool control = gfx::KeyDown(gfx::kKeyLControl) || gfx::KeyDown(gfx::kKeyRControl);
-		if (control && gfx::KeyPressed(gfx::kKeyA + ('v' - 'a'))) text += Clipboard();
-		else if (!control) text += gfx::TypedText();
+		if (control && gfx::KeyPressed(gfx::kKeyA + ('v' - 'a'))) Append(text, Clipboard());
+		else if (!control) Append(text, gfx::TypedText());
 		if (Repeats(gfx::kKeyBackspace) && !text.empty()) {
 			if (control) text.clear();
-			else {
-				do text.pop_back();
-				while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80);
-				if (!text.empty() && (static_cast<unsigned char>(text.back()) & 0x80)) text.pop_back();
-			}
+			else DropLastChar(text);
 		}
 		if (gfx::KeyPressed(gfx::kKeyEnter) || gfx::KeyPressed(gfx::kKeyPadEnter)) entered = true;
 		if (gfx::KeyPressed(gfx::kKeyEscape)) g_focus.clear();
@@ -422,9 +454,20 @@ bool TextBox(const char *id, std::string &text, const std::string &placeholder) 
 	int y = CenterY(r, Font::Normal);
 	if (text.empty() && !focused) TextIn(r.x + pad, y, r.w - 2 * pad, Font::Normal, theme::kFaint, placeholder);
 	else {
-		// the end of the text stays in view
+		// The end of the text stays in view: the longest ending, in whole characters, that fits. (Found by
+		// halving, as in Fit: from `tooEarly` it doesn't fit, from `fits` it does.)
+		int room = r.w - 2 * pad - Px(4);
 		std::string shown = text;
-		while (!shown.empty() && gfx::TextWidth(Font::Normal, shown.c_str()) > r.w - 2 * pad - Px(4)) shown.erase(0, 1);
+		if (gfx::TextWidth(Font::Normal, text.c_str()) > room) {
+			std::vector<size_t> starts = CharStarts(text);
+			size_t tooEarly = 0, fits = starts.size() - 1;
+			while (tooEarly + 1 < fits) {
+				size_t middle = (tooEarly + fits) / 2;
+				if (gfx::TextWidth(Font::Normal, text.c_str() + starts[middle]) <= room) fits = middle;
+				else tooEarly = middle;
+			}
+			shown = text.substr(starts[fits]);
+		}
 		int w = gfx::Text(r.x + pad, y, Font::Normal, theme::kText, shown.c_str());
 		if (focused && (GetTickCount() / 500) % 2 == 0) gfx::FillRect(r.x + pad + w + Px(1), r.y + Px(7), Px(2), r.h - Px(14), theme::kText);
 	}

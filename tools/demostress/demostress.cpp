@@ -74,7 +74,7 @@ struct Totals {
 	size_t parses = 0;
 	size_t accepted = 0;         // Parse returned true
 	size_t entitiesDecoded = 0;
-	size_t slow = 0;
+	size_t problems = 0;         // parses that were slow, or failed without saying why
 	double slowestMs = 0;
 	std::string slowest;
 };
@@ -97,7 +97,7 @@ void ParseCopy(const uint8_t *data, size_t size, bool movers, const std::string 
 	if (demo.entitiesDecoded) totals.entitiesDecoded++;
 	if (!ok && error.empty()) {
 		std::printf("  FAILED without a message: %s\n", what.c_str());
-		totals.slow++;
+		totals.problems++;
 	}
 	if (ms > totals.slowestMs) {
 		totals.slowestMs = ms;
@@ -105,7 +105,7 @@ void ParseCopy(const uint8_t *data, size_t size, bool movers, const std::string 
 	}
 	if (ms > kSlowParseMs) {
 		std::printf("  SLOW (%.0f ms): %s\n", ms, what.c_str());
-		totals.slow++;
+		totals.problems++;
 	}
 }
 
@@ -337,7 +337,7 @@ int main(int argc, char **argv) {
 	}
 	if (!timeOnly) {
 		std::printf("total: %zu parses, no crash; %zu accepted, %zu with entities decoded; slowest %.0f ms (%s); %zu problems\n", totals.parses,
-			totals.accepted, totals.entitiesDecoded, totals.slowestMs, totals.slowest.c_str(), totals.slow);
+			totals.accepted, totals.entitiesDecoded, totals.slowestMs, totals.slowest.c_str(), totals.problems);
 	}
-	return failed || totals.slow ? 1 : 0;
+	return failed || totals.problems ? 1 : 0;
 }

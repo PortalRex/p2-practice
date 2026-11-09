@@ -1,8 +1,12 @@
 ﻿"""Runs test runs through a running test copy of Portal 2 and reports, per map, whether practice works on it.
 
-    python maptest.py --job t3 [--port 2141] [--only Buttons] [--cm] [--out build/test/matrix.json]
+    python maptest.py --job t3 [--port 2141] [--password p2practice] [--cases cases.json] [--only Buttons]
+                      [--board "Exact Name"] [--skip N] [--out build/test/matrix.json]
 
-For each case in demos/matrix/cases.json:
+--only keeps the cases whose board or group name contains the text, --board the one board of exactly that name;
+--skip starts at the N-th of the cases left (to carry on after a stop).
+
+For each case in demos/matrix/<--cases> (cases.json; cases_all.json has every map):
   1. loads the map (ss_map for co-op, map for single player), waits for the players;
   2. loads the run with prac_load, records a demo of the session, and rides the run with prac_watch;
   3. compares the map events (entity inputs SAR records) of the session's demo with the original run's: every
@@ -37,7 +41,7 @@ COSMETIC = {
 }
 COSMETIC_INPUTS = {'EnableRefire', 'CancelPending', 'SetDefaultAnimation', 'Skin'}
 # Script functions the game's maps call that its own scripts don't define (checked on fresh levels, no plugin)
-GAME_SCRIPT_ERRORS = {'mpcoopfling1buttons', 'TrustFlingCatapultMalfunctionEnd'}
+GAME_SCRIPT_ERRORS = {'mpcoopfling1buttons', 'TrustFlingCatapultMalfunctionEnd', 'sp_sabotage_factorysp_sabotage_redemption01'}
 
 
 class Console:
@@ -124,11 +128,18 @@ def world_events(demo, first_tick=None, last_tick=None):
     return events
 
 
-def compare_events(reference, session):
+kNearExpected = 30  # ticks around the expected offset that count as the players' own events
+
+
+def compare_events(reference, session, expected_offset=None):
     """Matches the reference's events against the session's, keeping their order (the longest sequence the two
     have in common; the session may hold extra events). Returns how many matched, the reference events that
     didn't, how far the matched ones drift apart in time (ticks from the typical offset), and that typical
-    offset (session tick minus reference tick)."""
+    offset (session tick minus reference tick).
+
+    `expected_offset` is where the offset should be, where that is known. In co-op, machinery that starts with
+    the map is met at another point of its round than in the run (Bridge Testing's conveyor of light bridges, six
+    seconds off): its events, most of that level's, have an offset of their own, which is not the players'."""
     import difflib
     matcher = difflib.SequenceMatcher(None, [e[1] for e in reference], [e[1] for e in session], autojunk=False)
     matched_reference = set()
@@ -141,11 +152,24 @@ def compare_events(reference, session):
     spread = 0
     middle = 0
     if offsets:
-        middle = sorted(offsets)[len(offsets) // 2]
+        near = [o for o in offsets if expected_offset is not None and abs(o - expected_offset) <= kNearExpected]
+        typical = near if len(near) >= 10 else offsets
+        middle = sorted(typical)[len(typical) // 2]
         # the bulk of the events, ignoring a few stragglers (a door that was already open, say)
         ordered = sorted(abs(o - middle) for o in offsets)
         spread = ordered[int(len(ordered) * 0.9)] if len(ordered) >= 10 else ordered[-1]
     return len(matched_reference), missing, spread, middle
+
+
+def ride_end_offset(trace_path, trace_start, session_demo, run_end):
+    """The session demo's tick minus the run's at the end of the ride, from the trainer's trace: the server tick
+    it announced the end at, less the server tick the session's demo began at. None where the trace has no end."""
+    if not os.path.exists(trace_path) or 'serverTickAtZero' not in session_demo:
+        return None
+    with open(trace_path, 'r', encoding='utf-8', errors='replace') as f:
+        f.seek(trace_start)
+        ends = re.findall(r'^\s*(\d+) print  Watched the run to its end', f.read(), re.M)
+    return int(ends[-1]) - session_demo['serverTickAtZero'] - run_end if ends else None
 
 
 # Inputs that set a state, grouped by kind (as in route.cpp): the latest one of a kind on an entity is its state
@@ -162,18 +186,82 @@ NOT_STATE_CLASSES = {'ambient_generic', 'logic_choreographed_scene', 'generic_ac
 def level_state(demo, last_tick=None, first_tick=None):
     """The level's switchable state at the end: {(entity, kind): (input, parameter)} from the latest state inputs
     (those from `first_tick` on: what the level did on its own before the players could move is not the
-    trainer's doing either way)."""
+    trainer's doing either way), without the entities removed since."""
     state = {}
     for e in demo.get('sarEntityInputs', []):
         if last_tick is not None and e['tick'] > last_tick:
             break
         if first_tick is not None and e['tick'] < first_tick:
             continue
+        if e['input'] in ('Kill', 'KillHierarchy'):
+            # (gone from the level: whatever state it was last in means nothing any more. Incinerator's crushers
+            # open and close on a timer until they are removed.)
+            for key in [key for key in state if key[0] == e['target']]:
+                del state[key]
+            continue
         kind = STATE_KIND_OF.get(e['input'])
         if kind is None or e['className'] in NOT_STATE_CLASSES or not e['target'] or '&' in e['target']:
             continue
         state[(e['target'], kind)] = (e['input'], e['param'])
     return state
+
+
+def picked_at_random(demo):
+    """The entities a level picked by chance: whatever gets the input right after a logic_case's PickRandom in
+    the same tick (Polarity's falling wall panels). Which one, and what it does, differs from load to load."""
+    picked = set()
+    events = demo.get('sarEntityInputs', [])
+    for previous, e in zip(events, events[1:]):
+        if previous['input'].startswith('PickRandom') and e['tick'] == previous['tick']:
+            picked.add(e['target'])
+    return picked
+
+
+kOwnClock = 600  # ticks before the end in which a thing that switches by itself shows it
+kOwnClockSwitches = 4
+
+
+def switching_by_itself(demo, last_tick):
+    """The (entity, kind) states that keep switching through the end of a demo with nobody doing it: a door that
+    rattles on a random timer (Container Ride), a trigger that flaps every other tick (Wall Button). Which way
+    one of those is at one given instant is chance, in the run as much as in the session."""
+    from collections import Counter
+    switches = Counter()
+    for e in demo.get('sarEntityInputs', []):
+        kind = STATE_KIND_OF.get(e['input'])
+        if kind is not None and last_tick - kOwnClock <= e['tick'] <= last_tick:
+            switches[(e['target'], kind)] += 1
+    return {key for key, count in switches.items() if count >= kOwnClockSwitches}
+
+
+kMapClock = 1200  # ticks before the end looked at for a thing running on the map's own clock
+kMapClockEvery = 2  # ticks two firings of one timer may fall apart by
+
+
+def on_map_clock(reference, session, key, run_end, session_offset):
+    """Whether an entity's state follows a timer the map started when it loaded, a constant time off in the
+    session: nobody sets it (no player behind any of its inputs), and the session gave it the run's inputs in the
+    run's order, all of them the same number of ticks early or late. In co-op the trainer has no way to line the
+    map's clock up with the run's (see LevelClock in the plugin), so which way such a thing is at the run's last
+    tick is not the trainer's doing. (Gel Maze's bounce gel sprayer: 8 s on, 8 s off, from the map's spawn.)"""
+    def inputs(demo, shift):
+        rows = [e for e in demo.get('sarEntityInputs', []) if e['target'] == key[0] and STATE_KIND_OF.get(e['input']) == key[1]]
+        if any(e['slot'] >= 0 for e in rows):
+            return None
+        return [(e['tick'] - shift, e['input'], e['param']) for e in rows if run_end - kMapClock <= e['tick'] - shift <= run_end]
+    run, ses = inputs(reference, 0), inputs(session, session_offset)
+    if not run or not ses or len(run) < 2 or len(ses) < 2:
+        return False
+    for tick, name, param in ses:
+        late = run[-1][0] - tick  # the session is this many ticks ahead of the run, if this is the run's last input
+        if (name, param) != run[-1][1:] or abs(late) <= kMapClockEvery:
+            continue
+        def paired(rows, others, shift):
+            inside = [r for r in rows if run_end - kMapClock + abs(late) <= r[0] <= run_end - abs(late)]
+            return all(any(o[1:] == r[1:] and abs(o[0] - r[0] - shift) <= kMapClockEvery for o in others) for r in inside)
+        if paired(ses, run, late) and paired(run, ses, -late):
+            return True
+    return False
 
 
 def compare_state(reference, session):
@@ -204,21 +292,26 @@ def present_events(reference, session):
 OBJECT_CLASSES = {'CPropWeightedCube', 'CPropMonsterBox', 'CNPC_Portal_FloorTurret', 'CPhysicsProp', 'CPropGlassFutbol', 'CNPC_PersonalityCore'}
 
 
-def final_objects(demo, tick, resting_only, moved_since=None):
-    """Where each movable object is at `tick`: (class, (x, y, z)) for those that still exist. With `resting_only`,
-    only objects lying still by then (one in mid-air is somewhere else a tick later, so can't be compared). With
-    `moved_since`, only objects that moved from that tick on (one the run never touched may never come into the
-    session's view at all: a demo holds only what its player could see)."""
-    def position(key):
-        origin = key['origin']
-        return (origin['x'], origin['y'], origin['z']) if isinstance(origin, dict) else tuple(origin)
+def key_position(key):
+    origin = key['origin']
+    return (origin['x'], origin['y'], origin['z']) if isinstance(origin, dict) else tuple(origin)
 
+
+def final_objects(demo, tick, resting_only, moved_since=None):
+    """Where each movable object is at `tick`: (class, (x, y, z), last seen, keys) for those that still exist.
+    With `resting_only`, only objects lying still by then (one in mid-air is somewhere else a tick later, so
+    can't be compared). With `moved_since`, only objects that moved from that tick on (one the run never touched
+    may never come into the session's view at all: a demo holds only what its player could see)."""
+    position = key_position
     objects = []
     for mover in demo.get('movers', []):
         if mover['className'] not in OBJECT_CLASSES:
             continue
         keys = [k for k in mover['keys'] if k['tick'] <= tick]
         if not keys or keys[-1].get('removed'):
+            continue
+        if keys[-1].get('parent', -1) >= 0:
+            # (riding on something: its place is relative to that, not a spot in the level)
             continue
         if moved_since is not None and keys[-1]['tick'] < moved_since:
             continue
@@ -227,20 +320,29 @@ def final_objects(demo, tick, resting_only, moved_since=None):
             earlier = [k for k in keys if k['tick'] <= tick - 30]
             if not earlier or sum((a - b) ** 2 for a, b in zip(now, position(earlier[-1]))) ** 0.5 > 16:
                 continue
-        objects.append((mover['className'], now))
+        objects.append((mover['className'], now, keys[-1]['tick'], keys))
     return objects
 
 
-def objects_in_place(reference, session, tolerance=48):
-    """How many of the run's objects have a session object of the same kind lying within `tolerance` units."""
+def objects_in_place(reference, session, session_offset=0, session_end=None, tolerance=48):
+    """How many of the run's objects have a session object of the same kind lying within `tolerance` units.
+    A demo stops hearing about an object once its player can't see it any more: a session object last seen
+    well before the session's end (`session_end`) is compared with where the run had its object at that moment
+    (`session_offset` = the session's tick minus the run's)."""
+    kOutOfView = 20  # ticks without news of an object before the end: it went out of view
     placed = 0
     used = set()
-    for kind, position in reference:
+    for kind, position, _, keys in reference:
         best = None
-        for i, (other_kind, other) in enumerate(session):
+        for i, (other_kind, other, seen, _) in enumerate(session):
             if other_kind != kind or i in used:
                 continue
-            distance = sum((a - b) ** 2 for a, b in zip(position, other)) ** 0.5
+            then = position
+            if session_end is not None and seen < session_end - kOutOfView:
+                earlier = [k for k in keys if k['tick'] <= seen - session_offset]
+                if earlier:
+                    then = key_position(earlier[-1])
+            distance = min(sum((a - b) ** 2 for a, b in zip(spot, other)) ** 0.5 for spot in (position, then))
             if distance <= tolerance and (best is None or distance < best[1]):
                 best = (i, distance)
         if best:
@@ -306,6 +408,7 @@ def run_case(console, case, state):
         os.remove(session_demo)
     seconds = float(info['time'])
     mark = console.mark()
+    ride_trace_start = os.path.getsize(trace_path) if os.path.exists(trace_path) else 0
     # (the trainer restarts the level where needed - into Challenge Mode, back onto the level's own clock - and
     # begins the recording itself when the ride starts, so the demo holds the whole of it)
     console.send('prac_debug dev 1', f'prac_debug record {session_name}', 'prac_watch 1')
@@ -328,7 +431,8 @@ def run_case(console, case, state):
         return result
     session_demo_data = run_json([DEMODUMP, session_demo])
     session = world_events(session_demo_data)
-    matched, missing, spread, session_offset = compare_events(reference, session)
+    expected_offset = ride_end_offset(trace_path, ride_trace_start, session_demo_data, int(timer.group(2)))
+    matched, missing, spread, session_offset = compare_events(reference, session, expected_offset)
     present = present_events(reference, session)
     result.update(events=len(reference), present=present, matched=matched, timing_spread_ticks=spread, missing=[f'{t}: {s}' for t, s in missing[:12]])
     # What matters for practice is the state the level ends in: every door, panel, trigger, laser the run switched
@@ -351,6 +455,14 @@ def run_case(console, case, state):
     # demo never sees it, which says nothing about the trainer)
     level_setup = set(level_state(reference_demo, 60).keys()) - set(level_state(reference_demo, run_end, first_tick=61).keys())
     wrong = [(key, value, other) for key, value, other in wrong if not (other is None and key in level_setup)]
+    by_chance = picked_at_random(reference_demo) | picked_at_random(session_demo_data)
+    wrong = [(key, value, other) for key, value, other in wrong if key[0] not in by_chance]
+    own_clock = switching_by_itself(reference_demo, run_end) & switching_by_itself(session_demo_data, run_end + session_offset)
+    wrong = [(key, value, other) for key, value, other in wrong if key not in own_clock]
+    if case.get('coop'):
+        map_clock = [key for key, _, _ in wrong if on_map_clock(reference_demo, session_demo_data, key, run_end, session_offset)]
+        wrong = [(key, value, other) for key, value, other in wrong if key not in map_clock]
+        result['states_on_map_clock'] = sorted({key[0] for key in map_clock})
     same = len(run_state) - len(wrong)
     result.update(states=len(run_state), states_same=same,
                   states_wrong=[f'{key[0]}: run {value[0]} {value[1]}'.strip() + f', session {other[0] + " " + other[1] if other else "never set"}'.strip()
@@ -360,7 +472,7 @@ def run_case(console, case, state):
     # ... and the things the run moved should lie where the run left them
     run_objects = final_objects(reference_demo, int(timer.group(2)), True, moved_since=control)
     session_objects = final_objects(session_demo_data, session_demo_data.get('lastTick', 0), False)
-    placed = objects_in_place(run_objects, session_objects)
+    placed = objects_in_place(run_objects, session_objects, session_offset or 0, int(timer.group(2)) + (session_offset or 0))
     result.update(objects=len(run_objects), objects_in_place=placed)
     if placed < len(run_objects):
         problems.append(f'{len(run_objects) - placed} of {len(run_objects)} objects did not end up where the run left them')
@@ -391,7 +503,9 @@ def run_case(console, case, state):
             # input against the run's: where the run's player was braking or turning hard just then, that alone
             # is tens of u/s. A wrong handover is hundreds.)
             worst = max(result['handover'], key=lambda h: h['units'])
-            if worst['units'] > 24 or worst['speed'] > 150:
+            # (a run in noclip is inside the walls: nobody can be handed that)
+            noclip = any('noclip' in note for note in result.get('notes', []))
+            if not noclip and (worst['units'] > 24 or worst['speed'] > 150):
                 problems.append(f"handover off by {worst['units']:.1f} units, {worst['speed']:.0f} u/s")
         time.sleep(2)
         console.send('prac_stop')
@@ -435,10 +549,19 @@ def main():
             results.append({'group': case['group'], 'board': case['board'], 'ok': False, 'problems': ['not run: the game went away']})
             continue
         started = time.time()
+        finished = False
         try:
             result = run_case(console, case, state)
+            finished = True
         except Exception as error:  # a broken case must not stop the others
             result = {'group': case['group'], 'board': case['board'], 'ok': False, 'problems': [f'test error: {error!r}']}
+        finally:
+            # (a case that broke off, by an error or Ctrl+C, may have left the copy recording or practising)
+            if not finished:
+                try:
+                    console.send('stop', 'prac_stop')
+                except OSError:
+                    pass
         result['seconds'] = round(time.time() - started)
         results.append(result)
         verdict = 'OK  ' if result['ok'] else 'FAIL'

@@ -12,7 +12,6 @@
 #include <memory>
 #include <mutex>
 #include <set>
-#include <sstream>
 #include <thread>
 
 #include "engine.h"
@@ -103,10 +102,15 @@ std::map<std::string, Demo> LoadCache() {
 	std::string line;
 	if (!std::getline(in, line) || line != kCacheHeader) return cache;
 	while (std::getline(in, line)) {
+		// (split by hand: the last field, the error, is empty for every demo that could be read, and a split
+		// that drops empty fields at the end would leave those lines one field short)
 		std::vector<std::string> f;
-		std::stringstream fields(line);
-		std::string field;
-		while (std::getline(fields, field, '\t')) f.push_back(field);
+		for (size_t start = 0;;) {
+			size_t tab = line.find('\t', start);
+			f.push_back(line.substr(start, tab == std::string::npos ? std::string::npos : tab - start));
+			if (tab == std::string::npos) break;
+			start = tab + 1;
+		}
 		if (f.size() < 12) continue;
 		Demo d;
 		d.path = f[0];
@@ -291,6 +295,9 @@ void ReadAll(std::vector<std::string> folders) {
 			found.push_back(d);
 		}
 	}
+	// (stopped while looking through the folders: the list is not whole, and saving it would drop from the cache
+	// every demo not reached)
+	if (g_stop) return;
 	g_total = static_cast<int>(found.size());
 	g_done = 0;
 	// what the cache knows is shown at once; the rest is read and shown as it comes
@@ -309,7 +316,11 @@ void ReadAll(std::vector<std::string> folders) {
 	std::vector<Demo> all = known;
 	auto last = GetTickCount();
 	for (Demo &d : unknown) {
-		if (g_stop) return;
+		if (g_stop) {
+			// (what was read so far is kept for the next time; nobody is waiting for the list itself)
+			SaveCache(all);
+			return;
+		}
 		Read(d);
 		all.push_back(d);
 		g_done++;

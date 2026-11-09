@@ -111,7 +111,8 @@ namespace P2Practice {
 			App.Parse(args);
 			Application.EnableVisualStyles();
 			Application.SetCompatibleTextRenderingDefault(false);
-			try { AppIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+			try { AppIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+			catch (Exception) { } // (whatever keeps the icon from being read: the window does without one rather than not open)
 			if (App.DryRun) App.Log("--- " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " dry run: nothing is started ---");
 			if (App.Headless) return ScreenshotRun();
 

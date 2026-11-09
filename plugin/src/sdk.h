@@ -2,8 +2,10 @@
 //
 // Portal 2 has no public SDK, so these layouts are declared by hand. They follow the Alien Swarm SDK (the nearest
 // public branch) and were checked against Portal 2 build 10090; member offsets and vtable slots that SourceAutoRecord
-// (MIT, https://github.com/p2sr/SourceAutoRecord) also uses are marked "SAR". Nothing here hooks or patches the game:
-// everything is reached through CreateInterface factories and the plugin callbacks the engine itself calls.
+// (MIT, https://github.com/p2sr/SourceAutoRecord) also uses are marked "SAR". Everything is reached through
+// CreateInterface factories and the plugin callbacks the engine itself calls. This file only describes the game;
+// the few places that change it (a hooked function-table slot, fields written into entities) are in engine.cpp
+// and ui/gfx.cpp.
 #pragma once
 
 #include <cstdint>
@@ -140,8 +142,6 @@ struct ConVar {
 	float floatValue;
 	int intValue;
 };
-
-constexpr int kFcvarCheat = 1 << 14;
 
 // ---- network send tables: used only to find where a few entity fields live, by name (SAR) ----
 enum SendPropType { kPropInt, kPropFloat, kPropVector, kPropVectorXY, kPropString, kPropArray, kPropDataTable, kPropInt64 };

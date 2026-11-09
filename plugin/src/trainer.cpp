@@ -108,6 +108,7 @@ struct Session {
 	bool queuePinned = false;     // queued rendering switched off for save states (see SingleThreadedRendering)
 	std::chrono::steady_clock::time_point queuePinnedAt;  // when it was switched off
 	int savedThreadCvars[4] = {}; // mat_queue_mode, host_thread_mode, snd_mix_async, net_queued_packet_thread as they were
+	int savedThreadedParticles = 1;  // r_threaded_particles as it was
 	bool retryAsked = false;      // the game's own restart (the finish board's Replay Map) asked for a retry
 	bool closeScreensAfterRestore = false;  // that retry is a save state on its way: close the boards again when it lands
 	bool savesOff = false;        // the game's saving was switched off for practice (and is switched back on at the end)
@@ -122,7 +123,7 @@ struct Session {
 	std::vector<Ghost> ghosts;  // one per robot of the run
 	std::set<std::string> registeredModels;  // ghost models registered with the game in this map load
 	std::string recordNext;  // development: a demo name to start recording under when the next attempt begins
-	// Challenge Mode's leaderboard screens (see ExpectGameScreen)
+	// Challenge Mode's leaderboard screens (see GameScreenDue)
 	int pausedFrames = 0;
 	bool startScreenClosed = false;  // this level's start board has been closed
 	bool ranSinceLoad = false;       // the level has simulated a frame since it was loaded
@@ -141,7 +142,7 @@ struct Session {
 	int autoPart = -1;   // prac_auto: start this part by itself once the route's map is up (-1 = not armed)
 	float autoSeconds = -1;  // prac_auto at <seconds>: that moment of the run instead of a part's start (-1 = the part)
 	bool autoWatch = false;
-	std::map<int, int> bestFromPart;  // part an attempt started from -> best ticks to the finish
+	std::map<int, int> bestFromTick;  // the run's tick an attempt started at -> best ticks to the finish
 	std::map<int, int> bestPart;      // part -> best ticks through it
 	std::vector<Result> results;      // finished attempts, for the menu (the latest kResultsKept)
 };
@@ -211,6 +212,7 @@ void EnsureCheats() {
 
 bool ChallengeMode();
 void RestoreRendering();
+void DropSnapshot();
 void CloseGameScreens();
 bool WatchFlags();
 void DropSnapshotAtFlags();
@@ -360,9 +362,13 @@ int LivePortal(const route::PortalChange &change, const std::vector<int> &player
 // run replayed against it, whose robots are matched by team.
 std::vector<int> PlayersOf(const Route &route);
 
-// `open`: the portal is open already (its previous change in the run opened it), so it is only moved
-void ApplyPortalChange(const Route &route, const route::PortalChange &change, bool open = false) {
+// `open`: the portal is open already (its previous change in the run opened it), so it is only moved.
+// `at`: the run's tick the level is at. A portal on a moving panel goes where the run had it at that tick; the
+// game then fastens it to the panel behind it, as it does for a shot.
+void ApplyPortalChange(const Route &route, const route::PortalChange &placed, int at, bool open = false) {
 	const std::vector<int> players = PlayersOf(route);
+	route::PortalChange change = placed;
+	change.pos = placed.PosAt(at);
 	int team = change.actor >= 0 ? route.actors[change.actor].team : 0;
 	if (int portal = LivePortal(change, players)) {
 		// the player's own portal: moved as if they had shot it there, so their next shot pairs with it
@@ -401,26 +407,34 @@ int g_portalsPlacedTo = -1;  // the run's portal changes up to this tick are in 
 
 void SetPortals(const Route &route, int tick) {
 	g_portalsPlacedTo = tick;
-	for (const Vec3 &pos : g_orphanPortals) engine::Script("::PP.ClosePortalAt(%.1f,%.1f,%.1f)", pos.x, pos.y, pos.z);
-	g_orphanPortals.clear();
 	std::map<int, const route::PortalChange *> state;  // by demo portal entity
 	for (const auto &change : route.portals)
 		if (change.tick <= tick) state[change.portalEnt] = &change;
-	std::vector<int> open;  // live portals that stay open
+	std::vector<int> open;        // live portals that stay open
+	std::vector<Vec3> placedAgain;  // where a portal nobody owns is placed (again) below
 	const std::vector<int> players = PlayersOf(route);
 	for (const auto &[entity, change] : state) {
 		if (!change->active) continue;
 		if (int portal = LivePortal(*change, players)) open.push_back(portal);
+		else placedAgain.push_back(change->PosAt(tick));
 	}
+	// The portals the trainer placed for an earlier attempt go, except one that is placed where it is again: the
+	// console command places at once and the script's close runs after it, so it would close the new portal.
+	constexpr float kSamePortal = 16;  // (the reach of ::PP.ClosePortalAt)
+	for (const Vec3 &pos : g_orphanPortals) {
+		bool again = std::any_of(placedAgain.begin(), placedAgain.end(), [&](const Vec3 &p) { return Distance(pos, p) < kSamePortal; });
+		if (!again) engine::Script("::PP.ClosePortalAt(%.1f,%.1f,%.1f)", pos.x, pos.y, pos.z);
+	}
+	g_orphanPortals.clear();
 	for (int player : players) {
 		int pair[2];
 		if (!player || !engine::GetPlayerPortals(player, pair[0], pair[1])) continue;
 		for (int portal : pair)
 			if (portal > 0 && std::find(open.begin(), open.end(), portal) == open.end()) engine::Script("::PP.PortalClose(%d)", portal);
 	}
-	// closes are queued inputs: flush them out before the opens so a portal isn't closed after being placed
+	// (script statements run in the order given: the closes above come before these moves)
 	for (const auto &[entity, change] : state)
-		if (change->active) ApplyPortalChange(route, *change);
+		if (change->active) ApplyPortalChange(route, *change, tick);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -917,7 +931,6 @@ bool MapMatches() {
 	return g.hasRoute && _stricmp(engine::MapName(), g.route.map.c_str()) == 0;
 }
 
-// The first tick every player of the route exists
 // Which tick of the practiced run the live level's own clock is at. A level's lifts, doors and timers run on
 // the server's tick count from the map's load, and the demo says what that count was when its recording began:
 // where the two counts agree, everything the level does by itself happens exactly when it did in the run.
@@ -941,6 +954,7 @@ int LevelClock() {
 // The least the run plays itself before the handover (a sixth of a second), however late the level's clock is
 constexpr int kShortestLeadTicks = 10;
 
+// The first tick every player of the route exists
 int FirstCommonTick(const Route &route) {
 	int first = route.firstTick;
 	for (const auto &actor : route.actors)
@@ -970,18 +984,33 @@ void Undim() {
 	g.dimmed = false;
 }
 
-void ClearScene() {
-	if (!g.helperLoaded) return;
+// Takes the trainer's protection off everyone again
+void UnshieldPlayers() {
 	for (const Slot &slot : g.slots)
 		if (slot.entIndex) {
 			engine::Script("::PP.Shield(%d,0)", slot.entIndex);
 			engine::SetGodMode(slot.entIndex, false);
 		}
+}
+
+void ClearScene() {
+	if (!g.helperLoaded) return;
+	UnshieldPlayers();
 	ClearGhosts();
 	Undim();
 	engine::Script("::PP.ClearTexts()");
 	engine::FlushScript();
 	engine::Execute("clear_debug_overlays");
+}
+
+// Gives the game's own settings back as they were: saving, the game's speed, threaded rendering
+void ReleaseGameSettings() {
+	if (g.savesOff) {
+		engine::Execute("save_disable 0");
+		g.savesOff = false;
+	}
+	RestoreSpeed();
+	RestoreRendering();
 }
 
 void Stop(bool announce) {
@@ -990,12 +1019,9 @@ void Stop(bool announce) {
 	bool wasActive = g.mode != Mode::Idle;
 	g.mode = Mode::Idle;
 	g.resumeAfterLoad = false;
-	if (g.savesOff) {
-		engine::Execute("save_disable 0");
-		g.savesOff = false;
-	}
-	RestoreSpeed();
-	RestoreRendering();
+	ReleaseGameSettings();
+	// (the save state holds the level with the ghosts and texts that go now: a retry sets the attempt up afresh)
+	DropSnapshot();
 	ClearScene();
 	if (announce && wasActive) engine::Print("Practice stopped.\n");
 }
@@ -1050,6 +1076,7 @@ void SingleThreadedRendering() {
 		g.savedThreadCvars[i] = static_cast<int>(engine::CvarFloat(kThreadCvars[i], 0));
 		if (g.savedThreadCvars[i] != 0) engine::Execute("%s 0", kThreadCvars[i]);
 	}
+	g.savedThreadedParticles = static_cast<int>(engine::CvarFloat("r_threaded_particles", 1));
 	engine::Execute("r_threaded_particles 0");
 }
 
@@ -1065,6 +1092,14 @@ void RestoreRendering() {
 	g.queuePinned = false;
 	for (size_t i = 0; i < std::size(kThreadCvars); i++)
 		if (g.savedThreadCvars[i] != 0) engine::Execute("%s %d", kThreadCvars[i], g.savedThreadCvars[i]);
+	if (g.savedThreadedParticles != 0) engine::Execute("r_threaded_particles %d", g.savedThreadedParticles);
+}
+
+// Forgets the save state and has ChocolateLoading free it
+void DropSnapshot() {
+	if (g.snapshotHandover < 0) return;
+	g.snapshotHandover = -1;
+	if (engine::CommandExists("snap_drop")) engine::Execute("snap_drop %s", kSnapshotName);
 }
 
 // Save states and demos. ChocolateLoading keeps every file open that a save state holds, so that a restore can go
@@ -1210,7 +1245,7 @@ void Approach() {
 	std::string problem;
 	if (!AssignSlots(problem)) {
 		engine::Warn("Can't start: %s.\n", problem.c_str());
-		g.mode = Mode::Idle;
+		Stop(false);
 		return;
 	}
 	// Hands empty: what somebody still carries from an earlier attempt would stay out of the trainer's reach
@@ -1334,7 +1369,8 @@ void Start(int handover, bool watch) {
 		engine::Warn("The route is for %s: load it first (%s).\n", g.route.name.c_str(), LoadCommand().c_str());
 		return;
 	}
-	handover = std::clamp(BeforePortalTrip(BeforeStuck(handover)), FirstCommonTick(g.route), g.route.timerEnd - 1);
+	int first = FirstCommonTick(g.route);
+	handover = std::clamp(BeforePortalTrip(BeforeStuck(handover)), first, std::max(first, g.route.timerEnd - 1));
 	if (RestoreSnapshot(handover, watch)) return;
 	RestoreSpeed();
 	g.watch = watch;
@@ -1399,11 +1435,6 @@ void ReleaseUseKeys() {
 	g.jumpKeyDown = false;
 }
 
-// A driven player at this computer presses jump where the run's player did. Moving the player is done by
-// placing it, but a level may listen for the key itself: Container Ride's opening waits for the player to press
-// space (logic_playerproxy OnJump, on every press, in the air too), and without the presses the container ride
-// never starts. (Only the recording player's keys are in a demo, and only the player at this computer can be given
-// a key: a bot moves by being placed, with its own movement off.)
 // The duck key of the player at this computer, held while the run's player crouched (they fit where it did, and
 // what they carry hangs as low). Let go whenever nobody is driven any more: the person's own key is theirs.
 void SetDuckKey(bool down) {
@@ -1412,6 +1443,11 @@ void SetDuckKey(bool down) {
 	g.duckKeyDown = down;
 }
 
+// A driven player at this computer presses jump where the run's player did. Moving the player is done by
+// placing it, but a level may listen for the key itself: Container Ride's opening waits for the player to press
+// space (logic_playerproxy OnJump, on every press, in the air too), and without the presses the container ride
+// never starts. (Only the recording player's keys are in a demo, and only the player at this computer can be given
+// a key: a bot moves by being placed, with its own movement off.)
 void PressJump(const Slot &slot, const Sample &now, const Sample &before) {
 	if (slot.entIndex != 1 || now.buttons < 0 || !(now.buttons & p2demo::IN_JUMP)) return;
 	if (before.buttons >= 0 && (before.buttons & p2demo::IN_JUMP)) return;
@@ -1543,7 +1579,7 @@ void DriveSlots() {
 					engine::PlayerState live;
 					const Sample &after = driver.At(actor, tick + 2);
 					if (after.held >= 0 && engine::GetPlayer(player, live) && live.held < 0)
-						engine::Script("::PP.PickUp(%d,\"%s\",\"%s\",%.4f,%.4f,%.4f)", player, use.className.c_str(), use.target.c_str(), aim.x, aim.y, aim.z);
+						engine::Script("::PP.PickUp(%d,%s,%s,%.4f,%.4f,%.4f)", player, Quote(use.className).c_str(), Quote(use.target).c_str(), aim.x, aim.y, aim.z);
 					continue;
 				}
 				// (with everyone's portals: a player presses buttons through them)
@@ -1551,7 +1587,7 @@ void DriveSlots() {
 				size_t pairs = 0;
 				for (const Slot &slot : g.slots)
 					if (slot.entIndex && pairs < 2 && engine::GetPlayerPortals(slot.entIndex, portals[pairs * 2], portals[pairs * 2 + 1])) pairs++;
-				engine::Script("::PP.UseEnt(%d,\"%s\",\"%s\",%.4f,%.4f,%.4f,%d,%d,%d,%d)", player, use.className.c_str(), use.target.c_str(), aim.x, aim.y,
+				engine::Script("::PP.UseEnt(%d,%s,%s,%.4f,%.4f,%.4f,%d,%d,%d,%d)", player, Quote(use.className).c_str(), Quote(use.target).c_str(), aim.x, aim.y,
 				               aim.z, portals[0], portals[1], portals[2], portals[3]);
 			}
 		} else if (s.buttons >= 0 && (s.buttons & p2demo::IN_USE) && !(before.buttons >= 0 && (before.buttons & p2demo::IN_USE))) {
@@ -1573,7 +1609,8 @@ void DriveSlots() {
 		// driven player already did it, this changes nothing.)
 		for (const route::ButtonGlitch &glitch : driver.buttonGlitches) {
 			if (glitch.actor != actor || glitch.tick + kButtonGlitchDelay != tick) continue;
-			engine::Script(glitch.endsPressed ? "::PP.ReleaseAndPress(\"%s\")" : "::PP.PressAndRelease(\"%s\")", glitch.button.c_str());
+			if (glitch.button.empty()) engine::Script("::PP.ReleaseAndPressAt(%.0f,%.0f,%.0f)", glitch.at.x, glitch.at.y, glitch.at.z);
+			else engine::Script(glitch.endsPressed ? "::PP.ReleaseAndPress(%s)" : "::PP.PressAndRelease(%s)", Quote(glitch.button).c_str());
 		}
 	}
 }
@@ -1651,7 +1688,7 @@ void MoveObjects(bool all) {
 	// what the run's fizzlers dissolved, dissolved here too while the run plays itself (see Route::dissolves)
 	if (g.mode != Mode::Run || g.replaying)
 		for (const route::Route::Dissolve &d : driver.dissolves)
-			if (d.tick == tick) engine::Script("::PP.Dissolve(\"%s\")", d.target.c_str());
+			if (d.tick == tick) engine::Script("::PP.Dissolve(%s)", Quote(d.target).c_str());
 	for (size_t i = 0; i < driver.movers.size(); i++) {
 		const route::Mover &mover = driver.movers[i];
 		Vec3 pos, ang;
@@ -1663,7 +1700,7 @@ void MoveObjects(bool all) {
 		bool newborn = mover.keys.front().tick > driver.firstTick + 5 && tick - mover.keys.front().tick < kNewborn;
 		float claimRadius = newborn ? 96.0f : 400.0f;
 		if (all || tick == mover.keys.front().tick)
-			engine::Script("::PP.Claim(%d,\"%s\",%.1f,%.1f,%.1f,%.0f)", id, mover.className.c_str(), pos.x, pos.y, pos.z, claimRadius);
+			engine::Script("::PP.Claim(%d,%s,%.1f,%.1f,%.1f,%.0f)", id, Quote(mover.className).c_str(), pos.x, pos.y, pos.z, claimRadius);
 		if (!LooksAfterObject(i, tick)) continue;
 
 		bool carried = false, carriedBefore = false;
@@ -1685,10 +1722,14 @@ void MoveObjects(bool all) {
 		// (how an object lies matters once it has stopped turning: a rolling ball may roll its own way. A
 		// reflection cube is held to the run far more closely: a laser leaves it the way it faces, and Dual Lasers'
 		// cube lying 4 degrees off sent the beam past its catcher.)
-		float slack = (all || carried || released) ? 0 : mover.aimsLasers ? kLaserCubeSlack : kSlack;
+		// (and one that creeps along in the run - tipping over the edge of a button, sliding to a stop - is put on
+		// every spot of that path: left to the game it creeps another way, and Turret Intro's cube, which lies
+		// half on its button in the run, kept letting go of it.)
+		bool creeping = !carried && (moving || turning) && Length(velocity) <= kMovingSpeed;
+		float slack = (all || carried || released || creeping) ? 0 : mover.aimsLasers ? kLaserCubeSlack : kSlack;
 		float turnSlack = turning ? 0 : mover.aimsLasers ? kLaserCubeTurnSlack : kTurnSlack;
 		bool launch = !carried && Launchable(mover.className) && Length(velocity) > kMovingSpeed;
-		engine::Script("::PP.Pose(%d,\"%s\",%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f,%d,%d,%.1f,%.1f,%d,%.0f)", id, mover.className.c_str(), pos.x, pos.y,
+		engine::Script("::PP.Pose(%d,%s,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f,%d,%d,%.1f,%.1f,%d,%.0f)", id, Quote(mover.className).c_str(), pos.x, pos.y,
 		               pos.z, ang.x, ang.y, ang.z, velocity.x, velocity.y, velocity.z, inHands[0], inHands[1], slack, turnSlack, launch ? 1 : 0, claimRadius);
 	}
 }
@@ -1707,7 +1748,7 @@ void HandOverObjects() {
 			if (mover.entIndex != held || !mover.At(g.handover, pos, ang)) continue;
 			engine::PlayerState live;
 			if (engine::GetPlayer(slot.entIndex, live) && live.held > 0) continue;  // (already in their hands: the game's own catch)
-			engine::Script("::PP.UseObject(%d,%d,\"%s\",%.1f,%.1f,%.1f)", slot.entIndex, static_cast<int>(m), mover.className.c_str(), pos.x, pos.y, pos.z);
+			engine::Script("::PP.UseObject(%d,%d,%s,%.1f,%.1f,%.1f)", slot.entIndex, static_cast<int>(m), Quote(mover.className).c_str(), pos.x, pos.y, pos.z);
 		}
 	}
 }
@@ -1734,7 +1775,7 @@ void ShieldPlayers(bool onlyDriven) {
 // starts on the same tick as the record's).
 constexpr int kPortalLead = 2;
 int g_portalLead = kPortalLead;  // development: "prac_debug portallead N" overrides it
-int g_followTicks = 0;           // development: "prac_debug follow <ticks>", see FollowLog
+int g_followTicks = 0;           // development: "prac_debug follow <ticks>", see FollowTrace
 
 void PlacePortals() {
 	const Route &driver = Driver();
@@ -1759,7 +1800,7 @@ void PlacePortals() {
 			engine::Print("[portal] tick %d actor %d ent %d portal2 %d active %d open %d pos %.1f %.1f %.1f ang %.1f %.1f %.1f\n", change.tick,
 			              change.actor, change.portalEnt, change.portal2 ? 1 : 0, change.active ? 1 : 0, open ? 1 : 0, change.pos.x, change.pos.y,
 			              change.pos.z, change.ang.x, change.ang.y, change.ang.z);
-		ApplyPortalChange(driver, change, open);
+		ApplyPortalChange(driver, change, tick - g_portalLead, open);
 	}
 }
 
@@ -1807,7 +1848,6 @@ void RecordBest(std::map<int, int> &table, int key, int ticks, bool &isBest) {
 }
 
 void TrackPlayers() {
-	const float dt = g.route.tickInterval;
 	for (size_t a = 0; a < g.slots.size(); a++) {
 		Slot &slot = g.slots[a];
 		if (!slot.entIndex || slot.finished || (!slot.human && !g.replaying)) continue;
@@ -1855,7 +1895,7 @@ void Finish(bool atFlags) {
 	int ticks = finish - g.handover;
 	bool best = false;
 	if (!g.replaying) {
-		RecordBest(g.bestFromPart, g.segment, ticks, best);
+		RecordBest(g.bestFromTick, g.handover, ticks, best);
 		Result result;
 		result.part = g.segment;
 		result.seconds = (finish - g.route.timerStart) * g.route.tickInterval;
@@ -1872,6 +1912,8 @@ void Finish(bool atFlags) {
 	engine::Print("%s from part %d: %s%s, record %s (%s)\n", g.replaying ? "Replayed run" : "Attempt", g.segment + 1,
 	              ShowAt(finish).c_str(), atFlags ? " at the flags" : "", ShowAt(g.route.timerEnd).c_str(),
 	              Gap(finish - g.route.timerStart, g.route.timerEnd - g.route.timerStart).c_str());
+	ReleaseUseKeys();
+	SetDuckKey(false);
 	g.mode = Mode::Done;
 	g.doneTicks = 0;
 }
@@ -1883,8 +1925,7 @@ void Finish(bool atFlags) {
 // not, in every mode: the board pauses the game, and a run watched to its end or replayed reaches the flags too.)
 void DropSnapshotAtFlags() {
 	if (g.snapshotHandover < 0 || !g.snapshotHoldsDemo || !g.flagsUp || engine::EntityExists(kEndNode)) return;
-	g.snapshotHandover = -1;
-	engine::Execute("snap_drop %s", kSnapshotName);
+	DropSnapshot();
 	engine::Print("At the flags: the save state is dropped so the demo can be closed (the next attempt restarts the level).\n");
 }
 
@@ -2035,7 +2076,9 @@ void TickWatch() {
 	constexpr int kFlagsBeforeEnd = 3;
 	if (++g.cursor > g.route.timerEnd || (atFlags && g.cursor >= g.route.timerEnd - kFlagsBeforeEnd)) {
 		Flash(3, "END OF THE RECORD" + std::string(kDot) + ShowAt(g.route.timerEnd));
-		engine::Print("Watched the run to its end (%s).%c", ShowAt(g.route.timerEnd).c_str(), 10);
+		engine::Print("Watched the run to its end (%s).\n", ShowAt(g.route.timerEnd).c_str());
+		ReleaseUseKeys();
+		SetDuckKey(false);
 		g.mode = Mode::Done;
 		g.doneTicks = 0;
 	}
@@ -2127,6 +2170,7 @@ void TickDone() {
 	}
 	g.mode = Mode::Idle;
 	RestoreSpeed();
+	UnshieldPlayers();  // (a run that was watched had everyone protected to its end)
 }
 
 void TickWaitForPlayers() {
@@ -2224,12 +2268,11 @@ void CmdLoad(const sdk::CCommand &args) {
 	g.route = std::move(route);
 	g.hasRoute = true;
 	g.replaying = false;
-	g.bestFromPart.clear();
+	g.bestFromTick.clear();
 	g.bestPart.clear();
 	g.results.clear();
 	g.attempts = 0;
-	g.snapshotHandover = -1;
-	g.worldReached = g.route.firstTick - 1;
+	g.worldReached = g.levelTouched ? g.route.lastTick : g.route.firstTick - 1;
 	PrintLines(route::Describe(g.route));
 	if (MapMatches()) engine::Print("Ready. prac_start [part] to practice, prac_watch [part] to ride along.\n");
 	else engine::Print("Load %s to practice it (%s).\n", g.route.name.c_str(), LoadCommand().c_str());
@@ -2539,7 +2582,7 @@ void CmdDebug(const sdk::CCommand &args) {
 		result.gap = result.seconds - (g.route.timerEnd - g.route.timerStart) * g.route.tickInterval;
 		result.flags = args.ArgC() >= 5 && atoi(args.Arg(4)) != 0;
 		int ticks = static_cast<int>(std::lround(result.seconds / g.route.tickInterval));
-		RecordBest(g.bestFromPart, result.part, ticks, result.best);
+		RecordBest(g.bestFromTick, g.route.segments[result.part].startTick, ticks, result.best);
 		g.results.push_back(result);
 		g.attempts++;
 		return;
@@ -2663,13 +2706,17 @@ void Init() {
 }
 
 void Shutdown() {
+	if (g.helperLoaded) {
+		g.placedBots.clear();
+		SetBotMovement();  // (the bots move by themselves again)
+	}
 	Stop(false);
 	g = Session{};
 }
 
 void OnLevelInit(const char *mapName) {
 	// A new map load: nothing made in the old one exists any more
-	g.snapshotHandover = -1;
+	DropSnapshot();
 	g.snapshotIn = 0;
 	g.snapshotLoading = false;
 	g.helperLoaded = false;
@@ -2685,7 +2732,7 @@ void OnLevelInit(const char *mapName) {
 	g.humanDead = false;
 	g.registeredModels.clear();
 	g.slots.clear();
-	g.speedChanged = false;
+	RestoreSpeed();
 	// (a demo still to start again after a save state: SAR's own start on a level load comes first)
 	if (g.demoToRestart) g.demoRestartIn = std::max(g.demoRestartIn, 120);
 	if (g.hasRoute) g.worldReached = g.route.firstTick - 1;
@@ -2701,7 +2748,9 @@ void OnLevelInit(const char *mapName) {
 		g.reloadAskedAt = std::chrono::steady_clock::now();
 		g.waitTicks = 0;
 	} else {
+		// (a level the person went to themselves: practice is over, and the game is as they had it)
 		g.mode = Mode::Idle;
+		ReleaseGameSettings();
 	}
 	g.resumeAfterLoad = false;
 }
@@ -2717,6 +2766,8 @@ void OnLevelShutdown() {
 		g.levelWentAt = std::chrono::steady_clock::now();
 	}
 	if (g.mode != Mode::Reloading) g.mode = Mode::Idle;
+	ReleaseUseKeys();
+	SetDuckKey(false);
 	g.helperLoaded = false;
 	g.slots.clear();
 }
@@ -2740,6 +2791,8 @@ void OnFrame(bool simulating) {
 	if (restored) {
 		g.cursor = g.snapshotCursor;
 		g.snapshotLoading = false;
+		// (the restore took long enough for the short lead-in to end: the game is back in it)
+		if (g.mode == Mode::Run) g.mode = Mode::LeadIn;
 		// The shader API remembers what it has set on the graphics card, to skip setting it again: the restore takes
 		// that memory back to the save, but not the card, which keeps what the discarded timeline left there. In
 		// Turret Warehouse the room was then drawn with its projected light on and unshadowed (walls flat yellow,
@@ -2812,7 +2865,8 @@ void OnFrame(bool simulating) {
 // menu's Restart Level): while practicing in the route's level it is a retry of the attempt instead, which keeps
 // the lead-in, the save state and the bot. Out of practice the game restarts the level as usual.
 bool OnRestartCommand() {
-	if (!g.hasRoute || !MapMatches() || g.attempts == 0) return false;
+	// (savesOff: practice is on, from its first attempt until it is stopped)
+	if (!g.hasRoute || !MapMatches() || g.attempts == 0 || !g.savesOff) return false;
 	// The next attempt's level is already on its way (a retry that restarts the level, or the loop after a finish):
 	// the game's own restart on top of it would load the level once more, and the trainer, finding a level it
 	// hadn't asked for, would leave it alone (no ghost, no route). The restart is the one already coming. (Not

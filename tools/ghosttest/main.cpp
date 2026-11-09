@@ -1,7 +1,7 @@
 // Development check for the wireframe ghost models: makes the copies for a game folder, as the plugin would,
 // without the game. The copies are written under that folder, so point it at a test profile (or a scratch
 // folder beside a Portal 2 install), not at the real portal2 folder.
-// Usage: ghosttest <game folder, e.g. ...\Portal 2\p2practice-test\t1\portal2> [low]
+// Usage: ghosttest <game folder, e.g. ...\Portal 2\p2practice-test\t1\portal2> [low | full]
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>

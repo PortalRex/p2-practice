@@ -115,7 +115,11 @@ void ReadValue(BitReader &br, const PropCoding &p, const PropCoding *element, Pr
 		PropValue ignored;
 		for (uint32_t i = 0; i < count; i++) {
 			if (!element) throw DecodeError("array prop without an element prop");
+			const size_t before = br.pos();
 			ReadValue(br, *element, nullptr, ignored);
+			// (an element that takes no bits takes none the next time either, and its value isn't kept: a
+			// made-up table can't have the rest of the count spent on nothing)
+			if (br.pos() == before) break;
 		}
 		out.kind = PropValue::OTHER;
 		out.count = 0;

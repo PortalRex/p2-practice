@@ -43,7 +43,9 @@ namespace P2Practice {
 		List<Boards.Entry> boardRows = new List<Boards.Entry>(), boardAll = new List<Boards.Entry>();
 		readonly Dictionary<string, List<Boards.Entry>> boardCache = new Dictionary<string, List<Boards.Entry>>();
 		bool boardBusy;
-		string wantedDemo;                   // a demo just downloaded: selected once the library has read it
+		ContextMenuStrip chamberMenu;        // the chamber button's menu, while it is (or was last) open
+		string wantedDemo;                   // a demo being fetched: selected once the library has read it
+		bool wantedOnDisk;                   // ...its file is there by now, and the library was told to read it
 		PartsList parts;
 		RunHeader sign;
 		Words notes, status, libraryLabel;
@@ -84,6 +86,7 @@ namespace P2Practice {
 			PlaceWindow();
 
 			HandleCreated += (s, e) => Native.DarkTitleBar(Handle, Theme.IsDark);
+			Microsoft.Win32.SystemEvents.UserPreferenceChanged += WindowsPreferenceChanged; // (taken off again in Dispose)
 			if (!GameLocator.IsGameDir(settings.GameDir)) Say("Portal 2 wasn't found. Choose its folder under Game > Choose Portal 2 folder.", true);
 			else if (!RouteCli.Exists) Say(RouteCli.MissingMessage + ".", true);
 			else if (App.DryRun) Say("Dry run: Launch starts nothing and writes what it would do to " + App.LogPath);
@@ -107,11 +110,11 @@ namespace P2Practice {
 			ForeColor = Theme.Ink;
 
 			var body = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Field, Padding = new Padding(P(12), P(12), P(12), P(2)) };
-			var board = BuildLibrary();
+			var libraryCard = BuildLibrary();
 			var gap = new Panel { Dock = DockStyle.Right, Width = P(12), BackColor = Theme.Field };
 			var side = BuildSide();
 			// (docked from the last one added to the first: the sign on the right, the gap, and the list gets the rest)
-			body.Controls.AddRange(new Control[] { board, gap, side });
+			body.Controls.AddRange(new Control[] { libraryCard, gap, side });
 			Controls.AddRange(new Control[] { body, BuildStatusBar(), BuildBand() });
 			MainMenuStrip = menu;
 			building = false;
@@ -288,7 +291,9 @@ namespace P2Practice {
 
 		// The chambers, chapter by chapter, as a menu under the chamber button
 		void ChamberMenu() {
-			var menu = new ContextMenuStrip { Font = look.Body, ShowImageMargin = false, BackColor = Theme.Panel, Renderer = new SignMenuRenderer() };
+			if (chamberMenu != null) chamberMenu.Dispose(); // (the one shown last time, its items and drop-downs with it)
+			var renderer = new SignMenuRenderer();
+			var menu = chamberMenu = new ContextMenuStrip { Font = look.Body, ShowImageMargin = false, BackColor = Theme.Panel, Renderer = renderer };
 			foreach (var chapter in Boards.Chapters()) {
 				var item = new ToolStripMenuItem(chapter.Name);
 				foreach (var chamber in chapter.Chambers) {
@@ -296,7 +301,7 @@ namespace P2Practice {
 					item.DropDownItems.Add(new ToolStripMenuItem(chamber.Value, null, (s, e) => LoadBoard(map)) { Checked = map == boardMap });
 				}
 				var drop = item.DropDown as ToolStripDropDownMenu;
-				if (drop != null) { drop.Font = look.Body; drop.ShowImageMargin = false; drop.BackColor = Theme.Panel; drop.Renderer = new SignMenuRenderer(); }
+				if (drop != null) { drop.Font = look.Body; drop.ShowImageMargin = false; drop.BackColor = Theme.Panel; drop.Renderer = renderer; }
 				menu.Items.Add(item);
 			}
 			menu.Show(chamberButton, new Point(0, chamberButton.Height));
@@ -356,7 +361,7 @@ namespace P2Practice {
 		void SyncBoardSelection() {
 			if (building || !boardsView) return;
 			var e = BoardSelected();
-			getButton.Enabled = e != null && e.Complete && !Saved(e);
+			getButton.Enabled = e != null && e.Complete && RunOf(e) == null; // (also a fetched one the library doesn't list)
 			if (e == null) { ShowRun(null); return; }
 			var run = Saved(e) ? RunOf(e) : null;
 			if (run != null) { if (selected == null || selected.Key != run.Key) ShowRun(run); return; }
@@ -370,7 +375,11 @@ namespace P2Practice {
 				sign.Players.Add(new RunHeader.Player { Chip = Theme.Blue, Name = e.Player });
 				sign.Players.Add(new RunHeader.Player { Chip = Theme.Orange, Name = e.Partner.Player });
 			}
-			sign.Players.Add(new RunHeader.Player { Name = e.Complete ? (wantedDemo != null && wantedDemo == Boards.DemoPath(boardMap, e) ? "fetching the demo…" : "not fetched yet: press Enter or Get demo") : "no demo on the board", Aside = true });
+			string state = !e.Complete ? "no demo on the board"
+				: wantedDemo != null && wantedDemo == Boards.DemoPath(boardMap, e) ? "fetching the demo…"
+				: Boards.Downloaded(boardMap, e) ? "fetched, but not in the list: press Enter or Get demo to read it"
+				: "not fetched yet: press Enter or Get demo";
+			sign.Players.Add(new RunHeader.Player { Name = state, Aside = true });
 			sign.Invalidate();
 		}
 
@@ -397,14 +406,20 @@ namespace P2Practice {
 			if (e == null || boardMap == null) return;
 			if (!e.Complete) { Say("That run has no demo on the board.", true); return; }
 			string map = boardMap;
-			if (Saved(e)) {
-				var run = RunOf(e);
-				if (run != null) { ShowRun(run); Launch(); }
-				return;
-			}
+			var known = RunOf(e);
+			if (known != null) { ShowRun(known); Launch(); return; }
 			if (wantedDemo != null) { Say("Still fetching the last one…"); return; }
 			wantedDemo = Boards.DemoPath(map, e);
+			wantedOnDisk = false;
 			getButton.Enabled = false;
+			if (Boards.Downloaded(map, e)) {
+				// fetched before, but the library doesn't list it: the boards folder was taken off the list, or
+				// the file got there some other way since the folders were read
+				Say("Reading " + e.Players + "'s " + Maps.Name(map) + " demo…");
+				ReadBoardsFolder();
+				SyncBoardSelection();
+				return;
+			}
 			Say("Fetching " + e.Players + "'s " + Maps.Name(map) + " demo from the board…");
 			SyncBoardSelection();
 			ThreadPool.QueueUserWorkItem(_ => {
@@ -413,14 +428,27 @@ namespace P2Practice {
 				catch (Exception ex) { error = ex.Message; }
 				try {
 					BeginInvoke((Action)(() => {
-						if (error != null) { wantedDemo = null; Say("The demo couldn't be fetched: " + error, true); SyncBoardSelection(); return; }
+						if (error != null) { GiveUpOnWanted("The demo couldn't be fetched: " + error); return; }
 						Say("Fetched " + e.Players + "'s " + Maps.Name(map) + " demo. Reading it…");
-						if (!settings.HasFolder(Boards.Folder)) { settings.Folders.Add(Boards.Folder); settings.FoldersSaved = true; settings.Save(); }
-						library.Start(settings.Folders);
-						board.Invalidate();
+						ReadBoardsFolder();
 					}));
 				} catch (InvalidOperationException) { }
 			});
+		}
+
+		// Has the library read the boards folder (putting it on the list of folders if it isn't); Poll then
+		// selects the wanted demo's run, or says why there is none.
+		void ReadBoardsFolder() {
+			wantedOnDisk = true;
+			if (!settings.HasFolder(Boards.Folder)) { settings.Folders.Add(Boards.Folder); settings.FoldersSaved = true; settings.Save(); }
+			library.Start(settings.Folders);
+			board.Invalidate();
+		}
+
+		void GiveUpOnWanted(string why) {
+			wantedDemo = null;
+			Say(why, true);
+			SyncBoardSelection();
 		}
 
 		// The sign on the right: the run, its parts, the options, Launch.
@@ -563,9 +591,17 @@ namespace P2Practice {
 			return bar;
 		}
 
+		// Empties a menu that is about to be filled again. (Clear() alone only lets go of the items; they and
+		// their drop-downs hold on to what they use until disposed.)
+		static void DisposeItems(ToolStripItemCollection items) {
+			var old = items.Cast<ToolStripItem>().ToList();
+			items.Clear();
+			foreach (var item in old) item.Dispose();
+		}
+
 		void FillDemosMenu() {
 			var items = demosMenu.DropDownItems;
-			items.Clear();
+			DisposeItems(items);
 			items.Add(new ToolStripMenuItem("&Add folder…", null, (s, e) => AddFolder()) { ShortcutKeyDisplayString = "Ctrl+O" });
 			items.Add(new ToolStripMenuItem("&Read the folders again", null, (s, e) => Rescan()) { ShortcutKeyDisplayString = "F5" });
 			items.Add(new ToolStripSeparator());
@@ -586,7 +622,7 @@ namespace P2Practice {
 
 		void FillGameMenu() {
 			var items = gameMenu.DropDownItems;
-			items.Clear();
+			DisposeItems(items);
 			bool found = GameLocator.IsGameDir(settings.GameDir);
 			items.Add(new ToolStripMenuItem(found ? settings.GameDir.Replace("&", "&&") : "(Portal 2 not found)") { Enabled = false });
 			items.Add(new ToolStripMenuItem("&Choose Portal 2 folder…", null, (s, e) => ChooseGame()));
@@ -599,6 +635,17 @@ namespace P2Practice {
 				items.Add(new ToolStripMenuItem(choice[1], null, (s, e) => SetTheme(mode)) { Checked = settings.Theme == mode });
 			}
 			Dress(gameMenu);
+		}
+
+		// Windows was switched between light and dark (among everything else this event tells of): followed at
+		// once when the window is set to follow Windows.
+		void WindowsPreferenceChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e) {
+			if (IsDisposed || !IsHandleCreated) return;
+			if (InvokeRequired) { // (the event comes on the thread that first asked for system events)
+				try { BeginInvoke((Action)(() => WindowsPreferenceChanged(sender, e))); } catch (InvalidOperationException) { }
+				return;
+			}
+			if (settings.Theme == "system" && !building) SetTheme("system"); // (does nothing unless light/dark changed)
 		}
 
 		// Light or dark: the palette is switched and the window built again in it
@@ -789,6 +836,9 @@ namespace P2Practice {
 						ShowRun(run);
 						if (boardsView) { getButton.Enabled = false; board.Invalidate(); }
 					}
+					// it was read and is no good, or the folders were read through without it turning up
+					else if (run != null && !run.Ok) GiveUpOnWanted("The fetched demo can't be used: " + (run.Demo.Scan.Error ?? "it couldn't be read") + ".");
+					else if (run == null && wantedOnDisk && !library.Busy) GiveUpOnWanted("The fetched demo didn't turn up in the list. It is in " + Boards.Folder);
 				}
 				if (!library.Busy) {
 					// demos that weren't read because the helper itself failed: say so once, it is not the demos' fault
@@ -1000,9 +1050,6 @@ namespace P2Practice {
 			o.Extra = extra.Box.Text.Trim();
 		}
 
-		// The co-op choices only mean something for a co-op run, and the robot only when a bot plays the other
-		// one. The portal colour everything is marked with follows: orange when the player is about to be
-		// P-body, blue otherwise (ATLAS, or single player).
 		// "r g b" as a colour, or null for the default
 		static Color? ColorOf(string text) {
 			string parsed = Options.ParseColor(text);
@@ -1011,6 +1058,9 @@ namespace P2Practice {
 			return Color.FromArgb(int.Parse(p[0]), int.Parse(p[1]), int.Parse(p[2]));
 		}
 
+		// The co-op choices only mean something for a co-op run, and the robot only when a bot plays the other
+		// one. The portal colour everything is marked with follows: orange when the player is about to be
+		// P-body, blue otherwise (ATLAS, or single player).
 		void EnableOptions() {
 			if (building || launch == null) return;
 			bool ok = selected != null && selected.Ok, coop = ok && selected.Coop;
@@ -1132,6 +1182,7 @@ namespace P2Practice {
 
 		void Rescan() {
 			infos.Clear();
+			library.ForgetSlow();
 			Say("");
 			library.Start(settings.Folders);
 		}
@@ -1296,6 +1347,8 @@ namespace P2Practice {
 
 		protected override void Dispose(bool disposing) {
 			if (disposing) {
+				Microsoft.Win32.SystemEvents.UserPreferenceChanged -= WindowsPreferenceChanged; // (a static event: it would keep the window alive)
+				if (chamberMenu != null) chamberMenu.Dispose();
 				poll.Dispose();
 				if (tips != null) tips.Dispose();
 				if (look != null) look.Dispose();

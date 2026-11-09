@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -54,7 +56,6 @@ struct State {
 	int menuKey = 0;  // index into kMenuKeys
 	// practice page
 	std::string loadedKey;  // the run the page's choices were set for
-	int part = 0;
 	float takeOver = 0;
 	int mode = 0, role = 0, partner = 0;  // practice/watch, blue/orange, bot/real partner
 	int partsScroll = 0;
@@ -64,11 +65,13 @@ struct State {
 	int runsSort = 0;          // 0 by chamber (the game's order), 1 fastest first, 2 newest first
 	int libraryVersion = -1;
 	std::vector<int> shown;  // indices of the runs matching the search
-	int runsScroll = 0, selectedRun = -1;
+	int runsScroll = 0;
+	// (runs are known by their demo's path, not their place in the list: the list is made again, in another order,
+	// whenever the folders are read)
+	std::string selectedRun, lastClicked;
 	bool foldersOpen = false;
 	std::string newFolder, folderNote;
 	DWORD lastClick = 0;
-	int lastClicked = -1;
 	// boards page
 	std::string boardMap;
 	std::string chamberFilter;
@@ -76,6 +79,7 @@ struct State {
 	int chaptersScroll = 0, boardScroll = 0, selectedEntry = -1;
 	std::map<int, bool> downloaded;  // by changelog id, for the board shown
 	bool downloading = false;
+	std::string downloadMap, downloadName;  // the chamber the demo on its way was asked for: its map and name
 	std::string boardNote;
 	// recent page
 	std::string recentKey;      // the loaded run last put on top of the recent list
@@ -85,7 +89,7 @@ struct State {
 	std::string saveName;         // the practice page's name for a saved run
 	std::string profileName;      // the settings page's name for saved settings
 	std::string profileNote;
-	int saveSettingsIn = 0;       // frames until the settings are written (after loading saved ones)
+	int saveSettingsIn = 0;       // frames until the settings are written (after loading saved ones or dragging a slider)
 	// messages along the bottom
 	std::string note;
 	DWORD noteUntil = 0;
@@ -165,6 +169,8 @@ std::vector<std::string> Profiles() {
 	return names;
 }
 
+constexpr int kSaveAfterDrag = 30;  // frames a slider stays put before its value is written (see saveSettingsIn)
+
 void Set(const std::string &line) {
 	engine::Execute("%s", line.c_str());
 	SaveSettings();
@@ -194,7 +200,7 @@ void Open(bool open) {
 	if (!open) ui::Unfocus();
 }
 
-// prac_menu [practice|runs|boards|settings|close]
+// prac_menu [practice|recent|runs|boards|settings|close]
 void CmdMenu(const sdk::CCommand &args) {
 	if (args.ArgC() < 2) {
 		Open(!g.open);
@@ -239,6 +245,15 @@ void CmdFolders(const sdk::CCommand &) {
 }
 
 // ---- starting a session ----
+// Whether a map's name, which comes out of a demo file, can go into a console command: only the characters map
+// names are made of (a ; or a quote in it would run whatever follows as a command)
+bool PlainMapName(const std::string &map) {
+	if (map.empty()) return false;
+	for (char c : map)
+		if (!isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-' && c != '/' && c != '.') return false;
+	return true;
+}
+
 void StartSession(const trainer::Status &s) {
 	if (s.coop) {
 		engine::Execute("prac_role %s", g.role == 1 ? "orange" : "blue");
@@ -249,6 +264,11 @@ void StartSession(const trainer::Status &s) {
 	if (s.mapLoaded) {
 		engine::CallCommand("prac_goto", Format("%.3f%s", g.takeOver, watch ? " watch" : "").c_str());
 	} else {
+		bool loadsMap = !s.coop || g.partner == 0;
+		if (loadsMap && !PlainMapName(s.map)) {
+			Note("This demo's map has a name the menu won't load (" + s.map + "): load the map yourself, then START.", 10);
+			return;
+		}
 		engine::Execute("prac_stop");
 		engine::CallCommand("prac_auto", Format("%sat %.3f", watch ? "watch " : "", g.takeOver).c_str());
 		if (!s.coop) engine::Execute("map %s", s.map.c_str());
@@ -441,8 +461,9 @@ void PracticePage(Rect area, const trainer::Status &s) {
 	std::string key = s.files.empty() ? s.map : s.files[0];
 	if (key != g.loadedKey) {
 		g.loadedKey = key;
-		g.part = s.part >= 0 ? s.part : 0;
-		g.takeOver = s.parts.empty() ? 0 : s.parts[g.part].start;
+		// (from the part the trainer is on, when it is one of this run's)
+		size_t part = s.part >= 0 && static_cast<size_t>(s.part) < s.parts.size() ? static_cast<size_t>(s.part) : 0;
+		g.takeOver = s.parts.empty() ? 0 : s.parts[part].start;
 		const trainer::Settings &set = trainer::CurrentSettings();
 		g.role = set.role == route::kTeamOrange ? 1 : 0;
 		g.partner = set.partner ? 0 : 1;
@@ -456,8 +477,6 @@ void PracticePage(Rect area, const trainer::Status &s) {
 			g.mode = e.mode;
 			g.role = e.role;
 			g.partner = e.partner;
-			for (size_t i = 0; i < s.parts.size(); i++)
-				if (g.takeOver >= s.parts[i].start - 0.001f) g.part = static_cast<int>(i);
 			Set(Format("prac_set leadin %g", e.leadIn));
 			Set(Format("prac_set speed %g", e.speed));
 			g.saveName = e.name;
@@ -533,10 +552,7 @@ void PracticePage(Rect area, const trainer::Status &s) {
 		}
 		ui::TextIn(num.x + num.w + Px(14), ty, row.w - num.w - timesW - Px(50), Font::Normal, theme::kText, s.parts[i].name);
 		if (s.active && s.part == i) gfx::FillRect(row.x + row.w - Px(4), row.y, Px(4), row.h, theme::kOrange);
-		if (clicked) {
-			g.part = i;
-			g.takeOver = s.parts[i].start;
-		}
+		if (clicked) g.takeOver = s.parts[i].start;
 	}
 	ui::EndList(list);
 	ui::HintFor(listArea, "Click a part to take over at its start; the coloured time is your best finish from it against the record");
@@ -706,7 +722,7 @@ void RunsPage(Rect area) {
 	for (int i = list.first; i < list.last; i++) {
 		const library::Run &run = runs[g.shown[i]];
 		bool clicked;
-		Rect row = ui::ListRow(list, i, g.selectedRun == g.shown[i], clicked);
+		Rect row = ui::ListRow(list, i, g.selectedRun == run.demo->path, clicked);
 		if (row.y < -1000) continue;
 		ui::Spot("run:" + std::to_string(i), row);
 		int ty = row.y + (row.h - gfx::FontHeight(Font::Normal)) / 2;
@@ -724,9 +740,9 @@ void RunsPage(Rect area) {
 			ui::TextIn(cx[3], ty, cx[4] - cx[3] - Px(10), Font::Normal, theme::kDim, run.demo->ok ? "SP" : "");
 		ui::TextIn(cx[4], ty, row.x + row.w - cx[4] - Px(6), Font::Small, theme::kDim, run.files);
 		if (clicked) {
-			bool twice = g.lastClicked == g.shown[i] && GetTickCount() - g.lastClick < 400;
-			g.selectedRun = g.shown[i];
-			g.lastClicked = g.shown[i];
+			bool twice = g.lastClicked == run.demo->path && GetTickCount() - g.lastClick < 400;
+			g.selectedRun = run.demo->path;
+			g.lastClicked = run.demo->path;
 			g.lastClick = GetTickCount();
 			if (twice && run.demo->ok) LoadRun(library::LoadCommand(run), run.chamber);
 		}
@@ -740,10 +756,45 @@ void RunsPage(Rect area) {
 	std::string count = Format("%d runs", static_cast<int>(g.shown.size()));
 	if (library::Busy()) count += Format("  \xC2\xB7  reading demos %d / %d", done, total);
 	gfx::Text(bottom.x, bottom.y + (bottom.h - gfx::FontHeight(Font::Small)) / 2, Font::Small, theme::kDim, count.c_str());
-	bool canLoad = g.selectedRun >= 0 && g.selectedRun < static_cast<int>(runs.size()) && runs[g.selectedRun].demo->ok;
+	// the selected run, where it is in the list now (nowhere once its demo is gone)
+	const library::Run *selected = nullptr;
+	if (!g.selectedRun.empty())
+		for (const library::Run &run : runs)
+			if (run.demo->path == g.selectedRun) selected = &run;
+	bool canLoad = selected && selected->demo->ok;
 	if (ui::ButtonIn({bottom.x + bottom.w - Px(260), bottom.y, Px(260), bottom.h}, "LOAD THIS RUN", true, canLoad))
-		LoadRun(library::LoadCommand(runs[g.selectedRun]), runs[g.selectedRun].chamber);
+		LoadRun(library::LoadCommand(*selected), selected->chamber);
 	ui::EndArea();
+}
+
+// Asks for a run's demo(s) from the board shown, remembering the chamber it is for
+void GetDemo(const boards::Entry &entry) {
+	boards::Download(g.boardMap, entry);
+	g.downloading = true;
+	g.downloadMap = g.boardMap;
+	g.downloadName = maps::ChamberName(g.boardMap);
+	g.boardNote.clear();
+}
+
+// A demo asked for from the boards is loaded as soon as it is here. Looked at every frame, whatever page is up
+// (and with the menu closed): left to the boards page, it would be loaded only when the player came back to that
+// page, over whatever was being practiced by then and under the name of the board shown then.
+void FinishDownload() {
+	if (!g.downloading) return;
+	boards::State download = boards::DownloadState();
+	if (download == boards::State::Busy) return;
+	g.downloading = false;
+	if (download == boards::State::Ready && !boards::DownloadedFiles().empty()) {
+		std::string arguments;
+		for (const std::string &f : boards::DownloadedFiles()) arguments += (arguments.empty() ? "\"" : " \"") + f + "\"";
+		g.downloaded.clear();  // (the board shown marks it "saved" from now on)
+		library::Refresh();
+		LoadRun(arguments, g.downloadName);
+	} else {
+		std::string failed = "Download failed: " + boards::DownloadError();
+		if (g.downloadMap == g.boardMap) g.boardNote = failed;
+		Note(g.downloadName + ": " + failed, 8);
+	}
 }
 
 // The boards page: chambers on the left, the chosen chamber's board on the right
@@ -875,36 +926,18 @@ void BoardsPage(Rect area) {
 			bool twice = g.selectedEntry == i && GetTickCount() - g.lastClick < 400;
 			g.selectedEntry = i;
 			g.lastClick = GetTickCount();
-			if (twice && e.Complete() && !g.downloading) {
-				boards::Download(g.boardMap, e);
-				g.downloading = true;
-			}
+			if (twice && e.Complete() && !g.downloading) GetDemo(e);
 		}
 	}
 	ui::EndList(list);
 	ui::HintFor(listArea, "Double-click a run to get its demo and load it (\"saved\": it is on this computer already)");
 
-	// a finished download is loaded at once
-	boards::State download = boards::DownloadState();
-	if (g.downloading && download != boards::State::Busy) {
-		g.downloading = false;
-		if (download == boards::State::Ready && !boards::DownloadedFiles().empty()) {
-			std::string arguments;
-			for (const std::string &f : boards::DownloadedFiles()) arguments += (arguments.empty() ? "\"" : " \"") + f + "\"";
-			g.downloaded.clear();
-			library::Refresh();
-			LoadRun(arguments, maps::ChamberName(g.boardMap));
-		} else
-			g.boardNote = "Download failed: " + boards::DownloadError();
-	}
-
+	// (a finished download is loaded by FinishDownload)
 	Rect bottom{listArea.x, listArea.y + listArea.h + Px(12), listArea.w, Px(40)};
 	bool canGet = g.selectedEntry >= 0 && g.selectedEntry < static_cast<int>(entries.size()) && entries[g.selectedEntry].Complete();
 	std::string label = g.downloading ? "DOWNLOADING..." : canGet && g.downloaded[entries[g.selectedEntry].changelogId] ? "LOAD THIS RUN" : "GET DEMO";
-	if (ui::ButtonIn({bottom.x + bottom.w - Px(260), bottom.y, Px(260), bottom.h}, label, true, canGet && !g.downloading)) {
-		boards::Download(g.boardMap, entries[g.selectedEntry]);
-		g.downloading = true;
-	}
+	if (ui::ButtonIn({bottom.x + bottom.w - Px(260), bottom.y, Px(260), bottom.h}, label, true, canGet && !g.downloading))
+		GetDemo(entries[g.selectedEntry]);
 	std::string info = g.boardNote.empty() ? Format("%d runs on the board", static_cast<int>(entries.size())) : g.boardNote;
 	ui::TextIn(bottom.x, bottom.y + (bottom.h - gfx::FontHeight(Font::Small)) / 2, bottom.w - Px(280), Font::Small,
 	           g.boardNote.empty() ? theme::kDim : theme::kOrange, info);
@@ -1067,7 +1100,11 @@ void SettingsPage(Rect area, const trainer::Status &s) {
 	}
 	ui::Hint("The ghosts' colour: the robots' own blue and orange, or one that stands out");
 	float opacity = static_cast<float>(set.ghostOpacity);
-	if (ui::Slider("OPACITY", opacity, 10, 100, "%.0f%%")) Set(Format("prac_set ghostopacity %d", static_cast<int>(opacity + 0.5f)));
+	if (ui::Slider("OPACITY", opacity, 10, 100, "%.0f%%")) {
+		// (shown at once; written to the settings file when the dragging has stopped, not on every frame of it)
+		engine::Execute("prac_set ghostopacity %d", static_cast<int>(opacity + 0.5f));
+		g.saveSettingsIn = kSaveAfterDrag;
+	}
 	ui::Hint("How see-through the ghosts are");
 	ui::Caption("ON SCREEN");
 	bool hudOn = set.hud, speedo = set.speedometer, path = set.path;
@@ -1408,6 +1445,7 @@ void Draw() {
 	hud::Draw();
 	if (g_tour.on && !g.open) DrawCursor();
 	if (g.saveSettingsIn > 0 && --g.saveSettingsIn == 0) SaveSettings();
+	FinishDownload();
 	// (the recent list, a few times a second: enough to catch every load and finish)
 	static int recentFrames = 0;
 	if (++recentFrames >= 15) {
@@ -1466,6 +1504,7 @@ bool Init() {
 void Shutdown() {
 	if (!g.ready) return;
 	EndTour();
+	if (g.saveSettingsIn > 0) SaveSettings();  // (a change still waiting to be written)
 	trainer::UseDrawnHud(false);
 	gfx::Shutdown();
 	library::Shutdown();

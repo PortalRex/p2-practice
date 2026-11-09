@@ -1,9 +1,12 @@
 // Everything the trainer needs from the running game, behind plain functions.
 //
 // Reading goes through networked entity fields found by name at load time. Acting goes through the game's own
-// console commands and VScript, so the trainer installs no hooks and patches nothing: it cannot collide with SAR,
-// p2boost or any other plugin, and it keeps working across game updates as long as those names exist. (The
-// in-game menu and HUD are the exception: ui/gfx.cpp hooks the game's drawing and input, and says how.)
+// console commands and VScript wherever they reach, which keeps the trainer working across game updates as long
+// as those names exist and out of the way of SAR, p2boost and other plugins. The exceptions, each described where
+// it is declared below: one hooked function-table slot (HoldClientCommands), the hiding flags taken off two cvars
+// (Init), and a handful of fields written straight into entities (SetGodMode,
+// SetMovementSpeed, SetChallengeSeconds, SetEyeHeight, SetPoseParameters). The in-game menu and HUD hook the
+// game's drawing and input besides: ui/gfx.cpp says how.
 #pragma once
 
 #include <string>
@@ -46,7 +49,7 @@ int MaxClients();
 int TickCount();
 float TickInterval();
 const char *MapName();             // "" between maps
-std::string GameDirectory();       // ...\Portal 2\portal2
+std::string GameDirectory();       // ...\Portal 2\portal2, as UTF-8 (for std::filesystem::u8path)
 bool RecordingDemo();              // a demo is being recorded (by the person, SAR or a config)
 
 enum Team { kTeamNone = 0, kTeamOrange = 2, kTeamBlue = 3 };
@@ -88,8 +91,7 @@ void DropHeldClientCommands();
 void MakeCoroutineList();
 
 // Turns the game's god mode on or off for a player: the flag its own "god" command sets, which that command
-// can only set for the player typing it. (With the ClientCommand slot of HoldClientCommands, the only places
-// the plugin writes into the game's memory.)
+// can only set for the player typing it. Written straight into the player, as the setters below write theirs.
 void SetGodMode(int entIndex, bool on);
 
 // Scales how far the game's own movement takes a player each tick (m_flLaggedMovementValue: 1 normal, 0 not at
@@ -110,8 +112,7 @@ bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary);
 // A model blends its walk between directions (and its aim between angles) by pose parameters, numbers from 0 to
 // 1 that the game offers no console or script way to set. For a prop the trainer made itself (a ghost) they are
 // written straight into the prop, and the prop is marked as changed so that the game sends them to the players.
-// Besides god mode this is the only place the plugin writes into the game's memory, and never into anything
-// that isn't its own prop_dynamic. False when `entIndex` is not a prop_dynamic.
+// Never into anything that isn't a prop_dynamic: false when `entIndex` is not one.
 constexpr int kPoseParameters = 24;
 bool SetPoseParameters(int entIndex, const float values[kPoseParameters]);
 

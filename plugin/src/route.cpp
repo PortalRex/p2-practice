@@ -3,6 +3,7 @@
 #include "maps.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -194,11 +195,10 @@ void ApplyHeld(const p2demo::PlayerTrack &track, int tickOffset, int firstTick, 
 	}
 }
 
-// The map's entity class for a networked class whose objects the trainer can put back on their recorded paths:
-// things physics moves or players carry. Doors, lifts and other map machinery are not here: the map moves those
-// itself when its triggers fire.
 // The class an object has in the map, from the class the game networks it as (and, where several map classes
-// share one, its model): the live object is looked up by its map class.
+// share one, its model): the live object is looked up by its map class. Only for objects the trainer can put back
+// on their recorded paths, things physics moves or players carry; doors, lifts and other map machinery are not
+// here, since the map moves those itself when its triggers fire.
 const char *MoverClass(const std::string &serverClass, const std::string &model) {
 	// (a frankenturret is networked as a plain physics prop)
 	if (serverClass == "CPhysicsProp" && model.find("npcs/monsters/monster_") != std::string::npos) return "prop_monster_box";
@@ -235,6 +235,15 @@ int TrackTeam(const p2demo::PlayerTrack &track) {
 
 bool IsHostDemo(const Demo &demo) {
 	return demo.header.server.compare(0, 9, "localhost") == 0;
+}
+
+// How many ticks a player's track covers, first key to last. 0 for one no real demo gives (keys out of order, or
+// days apart: a damaged file), which must not size a table.
+int TickSpan(const p2demo::PlayerTrack &track) {
+	constexpr long long kMostTicks = 60 * 60 * 24 * 60;  // a day of ticks
+	if (track.keys.empty()) return 0;
+	long long span = static_cast<long long>(track.keys.back().tick) - track.keys.front().tick + 1;
+	return span >= 1 && span <= kMostTicks ? static_cast<int>(span) : 0;
 }
 
 // The smallest turn between two angles, in degrees (0..180)
@@ -298,16 +307,17 @@ bool TickOffset(const Demo &a, const Demo &b, int &stateOffset, int &inputOffset
 	constexpr int kLongestDelay = 60;   // inputs arrive within a second
 	const p2demo::PlayerTrack *seen = FindTrack(a, b.recorderEntIndex);
 	const p2demo::PlayerTrack *own = FindTrack(b, b.recorderEntIndex);
-	if (seen && own && seen->keys.size() >= 8 && own->keys.size() >= 8) {
+	if (seen && own && seen->keys.size() >= 8 && own->keys.size() >= 8 && TickSpan(*seen) > 0) {
 		// a's view of the player, tick by tick (a snapshot holds for the couple of ticks until the next)
 		constexpr int kSnapshotHolds = 3;
 		int seenFirstTick = seen->keys.front().tick;
-		std::vector<const p2demo::PlayerKey *> seenAt(static_cast<size_t>(seen->keys.back().tick - seenFirstTick + 1), nullptr);
+		std::vector<const p2demo::PlayerKey *> seenAt(static_cast<size_t>(TickSpan(*seen)), nullptr);
 		for (const p2demo::PlayerKey &key : seen->keys) {
 			if (!key.inSnapshot) continue;
 			for (int hold = 0; hold < kSnapshotHolds; hold++) {
-				size_t index = static_cast<size_t>(key.tick - seenFirstTick + hold);
-				if (index < seenAt.size() && (hold == 0 || !seenAt[index])) seenAt[index] = &key;
+				long long index = static_cast<long long>(key.tick) - seenFirstTick + hold;
+				if (index < 0 || index >= static_cast<long long>(seenAt.size())) continue;
+				if (hold == 0 || !seenAt[static_cast<size_t>(index)]) seenAt[static_cast<size_t>(index)] = &key;
 			}
 		}
 		std::vector<SyncPoint> states, inputs;
@@ -520,6 +530,19 @@ bool Mover::At(int tick, Vec3 &pos, Vec3 &ang) const {
 		float t = static_cast<float>(tick - a.tick) / (b.tick - a.tick);
 		pos = Lerp(a.pos, b.pos, t);
 		ang = {LerpAngle(a.ang.x, b.ang.x, t), LerpAngle(a.ang.y, b.ang.y, t), LerpAngle(a.ang.z, b.ang.z, t)};
+		return true;
+	}
+	// Before a jump (a trigger_teleport, a portal) an object that was drifting along kept drifting for the tick
+	// or two until the next snapshot: Jail Break's cube falls into the trigger that cuts the power on the very
+	// tick it is taken to the dark chamber, and held still above it, it never got there. Slow things only: a
+	// fast one would be put deep in the wall behind its portal.
+	constexpr float kDriftPerTick = 16;
+	if (lo > 0 && lo + 1 < keys.size() && keys[lo + 1].present && keys[lo + 1].tick - a.tick <= kSnapshotGap && tick > a.tick) {
+		const MoverKey &before = keys[lo - 1];
+		int span = a.tick - before.tick;
+		float drift = Distance(before.pos, a.pos) / static_cast<float>(span > 0 ? span : 1);
+		if (before.present && span > 0 && span <= kSnapshotGap && drift > 0 && drift <= kDriftPerTick)
+			pos = Lerp(before.pos, a.pos, 1 + static_cast<float>(tick - a.tick) / static_cast<float>(span));
 	}
 	return true;
 }
@@ -551,6 +574,72 @@ int Route::ActorForTeam(int team) const {
 	for (size_t i = 0; i < actors.size(); i++)
 		if (actors[i].team == team) return static_cast<int>(i);
 	return -1;
+}
+
+// The way a portal faces, from the angles its shot was recorded with. A shot's angles are those of the portal
+// lying on its side: its up is the way the portal faces, its right the portal's up.
+static Vec3 PortalAnglesOfShot(Vec3 shot) {
+	constexpr float kRad = 3.14159265f / 180.0f;
+	float sp = std::sin(shot.x * kRad), cp = std::cos(shot.x * kRad);
+	float sy = std::sin(shot.y * kRad), cy = std::cos(shot.y * kRad);
+	float sr = std::sin(shot.z * kRad), cr = std::cos(shot.z * kRad);
+	Vec3 forward{cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp};  // (the shot's up)
+	Vec3 up{-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp};    // (the shot's right)
+	Vec3 left{up.y * forward.z - up.z * forward.y, up.z * forward.x - up.x * forward.z, up.x * forward.y - up.y * forward.x};
+	float flat = std::sqrt(forward.x * forward.x + forward.y * forward.y);
+	Vec3 angles{std::atan2(-forward.z, flat) / kRad, 0, 0};
+	if (flat > 0.001f) {
+		angles.y = std::atan2(forward.y, forward.x) / kRad;
+		angles.z = std::atan2(left.z, up.z) / kRad;
+	} else {
+		angles.y = std::atan2(-left.x, left.y) / kRad;  // (facing straight up or down: the turn is all in the yaw)
+	}
+	return angles;
+}
+
+// A portal on something that moves: the demo gives its place and the way it faces relative to what it rides on,
+// which is no use for putting it there again. The shot that placed it names both for the level, and SAR notes
+// where in the level the portal is as it moves. `change` gets the place the portal was put, the way it faced,
+// and the path (when SAR has it).
+static void RidingPath(const Demo &demo, bool secondPortal, int tick, int until, PortalChange &change) {
+	constexpr int kShotWindow = 2;  // ticks between a shot landing and the demo showing the portal there
+	constexpr int kPathGap = 8;     // ticks without a note from SAR: the portal has stopped
+	for (const auto &seen : demo.sarPortals) {
+		if (seen.orange != secondPortal || seen.tick < tick - kShotWindow || seen.tick > until) continue;
+		if (!change.path.empty() && seen.tick - change.path.back().first > kPathGap) break;
+		if (change.path.empty() && seen.tick > tick + kShotWindow) break;
+		change.path.push_back({seen.tick, seen.pos});
+	}
+	if (!change.path.empty()) change.pos = change.path.front().second;
+	for (const auto &shot : demo.portalShots) {
+		if (shot.result != 0 || (shot.portalNum == 2) != secondPortal || std::abs(shot.tick - tick) > kShotWindow) continue;
+		change.ang = PortalAnglesOfShot(shot.angles);
+		if (change.path.empty()) change.pos = shot.origin;
+	}
+}
+
+Vec3 PortalChange::PosAt(int at) const {
+	if (path.empty() || at <= path.front().first) return pos;
+	for (size_t i = 1; i < path.size(); i++) {
+		if (at > path[i].first) continue;
+		const auto &[fromTick, from] = path[i - 1];
+		const auto &[toTick, to] = path[i];
+		return Lerp(from, to, static_cast<float>(at - fromTick) / static_cast<float>(toTick - fromTick));
+	}
+	return path.back().second;
+}
+
+// Whether the demo's player turned noclip on: by the command, or by a script named after it (cheat menus bind
+// "script_execute cheats/noclip.nut"). Such a run goes through walls, which a player taking over can't.
+bool UsesNoclip(const Demo &demo) {
+	for (const auto &cmd : demo.consoleCmds) {
+		size_t start = cmd.text.find_first_not_of(' ');
+		if (start == std::string::npos) continue;
+		std::string word = cmd.text.substr(start, cmd.text.find(' ', start) - start);
+		if (word == "noclip") return true;
+		if (word == "script_execute" && cmd.text.find("noclip", start) != std::string::npos) return true;
+	}
+	return false;
 }
 
 const char *TeamName(int team) {
@@ -643,6 +732,8 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 		if (secondary) entries.push_back({secondary->recorderEntIndex, IsHostDemo(*secondary) ? kTeamBlue : kTeamOrange, secondary->header.client});
 		route.notes.push_back("This demo's entity data couldn't be read: portals and the partner's path are missing.");
 	}
+	if (UsesNoclip(primary) || (secondary && UsesNoclip(*secondary)))
+		route.notes.push_back("This run flies with noclip: taking over in the middle of a flight drops you where the walls are solid.");
 	std::stable_sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) { return a.team > b.team; });
 	if (entries.size() > 2) entries.resize(2);
 	route.coop = entries.size() > 1 || entries[0].team != 0;
@@ -699,6 +790,16 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 				change.active = k.active;
 				change.pos = k.origin;
 				change.ang = k.angles;
+				if (k.parent >= 0) {
+					// (the portal's last key in this place says how long the path is)
+					int until = k.tick;
+					for (const auto &later : track.keys) {
+						if (later.tick <= k.tick) continue;
+						if (!later.active || later.parent != k.parent || Distance(later.origin, k.origin) > 0.5f) break;
+						until = later.tick;
+					}
+					RidingPath(primary, track.isPortal2, k.tick, until, change);
+				}
 				// Whose portal: the game networks who fired it; a shot landing here at this moment says the same
 				for (size_t a = 0; a < route.actors.size(); a++)
 					if (route.actors[a].entIndex == k.firedBy) change.actor = static_cast<int>(a);
@@ -863,6 +964,71 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 			if (route.actors[k].entIndex == a.slot + 1) glitch.actor = static_cast<int>(k);
 		if (glitch.actor >= 0) route.buttonGlitches.push_back(std::move(glitch));
 	}
+
+	// The released-then-pressed kind on a floor button without an io proxy. The record has no input for the button
+	// itself, only what its outputs set off, with the player as the one who caused it; the first such input of a
+	// tick is the output's own target. So: a player sets off one thing (the release) and within a few ticks
+	// another (the press) that a player standing at this same place had set off before the first ever happened,
+	// and the first doesn't come again while a player hopping on the button would have left it. Triggers a
+	// player runs through one after the other look alike except for the place, and so does much else: it only
+	// counts next to a floor button, which the demo shows by the moving parts of its model.
+	std::vector<Vec3> floorButtons;
+	for (const auto &track : primary.movers)
+		if (track.className == "CBoneFollower" && track.model.find("portal_button") != std::string::npos && !track.keys.empty())
+			floorButtons.push_back(track.keys.front().origin);
+	struct Lead {
+		int tick, slot;
+		std::string key;  // target, input and parameter
+		bool proxy;
+		Vec3 at;          // where the player was
+		bool placed;      // `at` is known
+	};
+	const auto playerAt = [&route](int slot, int tick, Vec3 &at) {
+		for (const auto &actor : route.actors) {
+			const int index = tick - route.firstTick;
+			if (actor.entIndex != slot + 1 || index < 0 || index >= static_cast<int>(actor.samples.size()) || !actor.samples[index].present) continue;
+			at = actor.samples[index].pos;
+			return true;
+		}
+		return false;
+	};
+	std::vector<Lead> leads;
+	for (const auto &input : primary.sarEntityInputs) {
+		if (input.slot < 0 || input.target.empty()) continue;
+		if (!leads.empty() && leads.back().tick == input.tick && leads.back().slot == input.slot) continue;
+		Lead lead{input.tick, input.slot, input.target + ' ' + input.input + ' ' + input.param, input.className == "func_instance_io_proxy" || input.input == "Use", {}, false};
+		lead.placed = playerAt(lead.slot, lead.tick, lead.at);
+		leads.push_back(std::move(lead));
+	}
+	for (size_t i = 1; i < leads.size() && !floorButtons.empty(); i++) {
+		constexpr int kReleasedThenPressed = 4, kStaysPressed = 60;
+		constexpr float kSamePlace = 96;  // a floor button is about that wide
+		const Lead &press = leads[i];
+		const Lead *release = nullptr;
+		for (size_t j = i; j-- > 0 && leads[j].tick >= press.tick - kReleasedThenPressed && !release;)
+			if (leads[j].slot == press.slot && leads[j].tick < press.tick) release = &leads[j];
+		if (!release || release->key == press.key || release->proxy || press.proxy || !press.placed) continue;
+		bool pressedBefore = false, releasedFirst = false, releasedAgain = false;
+		for (size_t j = 0; j < leads.size() && leads[j].tick <= press.tick + kStaysPressed; j++) {
+			const Lead &other = leads[j];
+			if (other.tick < release->tick && other.key == release->key && !pressedBefore) releasedFirst = true;
+			if (other.tick < release->tick && other.key == press.key && other.placed && Distance(other.at, press.at) <= kSamePlace) pressedBefore = true;
+			if (other.tick > press.tick && other.key == release->key) releasedAgain = true;
+		}
+		if (!pressedBefore || releasedFirst || releasedAgain) continue;
+		const auto nearest = std::min_element(floorButtons.begin(), floorButtons.end(),
+		                                      [&press](Vec3 a, Vec3 b) { return Distance(a, press.at) < Distance(b, press.at); });
+		if (Distance(*nearest, press.at) > kSamePlace) continue;
+		ButtonGlitch glitch;
+		glitch.endsPressed = true;
+		glitch.tick = press.tick;
+		glitch.at = *nearest;
+		for (size_t k = 0; k < route.actors.size(); k++)
+			if (route.actors[k].entIndex == press.slot + 1) glitch.actor = static_cast<int>(k);
+		if (glitch.actor >= 0) route.buttonGlitches.push_back(std::move(glitch));
+	}
+	std::stable_sort(route.buttonGlitches.begin(), route.buttonGlitches.end(),
+	                 [](const ButtonGlitch &a, const ButtonGlitch &b) { return a.tick < b.tick; });
 
 	// Objects the run moved. An object attached to something (parent) has an origin relative to it, which says
 	// nothing here: those stretches are left out and the object stays where it last was.

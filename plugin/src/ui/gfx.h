@@ -6,10 +6,11 @@
 // released this frame; the mouse wheel; the cursor). While the menu has the input (`SetCapture(true)`), the
 // cursor is freed and shown, and neither the game nor its own menus see keys or clicks.
 //
-// This is the one part of the plugin that hooks the game: five function-table slots (the end of VGUI's paint,
-// the cursor lock, the client's key events, VGUI's button input), each patched in the table the object uses at
-// that moment and put back by Shutdown. SAR hooks the same objects by giving them a copy of their table; patching
-// the table in use keeps both working whichever of the two was loaded first.
+// This is where the plugin hooks the game (but for one slot in engine.cpp, see HoldClientCommands): five
+// function-table slots (the end of VGUI's paint, the cursor lock, the client's key events, VGUI's button input,
+// the surface's input events), each patched in the table the object uses at that moment and put back by Shutdown.
+// SAR hooks the same objects by giving them a copy of their table; patching the table in use keeps both working
+// whichever of the two was loaded first.
 #pragma once
 
 #include <cstdint>

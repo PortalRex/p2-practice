@@ -132,7 +132,7 @@ namespace P2Practice {
 				var user = Get(row, "userData") as Dictionary<string, object>;
 				if (score == null) continue;
 				var e = new Entry {
-					SteamId = kv.Key,
+					SteamId = Digits(kv.Key),
 					Player = user != null ? Convert.ToString(Get(user, "boardname") ?? "", CultureInfo.InvariantCulture) : "",
 					Score = Int(Get(score, "score")),
 					Rank = Int(Get(score, "scoreRank")),
@@ -160,6 +160,13 @@ namespace P2Practice {
 				entries = paired;
 			}
 			return entries;
+		}
+
+		// a Steam id as the board gives it, less anything that isn't a digit (it becomes part of a file name)
+		static string Digits(string text) {
+			var sb = new StringBuilder();
+			foreach (char c in text ?? "") if (c >= '0' && c <= '9') sb.Append(c);
+			return sb.ToString();
 		}
 
 		static object Get(Dictionary<string, object> d, string key) { object v; return d.TryGetValue(key, out v) ? v : null; }
@@ -190,17 +197,37 @@ namespace P2Practice {
 				string path = DemoPath(map, one);
 				if (File.Exists(path)) { files.Add(path); continue; }
 				string temp = path + ".part";
-				using (var c = Client()) c.DownloadFile(Site + "/getDemo?id=" + one.ChangelogId, temp);
-				var head = new byte[8];
-				using (var f = File.OpenRead(temp)) f.Read(head, 0, 8);
-				if (Encoding.ASCII.GetString(head, 0, 7) != "HL2DEMO") {
-					File.Delete(temp);
-					throw new InvalidDataException("The board sent no demo for " + one.Player + "'s run (it may not be public).");
+				try {
+					Save(Site + "/getDemo?id=" + one.ChangelogId, temp);
+					var head = new byte[8];
+					using (var f = File.OpenRead(temp)) f.Read(head, 0, 8);
+					if (Encoding.ASCII.GetString(head, 0, 7) != "HL2DEMO") throw new InvalidDataException("The board sent no demo for " + one.Player + "'s run (it may not be public).");
+					File.Move(temp, path);
+				} finally {
+					// (moved into place by now if all went well; whatever else happened, no half-fetched file stays)
+					try { File.Delete(temp); } catch (IOException) { } catch (UnauthorizedAccessException) { }
 				}
-				File.Move(temp, path);
 				files.Add(path);
 			}
 			return files;
+		}
+
+		// far more than any run's demo: what is given up on rather than filling the disk with whatever is sent
+		const long MaxDemoBytes = 256L << 20;
+
+		static void Save(string url, string file) {
+			using (var c = Client())
+			using (var from = c.OpenRead(url))
+			using (var to = File.Create(file)) {
+				var buffer = new byte[81920];
+				long total = 0;
+				int n;
+				while ((n = from.Read(buffer, 0, buffer.Length)) > 0) {
+					total += n;
+					if (total > MaxDemoBytes) throw new InvalidDataException("The board sent more than " + (MaxDemoBytes >> 20) + " MB, which is no demo.");
+					to.Write(buffer, 0, n);
+				}
+			}
 		}
 	}
 }

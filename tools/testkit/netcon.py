@@ -13,8 +13,35 @@ import sys
 import time
 
 
+VALUED_OPTIONS = {'--port', '--password', '--wait', '--until', '--timeout', '--connect-timeout', '--gap'}
+FLAG_OPTIONS = {'--quiet', '-h', '--help'}
+
+
+def split_arguments(tokens):
+    """The command line as (options, commands). A key release such as "-forward" looks like an option to
+    argparse, so the split is made here: whatever isn't one of this script's options (or the value of one) is a
+    command, in the order given, as is everything after a lone "--"."""
+    options, commands = [], []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == '--':
+            commands += tokens[i + 1:]
+            break
+        if token in VALUED_OPTIONS:
+            options += tokens[i:i + 2]
+            i += 2
+        elif token in FLAG_OPTIONS or token.split('=', 1)[0] in VALUED_OPTIONS:
+            options.append(token)
+            i += 1
+        else:
+            commands.append(token)
+            i += 1
+    return options, commands
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(usage='%(prog)s --port N [options] cmd [cmd ...]', allow_abbrev=False)
     ap.add_argument('--port', type=int, required=True)
     ap.add_argument('--password', default='p2practice')
     ap.add_argument('--wait', type=float, default=1.0)
@@ -23,27 +50,8 @@ def main() -> int:
     ap.add_argument('--connect-timeout', type=float, default=60.0)
     ap.add_argument('--gap', type=float, default=0.0, help='seconds between commands')
     ap.add_argument('--quiet', action='store_true')
-    ap.add_argument('commands', nargs='*')
-    # (a key release such as "-forward" looks like an option: anything that isn't one of the options above is a
-    # command, in the order given)
-    args, _ = ap.parse_known_args()
-    valued = {'--port', '--password', '--wait', '--until', '--timeout', '--connect-timeout', '--gap'}
-    args.commands = []
-    tokens = sys.argv[1:]
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-        if token == '--':
-            args.commands += tokens[i + 1:]
-            break
-        if token in valued:
-            i += 2
-            continue
-        if token.split('=', 1)[0] in valued or token == '--quiet':
-            i += 1
-            continue
-        args.commands.append(token)
-        i += 1
+    options, commands = split_arguments(sys.argv[1:])
+    args = ap.parse_args(options)
 
     deadline = time.time() + args.connect_timeout
     sock = None
@@ -84,7 +92,7 @@ def main() -> int:
                     matched = True
 
     drain(0.2)
-    for cmd in args.commands:
+    for cmd in commands:
         sock.sendall((cmd + '\r\n').encode())
         drain(max(args.gap, 0.05))
     if until:

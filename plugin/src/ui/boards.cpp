@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -88,8 +90,17 @@ struct Json {
 			if (m.first == key) return &m.second;
 		return nullptr;
 	}
-	int Int() const { return kind == Number ? static_cast<int>(number) : kind == Bool ? static_cast<int>(number) : kind == String ? atoi(text.c_str()) : 0; }
-	std::string Text() const { return kind == String ? text : kind == Number ? std::to_string(static_cast<long long>(number)) : ""; }
+	// (a number too large for an int, or not a number at all, is 0: converting it would be undefined)
+	int Int() const {
+		if (kind == String) return atoi(text.c_str());
+		if (kind != Number && kind != Bool) return 0;
+		return number >= INT_MIN && number <= INT_MAX ? static_cast<int>(number) : 0;
+	}
+	std::string Text() const {
+		if (kind == String) return text;
+		if (kind != Number || !(number >= -9e18 && number <= 9e18)) return "";
+		return std::to_string(static_cast<long long>(number));
+	}
 };
 
 class Reader {
@@ -184,15 +195,60 @@ private:
 };
 
 // ---- HTTPS ----
-// GET https://board.portal2.sr<path>: the body into `body`, or into the file `toFile`. False with `error` set.
+// The requests on their way, for Shutdown to break off: closing a request's handle makes the call waiting on it
+// return at once, where it would otherwise sit out its timeouts with the game waiting for the thread. A handle is
+// closed by whoever takes it off the list, so never twice.
+std::mutex g_requestGate;
+std::vector<HINTERNET> g_requests;
+std::atomic<bool> g_stop{false};  // the plugin is going: no new requests, and the ones on their way give up
+
+const char kStopped[] = "stopped";
+
+// False when the plugin is going (the request is not listed then, and stays the caller's to close)
+bool ListRequest(HINTERNET request) {
+	std::lock_guard<std::mutex> lock(g_requestGate);
+	if (g_stop) return false;
+	g_requests.push_back(request);
+	return true;
+}
+
+void CloseRequest(HINTERNET request) {
+	{
+		std::lock_guard<std::mutex> lock(g_requestGate);
+		auto listed = std::find(g_requests.begin(), g_requests.end(), request);
+		if (listed == g_requests.end()) return;  // (Shutdown closed it)
+		g_requests.erase(listed);
+	}
+	WinHttpCloseHandle(request);
+}
+
+void StopRequests() {
+	std::lock_guard<std::mutex> lock(g_requestGate);
+	g_stop = true;
+	for (HINTERNET request : g_requests) WinHttpCloseHandle(request);
+	g_requests.clear();
+}
+
+// GET https://board.portal2.sr<path>: the body into `body`, or into the file `toFile` (which is there afterwards
+// only when all of it came). False with `error` set.
 bool Get(const std::wstring &path, std::string *body, const std::wstring &toFile, std::string &error) {
+	if (g_stop) {
+		error = kStopped;
+		return false;
+	}
 	bool ok = false;
 	HINTERNET session = WinHttpOpen(L"P2Practice", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 	HINTERNET connect = session ? WinHttpConnect(session, kHost, INTERNET_DEFAULT_HTTPS_PORT, 0) : nullptr;
 	HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
 	                                                 WINHTTP_FLAG_SECURE)
 	                            : nullptr;
-	if (session) WinHttpSetTimeouts(session, 10000, 10000, 20000, 60000);
+	if (request && !ListRequest(request)) {
+		WinHttpCloseHandle(request);
+		request = nullptr;
+		error = kStopped;
+	}
+	// (on the request itself: timeouts set on the session reach only handles made from it afterwards)
+	if (request) WinHttpSetTimeouts(request, 10000, 10000, 20000, 60000);
 	DWORD status = 0, size = sizeof(status);
 	if (request && WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request, nullptr) &&
 	    WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) {
@@ -202,20 +258,40 @@ bool Get(const std::wstring &path, std::string *body, const std::wstring &toFile
 			FILE *file = toFile.empty() ? nullptr : _wfopen(toFile.c_str(), L"wb");
 			if (!toFile.empty() && !file) error = "couldn't write the demo file";
 			else {
-				ok = true;
+				// (done only when the board says there is no more: a read that fails, or a disk that is full,
+				// leaves half a file, which must not pass for the demo)
 				char buffer[16384];
-				DWORD read = 0;
-				while (WinHttpReadData(request, buffer, sizeof(buffer), &read) && read > 0) {
-					if (file) fwrite(buffer, 1, read, file);
-					else body->append(buffer, read);
+				for (;;) {
+					DWORD read = 0;
+					if (g_stop) {
+						error = kStopped;
+						break;
+					}
+					if (!WinHttpReadData(request, buffer, sizeof(buffer), &read)) {
+						error = "the connection to board.portal2.sr broke off (error " + std::to_string(GetLastError()) + ")";
+						break;
+					}
+					if (read == 0) {
+						ok = true;
+						break;
+					}
+					if (!file) body->append(buffer, read);
+					else if (fwrite(buffer, 1, read, file) != read) {
+						error = "couldn't write the demo file (is the disk full?)";
+						break;
+					}
 				}
-				if (file) fclose(file);
+				if (file && fclose(file) != 0 && ok) {
+					ok = false;
+					error = "couldn't write the demo file (is the disk full?)";
+				}
+				if (file && !ok) _wremove(toFile.c_str());
 			}
 		}
 	} else if (error.empty()) {
-		error = "no answer from board.portal2.sr (error " + std::to_string(GetLastError()) + ")";
+		error = g_stop ? std::string(kStopped) : "no answer from board.portal2.sr (error " + std::to_string(GetLastError()) + ")";
 	}
-	if (request) WinHttpCloseHandle(request);
+	if (request) CloseRequest(request);
 	if (connect) WinHttpCloseHandle(connect);
 	if (session) WinHttpCloseHandle(session);
 	return ok;
@@ -237,6 +313,11 @@ long long Seconds(const std::string &date) {
 	return static_cast<long long>(_mkgmtime(&t));
 }
 
+// A Steam id as the board gives it: digits only. (It becomes part of a demo's file name.)
+bool IsSteamId(const std::string &text) {
+	return !text.empty() && text.size() <= 20 && std::all_of(text.begin(), text.end(), [](unsigned char c) { return c >= '0' && c <= '9'; });
+}
+
 std::vector<Entry> ReadBoard(const std::string &map, const std::string &json, std::string &error) {
 	std::vector<Entry> entries;
 	Json top;
@@ -247,7 +328,7 @@ std::vector<Entry> ReadBoard(const std::string &map, const std::string &json, st
 	std::vector<long long> when;
 	for (const auto &row : top.members) {
 		const Json *score = row.second.Get("scoreData"), *user = row.second.Get("userData");
-		if (!score) continue;
+		if (!score || !IsSteamId(row.first)) continue;
 		Entry e;
 		e.steamId = row.first;
 		e.player = user && user->Get("boardname") ? user->Get("boardname")->Text() : "";
@@ -299,8 +380,13 @@ std::thread g_boardThread, g_downloadThread;
 std::atomic<State> g_boardState{State::Idle}, g_downloadState{State::Idle};
 std::string g_boardMap, g_boardError, g_downloadError;
 std::string g_pendingMap;  // a chamber picked while another's board was still on its way: fetched next
-std::vector<Entry> g_entries, g_freshEntries;
-std::vector<std::string> g_files, g_freshFiles;
+std::vector<Entry> g_entries;
+std::vector<std::string> g_files;
+// What a thread hands over, under g_gate, with its state: BoardState and DownloadState take it, so everything
+// above is the game thread's alone.
+std::vector<Entry> g_freshEntries;
+std::vector<std::string> g_freshFiles;
+std::string g_freshBoardError, g_freshDownloadError;
 bool g_freshBoard = false, g_freshDownload = false;
 
 void Join(std::thread &t) {
@@ -339,6 +425,7 @@ void Fetch(const std::string &map) {
 	}
 	g_pendingMap.clear();
 	Join(g_boardThread);
+	g_freshBoard = false;  // (a board that came and was never looked at: this one replaces it. No thread runs here.)
 	auto id = kIds.find(map);
 	g_boardMap = map;
 	if (id == kIds.end()) {
@@ -353,26 +440,29 @@ void Fetch(const std::string &map) {
 		if (Get(L"/chamber/" + std::to_wstring(id) + L"/json", &json, L"", error)) entries = ReadBoard(map, json, error);
 		std::lock_guard<std::mutex> lock(g_gate);
 		g_freshEntries = std::move(entries);
-		g_boardError = error;
+		g_freshBoardError = error;
 		g_freshBoard = true;
 		g_boardState = error.empty() ? State::Ready : State::Failed;
 	});
 }
 
 State BoardState() {
+	State state;
 	{
+		// (the state under the same lock as the entries: "ready" is never told with the board before still there)
 		std::lock_guard<std::mutex> lock(g_gate);
 		if (g_freshBoard) {
 			g_entries = std::move(g_freshEntries);
+			g_boardError = std::move(g_freshBoardError);
 			g_freshBoard = false;
 		}
+		state = g_boardState;
 	}
+	if (g_pendingMap.empty() || state == State::Busy) return state;
 	// the chamber picked while that board was coming
-	if (!g_pendingMap.empty() && g_boardState != State::Busy) {
-		std::string next = g_pendingMap;  // (a copy: Fetch clears g_pendingMap)
-		Fetch(next);
-	}
-	return g_boardState;
+	std::string next = g_pendingMap;  // (a copy: Fetch clears g_pendingMap)
+	Fetch(next);
+	return BoardState();
 }
 
 const std::string &BoardMap() { return g_boardMap; }
@@ -407,7 +497,7 @@ void Download(const std::string &map, const Entry &entry) {
 				continue;
 			}
 			std::wstring temp = Wide(path + ".part");
-			if (!Get(L"/getDemo?id=" + std::to_wstring(one.changelogId), nullptr, temp, error)) break;
+			if (!Get(L"/getDemo?id=" + std::to_wstring(one.changelogId), nullptr, temp, error)) break;  // (and no file is left)
 			char head[8] = {};
 			if (FILE *f = _wfopen(temp.c_str(), L"rb")) {
 				fread(head, 1, 8, f);
@@ -418,12 +508,16 @@ void Download(const std::string &map, const Entry &entry) {
 				error = "the board sent no demo for this run (it may not be public)";
 				break;
 			}
-			MoveFileExW(temp.c_str(), Wide(path).c_str(), MOVEFILE_REPLACE_EXISTING);
+			if (!MoveFileExW(temp.c_str(), Wide(path).c_str(), MOVEFILE_REPLACE_EXISTING)) {
+				_wremove(temp.c_str());
+				error = "couldn't save the demo file";
+				break;
+			}
 			files.push_back(path);
 		}
 		std::lock_guard<std::mutex> lock(g_gate);
 		g_freshFiles = std::move(files);
-		g_downloadError = error;
+		g_freshDownloadError = error;
 		g_freshDownload = true;
 		g_downloadState = error.empty() ? State::Ready : State::Failed;
 	});
@@ -433,6 +527,7 @@ State DownloadState() {
 	std::lock_guard<std::mutex> lock(g_gate);
 	if (g_freshDownload) {
 		g_files = std::move(g_freshFiles);
+		g_downloadError = std::move(g_freshDownloadError);
 		g_freshDownload = false;
 	}
 	return g_downloadState;
@@ -442,9 +537,11 @@ const std::vector<std::string> &DownloadedFiles() { return g_files; }
 const std::string &DownloadError() { return g_downloadError; }
 
 void Shutdown() {
-	// (a request in flight finishes within its timeouts)
+	// (requests on their way are broken off, so the threads end at once; a download cut short leaves no file)
+	StopRequests();
 	Join(g_boardThread);
 	Join(g_downloadThread);
+	g_stop = false;
 }
 
 }  // namespace boards

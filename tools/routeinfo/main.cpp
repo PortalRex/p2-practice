@@ -85,6 +85,10 @@ int Samples(const std::vector<std::string> &paths, int from, int to) {
 		printf("portal @%d actor %d entity %d second %d %s pos %.1f %.1f %.1f ang %.1f %.1f %.1f\n", portal.tick, portal.actor, portal.portalEnt,
 		       portal.portal2, portal.active ? "open" : "closed", portal.pos.x, portal.pos.y, portal.pos.z, portal.ang.x, portal.ang.y, portal.ang.z);
 	for (const auto &mover : route.movers) {
+		if (mover.keys.empty()) {
+			printf("object %d %s: no keys\n", mover.entIndex, mover.className.c_str());
+			continue;
+		}
 		const auto &first = mover.keys.front(), &last = mover.keys.back();
 		printf("object %d %s: %d keys, ticks %d..%d, from %.0f %.0f %.0f to %.0f %.0f %.0f%s\n", mover.entIndex, mover.className.c_str(),
 		       static_cast<int>(mover.keys.size()), first.tick, last.tick, first.pos.x, first.pos.y, first.pos.z, last.pos.x, last.pos.y, last.pos.z,
@@ -93,7 +97,10 @@ int Samples(const std::vector<std::string> &paths, int from, int to) {
 	printf("world ticks:");
 	for (int tick : route.worldTicks) printf(" %d", tick);
 	printf("\n");
-	for (const auto &glitch : route.buttonGlitches) printf("button glitch: tick %d, actor %d, %s\n", glitch.tick, glitch.actor, glitch.button.c_str());
+	for (const auto &glitch : route.buttonGlitches) {
+		if (glitch.button.empty()) printf("button glitch: tick %d, actor %d, the button at %.0f %.0f %.0f\n", glitch.tick, glitch.actor, glitch.at.x, glitch.at.y, glitch.at.z);
+		else printf("button glitch: tick %d, actor %d, %s\n", glitch.tick, glitch.actor, glitch.button.c_str());
+	}
 	return 0;
 }
 
@@ -146,6 +153,7 @@ int main(int argc, char **argv) {
 	if ((args.size() == 2 || args.size() == 3) && args[0] == "info") return Info({args.begin() + 1, args.end()}, text);
 	if (args.size() >= 4 && args[0] == "samples")
 		return Samples({args.begin() + 1, args.end() - 2}, atoi(args[args.size() - 2].c_str()), atoi(args[args.size() - 1].c_str()));
-	fprintf(stderr, "usage: p2route scan <demo> | p2route info [--text] <demo> [partner demo]\n");
+	fprintf(stderr, "usage: p2route scan <demo> | p2route info [--text] <demo> [partner demo] |\n"
+	                "       p2route samples <demo> [partner demo] <first tick> <last tick>\n");
 	return 1;
 }

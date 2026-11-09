@@ -8,7 +8,8 @@ import re
 import struct
 import sys
 
-GAME = r"C:\Program Files (x86)\Steam\steamapps\common\Portal 2"
+# (P2_GAME_DIR: the Portal 2 folder, where Steam isn't in its usual place)
+GAME = os.environ.get("P2_GAME_DIR") or r"C:\Program Files (x86)\Steam\steamapps\common\Portal 2"
 ENTITY_LUMP = 0
 OUTPUT_SEPARATOR = "\x1b"  # between the fields of an output in a compiled map
 

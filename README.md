@@ -32,7 +32,8 @@ a practice level can end up on a leaderboard.
 
 ## Install
 
-1. Unzip the release anywhere (`P2Practice.exe`, `p2practice.dll`, `p2route.exe`, `chocolateloading\`).
+1. Unzip the release anywhere (`P2Practice.exe`, `p2practice.dll`, `p2route.exe`, `chocolateloading\` and this
+   `README.md`).
 2. Start `P2Practice.exe`, pick a run, press **Launch**: it puts the plugin into the Portal 2 folder itself. Or
    copy `p2practice.dll` next to `portal2.exe` and type `plugin_load p2practice` in the game's console.
 
@@ -93,12 +94,13 @@ path). The cfg's first line loads the plugin; when it is already loaded that lin
 
 **BOARDS** shows the Challenge Mode leaderboards from [board.portal2.sr](https://board.portal2.sr): pick a
 chamber, and every run on its board is listed with its time, players, date and whether a demo is there. Enter or
-Get demo fetches the demo (both robots' for co-op) into `demosoards` next to the launcher, after which the run
+Get demo fetches the demo (both robots' for co-op) into `demos\boards` next to the launcher, after which the run
 is read and ready to launch like any other; a run whose demo is already in one of your folders shows as saved.
 Co-op runs are paired by their time and date, so a run whose partner has since set a better time appears alone
 (its one demo still works: the partner's path then comes from the host's snapshots).
 
-The window follows Windows' light or dark mode; Game > Light / Dark sets it.
+The window follows Windows' light or dark mode, also when Windows is switched while it is open; Game > Light /
+Dark sets it instead.
 
 ## Console commands
 
@@ -186,11 +188,20 @@ the game through `chocoload.exe` (Steam must be running: it starts `portal2.exe`
 and set `prac_set snapshots 1`. Without the launcher: Steam launch options, as in "The in-game menu" above.
 
 ChocolateLoading is Blenderiste09's, shipped with the release with their permission. The build shipped carries
-two fixes (`third_party/chocolateloading/fixes.patch`, explained in `third_party/chocolateloading/README.txt`):
-with the Steam overlay enabled the engine's entity table was left out of snapshots (a crash a moment after a
-restore), and its heap aligned memory to 8 bytes where the game's SSE code needs 16 (a crash on gel maps with
-ChocolateLoading merely loaded). The stock build has both problems. A third change lets `chocoload.exe` run as
-Portal 2's Steam launch options (`... %command%`), for save states without the launcher.
+six changes to the stock one (`third_party/chocolateloading/fixes.patch`, explained in
+`third_party/chocolateloading/README.txt`; one by one in `third_party/chocolateloading/patches/`):
+
+1. Its heap aligns memory to 16 bytes, as the game's own does, where it aligned to 8: the game's SSE code
+   crashed on gel maps with ChocolateLoading merely loaded.
+2. Memory the engine reserves through the Steam overlay's hook counts as the engine's: with the overlay enabled
+   the engine's entity table was left out of snapshots (a crash a moment after a restore).
+3. `chocoload.exe` runs as Portal 2's Steam launch options (`... %command%`), without a console window, for
+   save states without the launcher.
+4. A wait of more than 5 seconds for its heap lock is reported: which thread holds it, whether that
+   thread is still alive, and where it took it.
+5. Cvars kept outside the snapshot keep a valid value across a restore: SAR's `sar_record_prefix` pointed at
+   freed memory afterwards (mangled demo names, crashes).
+6. No 4-frame wait before a save or restore when the threading cvars have been 0 for a while already.
 
 Snapshots are off with a partner over the network (the snapshot holds this computer's game only): retries then
 restart the level as without save states. Each snapshot takes about 350 MB of memory (pagefile-backed); the
@@ -257,8 +268,9 @@ launcher\build.bat
   `engine.cpp` is the only file that touches the game, `helper_nut.h` is its VScript half.
 - `tools/routeinfo` is `p2route.exe`, which describes demos for the launcher (`p2route info --text <demo>`).
 - `tools/testkit` starts hidden test copies of the game and runs the map tests (`maptest.py`).
-- `tools/package.ps1` packs a release zip into `dist/`. It takes ChocolateLoading's two files from
-  `launcher/bin/chocolateloading/`: build them from its repository with `third_party/chocolateloading/fixes.patch`
-  applied.
+- `tools/package.ps1` packs a release zip into `dist/`: the launcher, the plugin, `p2route.exe`, this README and
+  a `chocolateloading` folder. It takes ChocolateLoading's two binaries from `launcher/bin/chocolateloading/`
+  (build them from its repository with `third_party/chocolateloading/fixes.patch` applied) and adds its
+  `README.txt` and `fixes.patch`.
 - `prac_debug` alone prints the plugin's state for bug reports; its development switches (`edicts`, `messages`,
   `nopose`, ...) answer only after `prac_debug dev 1`.

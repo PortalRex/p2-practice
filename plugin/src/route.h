@@ -69,10 +69,13 @@ struct UseEvent {
 //
 // The other way round too: released and then pressed again a tick or two later by a player already in the air
 // leaving it (Team Retrieval's first button, bounced off at 9.3 s): the button stays pressed with nobody on it.
+// A button placed in the map itself has no io proxy, and often no name (Gel Maze's, which holds the exit's
+// fizzler open): there the record shows what its two outputs set off, and the button is found by its place.
 struct ButtonGlitch {
 	int tick = 0;
 	int actor = -1;
-	std::string button;  // the floor button's name in the map ("<instance>-button")
+	std::string button;  // the floor button's name in the map ("<instance>-button"); "" for a button without one
+	Vec3 at;             // where the button is, which says which one when it has no name
 	bool endsPressed = false;  // the released-then-pressed kind
 };
 
@@ -84,6 +87,12 @@ struct PortalChange {
 	bool portal2 = false;  // the second portal of its pair
 	bool active = false;
 	Vec3 pos, ang;
+	// A portal on something that moves (a panel on its way): where it was tick by tick, since `pos` only holds
+	// for the moment it was placed. Empty for a portal that stays put.
+	std::vector<std::pair<int, Vec3>> path;
+
+	// Where the portal was at tick `at`
+	Vec3 PosAt(int at) const;
 };
 
 enum class EventKind { Start, Portal, Teleport, Door, Finish };

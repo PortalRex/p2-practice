@@ -146,6 +146,7 @@ struct PortalKey {
 	int team = 0;
 	int firedBy = -1;       // entity index of the player who shot it (m_hFiredByPlayer), -1 = none
 	int linkedPortal = -1;  // entity index of the portal it leads to (m_hLinkedPortal), -1 = none
+	int parent = -1;        // entity index of what it rides on (a moving panel): origin and angles are relative to it
 	bool inSnapshot = true; // false: out of the recorder's view (state as last sent) or deleted
 	bool removed = false;   // the entity was deleted on this tick (the track's last key)
 };

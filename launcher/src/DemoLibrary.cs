@@ -135,6 +135,7 @@ namespace P2Practice {
 		bool busy, cacheDirty;
 		string problem;
 
+		static readonly object cacheFile = new object(); // one writer of the cache file at a time
 		static string CachePath { get { return Path.Combine(App.Home, "P2Practice.cache"); } }
 
 		public int Version { get { lock (gate) return version; } }   // changes whenever Snapshot would differ
@@ -142,6 +143,16 @@ namespace P2Practice {
 		public string TakeProblem() { lock (gate) { var p = problem; problem = null; return p; } } // something went wrong reading the folders (once)
 		public void Progress(out int doneCount, out int totalCount) { lock (gate) { doneCount = done; totalCount = total; } }
 		public List<DemoFile> Snapshot() { lock (gate) return new List<DemoFile>(files); }
+
+		// Forgets the demos the helper was stopped on for taking too long, so that the next Start tries them again.
+		public void ForgetSlow() {
+			lock (gate) {
+				if (cache == null) return;
+				var slow = cache.Where(e => e.Value.Scan.Error == RouteCli.TooSlowMessage).Select(e => e.Key).ToList();
+				foreach (var key in slow) cache.Remove(key);
+				if (slow.Count > 0) cacheDirty = true;
+			}
+		}
 
 		// Lists the folders' demos and reads the ones not read before. Returns at once; watch Version.
 		public void Start(IEnumerable<string> folders) {
@@ -295,13 +306,21 @@ namespace P2Practice {
 			return d;
 		}
 
+		// Writes the cache if it changed. (Called from the reading thread of every Start, and an older one can still
+		// be finishing when the next begins: they take turns.)
 		void SaveCache() {
-			List<DemoFile> all;
-			lock (gate) {
-				if (!cacheDirty || cache == null) return;
-				cacheDirty = false;
-				all = cache.Values.ToList();
+			lock (cacheFile) {
+				List<DemoFile> all;
+				lock (gate) {
+					if (!cacheDirty || cache == null) return;
+					cacheDirty = false;
+					all = cache.Values.ToList();
+				}
+				if (!WriteCache(all)) lock (gate) cacheDirty = true; // (still to be saved: the next call tries again)
 			}
+		}
+
+		static bool WriteCache(List<DemoFile> all) {
 			var sb = new StringBuilder();
 			sb.Append(CacheHeader).Append('\t').Append(RouteCli.Stamp).Append('\n');
 			foreach (var f in all.OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase)) {
@@ -316,9 +335,11 @@ namespace P2Practice {
 				Directory.CreateDirectory(App.Home);
 				string tmp = CachePath + ".tmp";
 				File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
-				File.Delete(CachePath);
-				File.Move(tmp, CachePath);
-			} catch (IOException) { } catch (UnauthorizedAccessException) { }
+				// (swapped in one step: there is no moment without a cache file)
+				if (File.Exists(CachePath)) File.Replace(tmp, CachePath, null);
+				else File.Move(tmp, CachePath);
+				return true;
+			} catch (IOException) { return false; } catch (UnauthorizedAccessException) { return false; }
 		}
 
 		static string Escape(string s) {

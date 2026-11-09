@@ -9,6 +9,7 @@ on altered maps, which no practice session on the real level can follow. For co-
 Writes demos/matrix/cases.json for maptest.py (with --all: one case per Challenge Mode map on the boards, written to
 cases_all.json).
 """
+import datetime
 import json
 import os
 import re
@@ -51,22 +52,41 @@ def scan(path):
     try:
         out = subprocess.run([P2ROUTE, 'scan', path], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60).stdout
         return json.loads(out)
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):  # not started, timed out, or no JSON came back
         return {'ok': False}
 
 
 def on_installed_level(path, map_name):
     """Whether the entities the run's level fired inputs at are the installed map's. (Names made at run time, with
     a number or built by scripts, are left out; a few misses are allowed for those the test doesn't recognise.)"""
-    out = subprocess.run([DEMODUMP, path, '--no-movers'], capture_output=True, timeout=120).stdout.decode('utf-8', 'replace')
     try:
+        out = subprocess.run([DEMODUMP, path, '--no-movers'], capture_output=True, timeout=120).stdout.decode('utf-8', 'replace')
         inputs = json.loads(out).get('sarEntityInputs', [])
-    except ValueError:
+    except (OSError, subprocess.SubprocessError, ValueError):  # a demo that can't be read (in time) doesn't qualify
         return False
     level = entity_text(find_map(map_name))
     names = {e['target'] for e in inputs if e['target'] and '&' not in e['target'] and not re.search(r'_\d+$', e['target'])}
     missing = [n for n in names if f'"{n}"' not in level]
     return len(missing) <= max(2, len(names) // 20)
+
+
+def pick(board_names, by_map):
+    """The fastest qualifying run of the first of `board_names` that has one: (time, id, file name, scan,
+    board name, that board's runs), or None."""
+    for board_name in board_names.split():
+        runs = sorted(by_map.get(board_name, []))
+        for time, run_id, name in runs[:CANDIDATES]:
+            path = os.path.join(ARCHIVE, name)
+            if datetime.datetime.fromtimestamp(os.path.getmtime(path)).year < MIN_YEAR:
+                continue
+            info = scan(path)
+            if not info.get('ok') or not info.get('host') or not info.get('hasTime'):
+                continue
+            if not on_installed_level(path, info['map']):
+                print(f'  (skipping {name}: not made on the installed {info["map"]})')
+                continue
+            return time, run_id, name, info, board_name, runs
+    return None
 
 
 def main():
@@ -82,25 +102,7 @@ def main():
     plan = [(b, b) for b in sorted(by_map) if b] if every_map else CASES
     cases = []
     for group, board_names in plan:
-      picked = None
-      for board_name in board_names.split():
-        if picked:
-            break
-        runs = sorted(by_map.get(board_name, []))
-        for time, run_id, name in runs[:CANDIDATES]:
-            path = os.path.join(ARCHIVE, name)
-            year = __import__('datetime').datetime.fromtimestamp(os.path.getmtime(path)).year
-            if year < MIN_YEAR:
-                continue
-            info = scan(path)
-            if not info.get('ok') or not info.get('host') or not info.get('hasTime'):
-                continue
-            if not on_installed_level(path, info['map']):
-                print(f'  (skipping {name}: not made on the installed {info["map"]})')
-                continue
-            picked = (time, run_id, name, info, board_name, runs)
-            break
-      if True:
+        picked = pick(board_names, by_map)
         if not picked:
             print(f'{group}: no qualifying run among the fastest {CANDIDATES} of {board_names}')
             continue

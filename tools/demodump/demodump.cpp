@@ -374,6 +374,7 @@ void WriteDemo(JsonWriter &j, const Demo &demo) {
 			j.field("team", k.team);
 			j.field("firedBy", k.firedBy);
 			j.field("linkedPortal", k.linkedPortal);
+			j.field("parent", k.parent);
 			j.field("inSnapshot", k.inSnapshot);
 			j.field("removed", k.removed);
 			j.endObject();

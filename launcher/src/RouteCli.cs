@@ -16,7 +16,7 @@ namespace P2Practice {
 	class ScanResult {
 		public bool Ok;
 		public string Error;      // why not, in the helper's words
-		public bool Transient;    // the helper itself failed (missing, crashed, too slow): worth asking again next time
+		public bool Transient;    // the helper itself failed (missing, crashed): worth asking again next time
 		public string Map = "";
 		public bool Coop;
 		public string Player = "";
@@ -64,6 +64,7 @@ namespace P2Practice {
 		public static bool Exists { get { return File.Exists(ExePath); } }
 
 		public const string MissingMessage = "p2route.exe is missing next to P2Practice.exe, so demos can't be read";
+		public const string TooSlowMessage = "p2route.exe took too long and was stopped";
 
 		// changes whenever the helper is replaced, so answers cached from an older one are asked for again
 		public static string Stamp {
@@ -135,7 +136,10 @@ namespace P2Practice {
 					var read = p.StandardOutput.ReadToEndAsync();
 					if (!p.WaitForExit(timeoutMs)) {
 						try { p.Kill(); } catch (InvalidOperationException) { } catch (Win32Exception) { }
-						error = "p2route.exe took too long and was stopped";
+						// (a demo it can't get through is remembered like any other it can't read, or every start
+						// of the launcher would wait for it again; F5 asks once more)
+						error = TooSlowMessage;
+						transient = false;
 						return null;
 					}
 					p.WaitForExit(); // lets the output finish arriving

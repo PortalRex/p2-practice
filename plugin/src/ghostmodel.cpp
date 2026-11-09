@@ -1,11 +1,18 @@
 #include "ghostmodel.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
+#include <string>
+#include <system_error>
 #include <vector>
 
 #include "engine.h"
@@ -46,17 +53,25 @@ struct Entry {
 	size_t preloadAt = 0;  // in the directory file
 };
 
+// A path as text for a message (UTF-8, whatever the folder is called)
+std::string Shown(const fs::path &path) { return path.u8string(); }
+
+// Every size and offset in the directory comes from the file: each is checked against what is really there
+// before it is used.
 class Archive {
 public:
 	bool Open(const fs::path &directoryFile, std::string &error) {
+		constexpr wchar_t kDirectorySuffix[] = L"_dir.vpk";
 		std::ifstream in(directoryFile, std::ios::binary);
-		if (!in) return Fail(error, "can't open " + directoryFile.string());
+		if (!in) return Fail(error, "can't open " + Shown(directoryFile));
 		directory_.assign(std::istreambuf_iterator<char>(in), {});
-		base_ = directoryFile.string();
-		base_.erase(base_.size() - strlen("_dir.vpk"));
-		if (directory_.size() < 12 || U32(0) != 0x55AA1234) return Fail(error, directoryFile.string() + " isn't a VPK");
+		base_ = directoryFile.wstring();
+		size_t suffix = std::size(kDirectorySuffix) - 1;
+		if (base_.size() < suffix || directory_.size() < 12 || U32(0) != 0x55AA1234) return Fail(error, Shown(directoryFile) + " isn't a VPK");
+		base_.erase(base_.size() - suffix);
 		uint32_t version = U32(4), treeSize = U32(8);
 		size_t at = version == 2 ? 28 : 12;
+		if (at > directory_.size() || treeSize > directory_.size() - at) return Fail(error, "the VPK directory is cut short");
 		dataStart_ = at + treeSize;
 		// extension / folder / name, each list ending with an empty string
 		for (std::string extension; ReadString(at, extension) && !extension.empty();) {
@@ -71,6 +86,7 @@ public:
 					memcpy(&entry.length, &directory_[at + 12], 4);
 					at += 18;
 					entry.preloadAt = at;
+					if (entry.preloadBytes > directory_.size() - at) return Fail(error, "the VPK directory is cut short");
 					at += entry.preloadBytes;
 					std::string path = (folder == " " ? "" : folder + "/") + name + "." + extension;
 					entries_[path] = entry;
@@ -84,20 +100,29 @@ public:
 		auto found = entries_.find(path);
 		if (found == entries_.end()) return Fail(error, path + " isn't in the archive");
 		const Entry &entry = found->second;
+		// (Open checked that the preloaded bytes are inside the directory)
 		out.assign(directory_.begin() + entry.preloadAt, directory_.begin() + entry.preloadAt + entry.preloadBytes);
 		if (entry.length == 0) return true;
-		std::vector<char> rest(entry.length);
+		uint64_t end = static_cast<uint64_t>(entry.offset) + entry.length;
 		if (entry.archive == 0x7FFF) {
-			if (dataStart_ + entry.offset + entry.length > directory_.size()) return Fail(error, path + " runs past the archive");
-			memcpy(rest.data(), &directory_[dataStart_ + entry.offset], entry.length);
-		} else {
-			char number[16];
-			snprintf(number, sizeof(number), "_%03u.vpk", entry.archive);
-			std::ifstream in(base_ + number, std::ios::binary);
-			in.seekg(entry.offset);
-			if (!in.read(rest.data(), entry.length)) return Fail(error, "can't read " + path + " from " + base_ + number);
+			// (in the directory file itself, after the directory)
+			if (dataStart_ + end > directory_.size()) return Fail(error, path + " runs past the archive");
+			const char *data = &directory_[dataStart_ + entry.offset];
+			out.insert(out.end(), data, data + entry.length);
+			return true;
 		}
-		out.insert(out.end(), rest.begin(), rest.end());
+		wchar_t number[16];
+		swprintf(number, std::size(number), L"_%03u.vpk", static_cast<unsigned>(entry.archive));
+		fs::path file = base_ + number;
+		std::error_code ec;
+		uintmax_t size = fs::file_size(file, ec);
+		if (ec) return Fail(error, "can't open " + Shown(file));
+		if (end > size) return Fail(error, path + " runs past " + Shown(file));
+		std::ifstream in(file, std::ios::binary);
+		in.seekg(entry.offset);
+		size_t before = out.size();
+		out.resize(before + entry.length);
+		if (!in.read(out.data() + before, entry.length)) return Fail(error, "can't read " + path + " from " + Shown(file));
 		return true;
 	}
 
@@ -121,7 +146,7 @@ private:
 	}
 
 	std::vector<char> directory_;
-	std::string base_;
+	std::wstring base_;  // the directory file's path without "_dir.vpk": the numbered files' names begin with it
 	size_t dataStart_ = 0;
 	std::map<std::string, Entry> entries_;
 };
@@ -132,9 +157,18 @@ constexpr size_t kName = 12, kNameSize = 64, kLength = 76, kNumTextures = 204, k
                  kHeader2Index = 400, kHeader2Name = 0x14;
 constexpr size_t kTextureSize = 64;
 
+// Whether `size` bytes at `at` are inside the file. (`at` is often a sum of offsets read from the file: it may be
+// anything, so nothing is added to it here that could wrap around.)
+bool Inside(const std::vector<char> &data, size_t at, size_t size) { return at <= data.size() && data.size() - at >= size; }
+
+// Whether a table of `count` records of `size` bytes at `at` is inside the file
+bool Holds(const std::vector<char> &data, size_t at, int32_t count, size_t size) {
+	return count >= 0 && at <= data.size() && static_cast<uint64_t>(count) * size <= data.size() - at;
+}
+
 int32_t I32(const std::vector<char> &data, size_t at) {
 	int32_t v = 0;
-	if (at + 4 <= data.size()) memcpy(&v, &data[at], 4);
+	if (Inside(data, at, 4)) memcpy(&v, &data[at], 4);
 	return v;
 }
 
@@ -142,6 +176,15 @@ std::string CString(const std::vector<char> &data, size_t at) {
 	std::string out;
 	while (at < data.size() && data[at]) out += data[at++];
 	return out;
+}
+
+// A material's name becomes a file's name under the plugin's material folder, and it is the model file's word:
+// plain characters only, and no way out of that folder
+bool PlainMaterialName(const std::string &name) {
+	if (name.empty() || name.size() > 200 || name.find("..") != std::string::npos || name[0] == '/' || name[0] == '\\') return false;
+	for (unsigned char c : name)
+		if (!isalnum(c) && c != '_' && c != '-' && c != '.' && c != '/' && c != '\\' && c != ' ') return false;
+	return true;
 }
 
 // Points every material folder of the model at the plugin's, and gives the copy its own name inside: the game
@@ -152,12 +195,18 @@ bool Patch(std::vector<char> &mdl, const std::string &ownName, std::vector<std::
 		error = "the model file isn't the kind this plugin knows (version 49)";
 		return false;
 	}
+	// (the two lists' places and lengths are the file's word: inside the file, or the model isn't used)
 	int32_t textures = I32(mdl, kNumTextures), textureIndex = I32(mdl, kTextureIndex);
+	int32_t folders = I32(mdl, kNumCdTextures), folderIndex = I32(mdl, kCdTextureIndex);
+	if (textureIndex < 0 || folderIndex < 0 || !Holds(mdl, static_cast<size_t>(textureIndex), textures, kTextureSize) ||
+	    !Holds(mdl, static_cast<size_t>(folderIndex), folders, 4)) {
+		error = "the model file's material lists run past its end";
+		return false;
+	}
 	for (int32_t i = 0; i < textures; i++) {
 		size_t at = static_cast<size_t>(textureIndex) + static_cast<size_t>(i) * kTextureSize;
 		materials.push_back(CString(mdl, at + static_cast<size_t>(I32(mdl, at))));
 	}
-	int32_t folders = I32(mdl, kNumCdTextures), folderIndex = I32(mdl, kCdTextureIndex);
 	int32_t ours = static_cast<int32_t>(mdl.size());
 	mdl.insert(mdl.end(), kMaterialDir, kMaterialDir + sizeof(kMaterialDir));  // (with its terminator)
 	for (int32_t i = 0; i < folders; i++) memcpy(&mdl[static_cast<size_t>(folderIndex) + static_cast<size_t>(i) * 4], &ours, 4);
@@ -188,18 +237,18 @@ struct Vec3f {
 
 float Read32f(const std::vector<char> &data, size_t at) {
 	float v = 0;
-	if (at + 4 <= data.size()) memcpy(&v, &data[at], 4);
+	if (Inside(data, at, 4)) memcpy(&v, &data[at], 4);
 	return v;
 }
 
 uint16_t U16(const std::vector<char> &data, size_t at) {
 	uint16_t v = 0;
-	if (at + 2 <= data.size()) memcpy(&v, &data[at], 2);
+	if (Inside(data, at, 2)) memcpy(&v, &data[at], 2);
 	return v;
 }
 
 void Put32(std::vector<char> &data, size_t at, int32_t v) {
-	if (at + 4 <= data.size()) memcpy(&data[at], &v, 4);
+	if (Inside(data, at, 4)) memcpy(&data[at], &v, 4);
 }
 
 // The vertex positions in the order the mesh file numbers them: the vertex file's "fixups" lay the vertices
@@ -207,19 +256,22 @@ void Put32(std::vector<char> &data, size_t at, int32_t v) {
 std::vector<Vec3f> VertexPositions(const std::vector<char> &vvd) {
 	std::vector<Vec3f> out;
 	int32_t fixups = I32(vvd, kVvdNumFixups), fixupAt = I32(vvd, kVvdFixupIndex), verticesAt = I32(vvd, kVvdVertexIndex);
+	// (no file holds more vertices than fit in it: counts beyond that are a damaged file's, and end the list)
+	const size_t most = vvd.size() / kVvdVertex;
 	auto position = [&](int32_t index) {
 		size_t at = static_cast<size_t>(verticesAt) + static_cast<size_t>(index) * kVvdVertex + kVvdPosition;
 		return Vec3f{Read32f(vvd, at), Read32f(vvd, at + 4), Read32f(vvd, at + 8)};
 	};
 	if (fixups == 0) {
 		int32_t count = I32(vvd, kVvdNumVertices);
-		for (int32_t i = 0; i < count; i++) out.push_back(position(i));
+		for (int32_t i = 0; i < count && out.size() < most; i++) out.push_back(position(i));
 		return out;
 	}
+	if (fixupAt < 0 || !Holds(vvd, static_cast<size_t>(fixupAt), fixups, 12)) return out;
 	for (int32_t f = 0; f < fixups; f++) {
 		size_t at = static_cast<size_t>(fixupAt) + static_cast<size_t>(f) * 12;
 		int32_t source = I32(vvd, at + 4), count = I32(vvd, at + 8);
-		for (int32_t i = 0; i < count; i++) out.push_back(position(source + i));
+		for (int32_t i = 0; i < count && out.size() < most; i++) out.push_back(position(source + i));
 	}
 	return out;
 }
@@ -237,11 +289,18 @@ float LongestEdge(const Vec3f &a, const Vec3f &b, const Vec3f &c) {
 // every triangle whose longest edge is shorter is dropped (the lines left are the model's larger shapes; each
 // strip keeps at least its largest triangle, since an empty strip crashes the game). Positions come from the
 // vertex file, the meshes' material and vertex ranges from the model file.
+//
+// Every count and offset is the file's word. Reads and writes outside the file do nothing (I32, U16, Put32), and
+// each table is checked to lie inside the file before it is walked, so a damaged file ends in an error.
 bool CoarsestMesh(std::vector<char> &vtx, const std::vector<char> &mdl, const std::vector<char> &vvd, float minEdge, std::string &error) {
 	if (vtx.size() < 36 || I32(vtx, 0) != 7) {
 		error = "the mesh file isn't the kind this plugin knows (version 7)";
 		return false;
 	}
+	auto damaged = [&error] {
+		error = "the mesh file is cut short or damaged";
+		return false;
+	};
 	std::vector<Vec3f> positions = minEdge > 0 ? VertexPositions(vvd) : std::vector<Vec3f>{};
 	int32_t bodyParts = I32(vtx, kVtxNumBodyParts), bodyPartAt = I32(vtx, kVtxBodyPartIndex);
 	int32_t mdlBodyPartAt = I32(mdl, kMdlBodyPartIndex);
@@ -249,16 +308,19 @@ bool CoarsestMesh(std::vector<char> &vtx, const std::vector<char> &mdl, const st
 		error = "the model and mesh files disagree on the body parts";
 		return false;
 	}
+	if (bodyPartAt < 0 || !Holds(vtx, static_cast<size_t>(bodyPartAt), bodyParts, 8)) return damaged();
 	for (int32_t part = 0; part < bodyParts; part++) {
 		size_t partAt = static_cast<size_t>(bodyPartAt) + static_cast<size_t>(part) * 8;
 		size_t mdlPartAt = static_cast<size_t>(mdlBodyPartAt) + static_cast<size_t>(part) * kMdlBodyPart;
 		int32_t models = I32(vtx, partAt), modelAt = I32(vtx, partAt + 4);
 		int32_t mdlModelAt = I32(mdl, mdlPartAt + 12);
+		if (!Holds(vtx, partAt + static_cast<size_t>(modelAt), models, 8)) return damaged();
 		for (int32_t model = 0; model < models; model++) {
 			size_t at = partAt + static_cast<size_t>(modelAt) + static_cast<size_t>(model) * 8;
 			size_t mdlAt = mdlPartAt + static_cast<size_t>(mdlModelAt) + static_cast<size_t>(model) * kMdlModel;
 			int32_t lods = I32(vtx, at), lodAt = I32(vtx, at + 4);
 			if (lods < 1) continue;
+			if (!Holds(vtx, at + static_cast<size_t>(lodAt), lods, kVtxLodHeader)) return damaged();
 			size_t lastAt = at + static_cast<size_t>(lodAt) + static_cast<size_t>(lods - 1) * kVtxLodHeader;
 			int32_t lastMeshes = I32(vtx, lastAt), lastMeshAt = I32(vtx, lastAt + 4);
 			for (int32_t lod = 0; lod < lods - 1; lod++) {
@@ -269,18 +331,17 @@ bool CoarsestMesh(std::vector<char> &vtx, const std::vector<char> &mdl, const st
 			if (minEdge <= 0 || lods < 2) continue;  // (a model with one level is left whole: all of its triangles are small)
 			int32_t mdlMeshAt = I32(mdl, mdlAt + 76);
 			size_t modelVertex = static_cast<size_t>(I32(mdl, mdlAt + 84)) / kVvdVertex;
+			if (!Holds(vtx, lastAt + static_cast<size_t>(lastMeshAt), lastMeshes, kVtxMeshHeader)) return damaged();
 			for (int32_t mesh = 0; mesh < lastMeshes; mesh++) {
 				size_t meshAt = lastAt + static_cast<size_t>(lastMeshAt) + static_cast<size_t>(mesh) * kVtxMeshHeader;
 				size_t meshVertex = modelVertex + static_cast<size_t>(I32(mdl, mdlAt + static_cast<size_t>(mdlMeshAt) + static_cast<size_t>(mesh) * kMdlMesh + 12));
 				int32_t groups = I32(vtx, meshAt), groupAt = I32(vtx, meshAt + 4);
+				if (!Holds(vtx, meshAt + static_cast<size_t>(groupAt), groups, kVtxStripGroupHeader)) return damaged();
 				for (int32_t group = 0; group < groups; group++) {
 					size_t gAt = meshAt + static_cast<size_t>(groupAt) + static_cast<size_t>(group) * kVtxStripGroupHeader;
 					size_t verticesAt = gAt + static_cast<size_t>(I32(vtx, gAt + 4)), indicesAt = gAt + static_cast<size_t>(I32(vtx, gAt + 12));
 					int32_t indices = I32(vtx, gAt + 8), strips = I32(vtx, gAt + 16), stripAt = I32(vtx, gAt + 20);
-					if (indicesAt + static_cast<size_t>(indices) * 2 > vtx.size()) {
-						error = "the mesh file is cut short";
-						return false;
-					}
+					if (!Holds(vtx, indicesAt, indices, 2) || !Holds(vtx, gAt + static_cast<size_t>(stripAt), strips, kVtxStripHeader)) return damaged();
 					auto positionOf = [&](uint16_t local) {
 						size_t index = meshVertex + U16(vtx, verticesAt + static_cast<size_t>(local) * kVtxVertex + 4);
 						return index < positions.size() ? positions[index] : Vec3f{};
@@ -298,6 +359,10 @@ bool CoarsestMesh(std::vector<char> &vtx, const std::vector<char> &mdl, const st
 					std::vector<uint16_t> kept;
 					for (const auto &run : runs) {
 						int32_t first = run.first, count = I32(vtx, run.second);
+						// (a strip is a part of the group's list. The thinned list must not have grown past where the
+						// strip began, as it would with strips that share triangles: it is written back over the old one)
+						if (first < 0 || count < 0 || static_cast<int64_t>(first) + count > indices) return damaged();
+						if (static_cast<size_t>(first) < kept.size()) return damaged();
 						size_t start = kept.size();
 						float biggest = -1;
 						size_t biggestAt = 0;
@@ -328,7 +393,7 @@ bool WriteFile(const fs::path &path, const char *data, size_t size, std::string 
 	fs::create_directories(path.parent_path(), ec);
 	std::ofstream out(path, std::ios::binary);
 	if (!out.write(data, static_cast<std::streamsize>(size))) {
-		error = "can't write " + path.string();
+		error = "can't write " + Shown(path);
 		return false;
 	}
 	return true;
@@ -370,7 +435,7 @@ bool ReadModel(const PlayerModel &model, std::vector<char> &mdl, std::vector<cha
                std::string &error) {
 	std::vector<fs::path> files = ArchiveFiles();
 	if (files.empty()) {
-		error = "no pak01_dir.vpk near " + GameFolder().string();
+		error = "no pak01_dir.vpk near " + Shown(GameFolder());
 		return false;
 	}
 	for (const fs::path &file : files) {
@@ -384,7 +449,7 @@ bool ReadModel(const PlayerModel &model, std::vector<char> &mdl, std::vector<cha
 			vtxExtension = extension;
 			if (archive.Read(std::string(model.source) + extension, vtx, ignored)) return true;
 		}
-		error = std::string(model.source) + " has no mesh file in " + file.string();
+		error = std::string(model.source) + " has no mesh file in " + Shown(file);
 		return false;
 	}
 	error = std::string(model.source) + ".mdl isn't in any of the game's archives";
@@ -393,25 +458,26 @@ bool ReadModel(const PlayerModel &model, std::vector<char> &mdl, std::vector<cha
 
 // Makes one model's copy (and the materials), unless it is already there
 bool Make(const PlayerModel &model, Detail detail, std::string &error) {
-	fs::path target = GameFolder() / "models" / "p2practice" / CopyName(model, detail);
+	fs::path folder = GameFolder() / "models" / "p2practice";
+	std::string name = CopyName(model, detail);
+	fs::path mdlFile = folder / (name + ".mdl"), vvdFile = folder / (name + ".vvd"), vtxFile = folder / (name + ".dx90.vtx");
 	std::error_code ec;
-	if (fs::is_regular_file(target.string() + ".mdl", ec) && fs::is_regular_file(target.string() + ".vvd", ec) &&
-	    fs::is_regular_file(target.string() + ".dx90.vtx", ec))
-		return true;
+	if (fs::is_regular_file(mdlFile, ec) && fs::is_regular_file(vvdFile, ec) && fs::is_regular_file(vtxFile, ec)) return true;
 	std::vector<char> mdl, vvd, vtx;
 	std::string vtxExtension;
 	if (!ReadModel(model, mdl, vvd, vtx, vtxExtension, error)) return false;
 	std::vector<std::string> materials;
-	if (!Patch(mdl, "p2practice/" + CopyName(model, detail) + ".mdl", materials, error)) return false;
+	if (!Patch(mdl, "p2practice/" + name + ".mdl", materials, error)) return false;
 	// (the basic look drops the coarse mesh's triangles with no edge of 6 units: the robots keep their shapes,
 	// and about a quarter of their lines)
 	constexpr float kBasicEdge = 6;
 	if (detail != kFull && !CoarsestMesh(vtx, mdl, vvd, detail == kBasic ? kBasicEdge : 0, error)) return false;
 	// (the mesh file is written under the name this renderer looks for, whatever the source called it)
-	if (!WriteFile(target.string() + ".mdl", mdl.data(), mdl.size(), error) || !WriteFile(target.string() + ".vvd", vvd.data(), vvd.size(), error) ||
-	    !WriteFile(target.string() + ".dx90.vtx", vtx.data(), vtx.size(), error))
+	if (!WriteFile(mdlFile, mdl.data(), mdl.size(), error) || !WriteFile(vvdFile, vvd.data(), vvd.size(), error) ||
+	    !WriteFile(vtxFile, vtx.data(), vtx.size(), error))
 		return false;
 	for (const std::string &material : materials) {
+		if (!PlainMaterialName(material)) continue;  // (no file is made for it: that part of the ghost has no material)
 		fs::path file = GameFolder() / "materials" / "p2practice" / "ghost" / fs::u8path(material + ".vmt");
 		if (!fs::is_regular_file(file, ec) && !WriteFile(file, kMaterial, strlen(kMaterial), error)) return false;
 	}

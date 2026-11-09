@@ -11,3 +11,4 @@ demos/
 P2Practice.ini
 P2Practice.cache
 dist/
+__pycache__/

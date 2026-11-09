@@ -392,7 +392,8 @@ public:
 	void onServerTick(int serverTick) override {
 		// (demo ticks and server ticks advance together once the recording proper has begun; packets from before
 		// that still carry the previous map's ticks, so the latest packet is the one to go by)
-		if (tick_ > 0) serverTickAtZero_ = serverTick - tick_;
+		// (the server tick is whatever the file says: the difference is taken without signed overflow)
+		if (tick_ > 0) serverTickAtZero_ = int(uint32_t(serverTick) - uint32_t(tick_));
 	}
 
 	void onPacketEntities(const PacketEntitiesHeader &header, BitReader data) override {
@@ -596,11 +597,12 @@ private:
 				entity->track->entIndex = index;
 				entity->track->classIndex = classIndex;
 			}
-			if (kind == TrackKind::PLAYER) livePlayers_.push_back(index);
 		}
 		entity->liveSlot = liveIndices_.size();
 		liveIndices_.push_back(index);
 		live_[size_t(index)] = std::move(entity);
+		// (after the entity is in live_: endSnapshot looks every listed player up there, also when this threw)
+		if (kind == TrackKind::PLAYER) livePlayers_.push_back(index);
 		return live_[size_t(index)].get();
 	}
 
@@ -925,6 +927,7 @@ void EntityDecoder::finish(Demo &demo) {
 				key.team = k.team;
 				key.firedBy = k.firedBy;
 				key.linkedPortal = k.linkedPortal;
+				key.parent = k.parent;
 				key.inSnapshot = k.inSnapshot;
 				key.removed = k.removed;
 				out.keys.push_back(key);

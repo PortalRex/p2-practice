@@ -118,6 +118,15 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	EntFireByHandle(b, "PressIn", "", 2.0 / 60, null, null)
 }
 
+// The same for a floor button the map gives no name: the one the run's player was on (within a button's width
+// of where they were)
+::PP.ReleaseAndPressAt <- function(x, y, z) {
+	local b = Entities.FindByClassnameNearest("prop_floor_button", Vector(x, y, z), 96)
+	if (b == null) return
+	EntFireByHandle(b, "PressOut", "", 0, null, null)
+	EntFireByHandle(b, "PressIn", "", 2.0 / 60, null, null)
+}
+
 // Use something as a player: the thing of that kind (and name, if the run recorded one) that the player is
 // looking at within reach. A player also reaches through a portal: for each pair of portals given (entity
 // numbers, -1 for none), a look into one of them is carried on from the other. Buttons get pressed this way;
@@ -217,15 +226,19 @@ constexpr const char *kSource = R"nut(// P2 Practice helper. Written by the plug
 	local spot = Vector(x, y, z)
 	local best = null
 	local bestDistance = radius
-	local e = null
-	while (e = Entities.FindByClassname(e, classname)) {
-		local taken = false
-		foreach (other in objects) if (other == e) taken = true
-		if (taken) continue
-		local distance = (e.GetOrigin() - spot).Length()
-		if (distance < bestDistance) {
-			best = e
-			bestDistance = distance
+	// (a map's prop_physics_override is the same kind of object as a prop_physics, and keeps its own class name)
+	local classnames = classname == "prop_physics" ? ["prop_physics", "prop_physics_override"] : [classname]
+	foreach (name in classnames) {
+		local e = null
+		while (e = Entities.FindByClassname(e, name)) {
+			local taken = false
+			foreach (other in objects) if (other == e) taken = true
+			if (taken) continue
+			local distance = (e.GetOrigin() - spot).Length()
+			if (distance < bestDistance) {
+				best = e
+				bestDistance = distance
+			}
 		}
 	}
 	if (best != null) objects[id] <- best

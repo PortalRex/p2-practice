@@ -79,9 +79,11 @@ void (*g_draw)() = nullptr;
 
 // ---- one patched function-table slot ----
 struct Patch {
-	void **slot = nullptr;
-	void *original = nullptr;
+	void **slot = nullptr;      // where the hook is installed now (null: nowhere)
+	void *original = nullptr;   // what that slot held before
+	void *first = nullptr;      // what the slot held the first time the hook went in: the game's own function
 	void *hook = nullptr;
+	bool inside = false;        // a call is passing through the hook right now
 };
 
 bool Install(Patch &patch, void *object, int index, void *hook) {
@@ -90,6 +92,7 @@ bool Install(Patch &patch, void *object, int index, void *hook) {
 	if (!VirtualProtect(&table[index], sizeof(void *), PAGE_READWRITE, &old)) return false;
 	patch.slot = &table[index];
 	patch.original = table[index];
+	if (!patch.first) patch.first = patch.original;
 	patch.hook = hook;
 	table[index] = hook;
 	VirtualProtect(&table[index], sizeof(void *), old, &old);
@@ -104,9 +107,32 @@ void Remove(Patch &patch) {
 		*patch.slot = patch.original;
 		VirtualProtect(patch.slot, sizeof(void *), old, &old);
 	}
-	// (`original` stays: a copy of the table made by another plugin may still call the hook, which passes on)
+	// (`first` stays: a copy of the table made by another plugin may still call the hook, which passes on)
 	patch.slot = nullptr;
 }
+
+// One call on its way through a hook. Another plugin (SAR) copies the function table with this hook in it and
+// puts its own hook in front, so the hook stays in that plugin's chain when this one is unloaded; loaded again,
+// it goes in front of that plugin's and is then called twice per call: first from the table (`own`: the call to
+// act on, handed on to what the table held), then by the other plugin, which is handed on to the game's own
+// function. Without the second case the two hooks would call each other for ever.
+struct Passing {
+	explicit Passing(Patch &patch) : patch_(patch), own(patch.slot && !patch.inside), next(own ? patch.original : patch.first) {
+		if (own) patch_.inside = true;
+	}
+	~Passing() {
+		if (own) patch_.inside = false;
+	}
+	Passing(const Passing &) = delete;
+	Passing &operator=(const Passing &) = delete;
+
+private:
+	Patch &patch_;
+
+public:
+	const bool own;
+	void *const next;
+};
 
 Patch g_paint, g_lockCursor, g_keyEvent, g_buttonState, g_inputEvent;
 
@@ -121,7 +147,7 @@ int g_puppetX = 0, g_puppetY = 0, g_puppetWheel = 0;
 std::string g_puppetTyped;
 
 // ---- fonts ----
-unsigned long g_fonts[static_cast<int>(Font::Count)];
+unsigned long g_fonts[static_cast<int>(Font::Count)];  // (0: not made yet)
 int g_fontHeight[static_cast<int>(Font::Count)];
 int g_fontScreenHeight = 0;
 int g_width = 0, g_height = 0;
@@ -134,7 +160,10 @@ std::wstring Wide(const char *text) {
 	return out;
 }
 
+void DropReleasedStrafeKeys();
+
 void PollInput() {
+	DropReleasedStrafeKeys();
 	memcpy(g_wasDown, g_down, sizeof(g_down));
 	for (int key = 0; key < kButtonCount; key++) g_down[key] = Call<bool, int>(g_input, slot::IsButtonDown, key);
 	// (the wheel is a button pressed and released at once: each step moves its "last pressed" tick)
@@ -181,8 +210,9 @@ void PollInput() {
 // ---- hooks ----
 // (__fastcall stands in for __thiscall: `self` arrives in ecx, edx is unused)
 void __fastcall PaintHook(void *self, void *, int mode) {
-	reinterpret_cast<void(__thiscall *)(void *, int)>(g_paint.original)(self, mode);
-	if (!g_ready || !(mode & kPaintUiPanels) || !g_draw) return;
+	Passing call(g_paint);
+	reinterpret_cast<void(__thiscall *)(void *, int)>(call.next)(self, mode);
+	if (!call.own || !g_ready || !(mode & kPaintUiPanels) || !g_draw) return;
 	g_startDrawing(g_surface);
 	Call<void, int *, int *>(g_surface, slot::GetScreenSize, &g_width, &g_height);
 	if (g_height != g_fontScreenHeight) RebuildFonts();
@@ -198,41 +228,53 @@ void ShowCursor(bool show) {
 }
 
 void __fastcall LockCursorHook(void *self, void *) {
-	if (g_ready && g_capture) {
+	Passing call(g_lockCursor);
+	if (call.own && g_ready && g_capture) {
 		Call<void>(g_surface, slot::UnlockCursor);
 		ShowCursor(true);
 		return;
 	}
-	if (g_ready && g_cursorShown) ShowCursor(false);
-	reinterpret_cast<void(__thiscall *)(void *)>(g_lockCursor.original)(self);
+	if (call.own && g_ready && g_cursorShown) ShowCursor(false);
+	reinterpret_cast<void(__thiscall *)(void *)>(call.next)(self);
 }
 
 // The strafe keys held now, from the bindings the game passes with every key event (whatever keys they are bound
-// to; two keys bound to one direction are counted)
-std::atomic<int> g_leftKeys{0}, g_rightKeys{0};
+// to): for each button, the direction it went down for (kStrafeLeft, kStrafeRight) or 0. Kept per button rather
+// than as a count of keys per direction, which a single release that never arrives here would leave wrong for
+// good; and each frame a button the input system says is up is dropped (DropReleasedStrafeKeys).
+constexpr int kStrafeButtons = 512;  // (above every ButtonCode_t, controllers' buttons included)
+std::atomic<unsigned char> g_strafeButton[kStrafeButtons];
 
-void NoteStrafeKey(int down, const char *binding) {
-	if (!binding) return;
-	std::atomic<int> *keys = !strcmp(binding, "+moveleft") ? &g_leftKeys : !strcmp(binding, "+moveright") ? &g_rightKeys : nullptr;
-	if (!keys) return;
-	if (down) ++*keys;
-	else if (*keys > 0) --*keys;
+void NoteStrafeKey(int down, int key, const char *binding) {
+	if (key < 0 || key >= kStrafeButtons) return;
+	int direction = !down || !binding ? 0 : !strcmp(binding, "+moveleft") ? kStrafeLeft : !strcmp(binding, "+moveright") ? kStrafeRight : 0;
+	g_strafeButton[key] = static_cast<unsigned char>(direction);
+}
+
+// (the game doesn't tell the client of every release: not when it loses the keyboard to another window, say)
+void DropReleasedStrafeKeys() {
+	for (int key = 0; key < kStrafeButtons; key++)
+		if (g_strafeButton[key] && !Call<bool, int>(g_input, slot::IsButtonDown, key)) g_strafeButton[key] = 0;
 }
 
 int __fastcall KeyEventHook(void *self, void *, int down, int key, const char *binding) {
-	NoteStrafeKey(down, binding);
-	if (g_ready && g_capture) return 0;
-	return reinterpret_cast<int(__thiscall *)(void *, int, int, const char *)>(g_keyEvent.original)(self, down, key, binding);
+	Passing call(g_keyEvent);
+	if (call.own) {
+		NoteStrafeKey(down, key, binding);
+		if (g_ready && g_capture) return 0;
+	}
+	return reinterpret_cast<int(__thiscall *)(void *, int, int, const char *)>(call.next)(self, down, key, binding);
 }
 
 void __fastcall ButtonStateHook(void *self, void *, const void *event) {
-	if (g_ready && g_capture) {
+	Passing call(g_buttonState);
+	if (call.own && g_ready && g_capture) {
 		// (other code sets VGUI's button state too: it is cleared rather than only kept from changing)
 		int context = *reinterpret_cast<int *>(static_cast<char *>(self) + slot::InputContextField);
 		Call<void, int>(self, slot::ResetInputContext, context);
 		return;
 	}
-	reinterpret_cast<void(__thiscall *)(void *, const void *)>(g_buttonState.original)(self, event);
+	reinterpret_cast<void(__thiscall *)(void *, const void *)>(call.next)(self, event);
 }
 
 // Every mouse move, click, wheel step and typed key on its way to VGUI's panels (the game's main menu, its pause
@@ -240,12 +282,13 @@ void __fastcall ButtonStateHook(void *self, void *, const void *event) {
 // still gets them when it is open over the menu. (True = handled: the engine's own Esc and console keys are dealt
 // with before this, and key releases still reach the game.)
 bool __fastcall InputEventHook(void *self, void *, const void *event) {
-	if (g_ready && g_capture && !ConsoleVisible()) {
+	Passing call(g_inputEvent);
+	if (call.own && g_ready && g_capture && !ConsoleVisible()) {
 		int context = *reinterpret_cast<int *>(static_cast<char *>(g_vguiInput) + slot::InputContextField);
 		Call<void, int>(g_vguiInput, slot::ResetInputContext, context);
 		return true;
 	}
-	return reinterpret_cast<bool(__thiscall *)(void *, const void *)>(g_inputEvent.original)(self, event);
+	return reinterpret_cast<bool(__thiscall *)(void *, const void *)>(call.next)(self, event);
 }
 
 // The target of a relative call whose 4-byte operand is at `operand` (after an E8 byte)
@@ -296,16 +339,15 @@ bool Init() {
 }
 
 void Shutdown() {
-	if (g_capture) SetCapture(false);
-	g_ready = false;
+	g_capture = false;
 	if (g_cursorShown && g_engineClient) ShowCursor(false);
+	g_ready = false;
 	Remove(g_inputEvent);
 	Remove(g_buttonState);
 	Remove(g_keyEvent);
 	Remove(g_lockCursor);
 	Remove(g_paint);
 	g_draw = nullptr;
-	g_ready = false;
 }
 
 bool Ready() { return g_ready; }
@@ -353,13 +395,15 @@ void RebuildFonts() {
 	for (int i = 0; i < static_cast<int>(Font::Count); i++) {
 		int tall = static_cast<int>(specs[i].size * scale + 0.5f);
 		if (tall < 8) tall = 8;
-		unsigned long font = Call<unsigned long>(g_surface, slot::CreateFont);
+		// (a font is made once and given its glyphs again for the new size: the game keeps every font made until it
+		// quits, so a new one per change of resolution would pile up)
+		if (!g_fonts[i]) g_fonts[i] = Call<unsigned long>(g_surface, slot::CreateFont);
+		unsigned long font = g_fonts[i];
 		bool ok = Call<bool, unsigned long, const char *, int, int, int, int, int, int, int>(
 			g_surface, slot::SetFontGlyphSet, font, "Bahnschrift", tall, specs[i].weight, 0, 0, kFontAntialias, 0, 0);
 		if (!ok)
 			Call<bool, unsigned long, const char *, int, int, int, int, int, int, int>(g_surface, slot::SetFontGlyphSet, font, "Tahoma", tall,
 			                                                                           specs[i].weight, 0, 0, kFontAntialias, 0, 0);
-		g_fonts[i] = font;
 		g_fontHeight[i] = Call<int, unsigned long>(g_surface, slot::GetFontTall, font);
 	}
 }
@@ -413,7 +457,11 @@ bool Puppeted() { return g_puppet; }
 
 bool ConsoleVisible() { return g_engineClient && Call<bool>(g_engineClient, slot::ConIsVisible); }
 
-int StrafeKeys() { return (g_leftKeys > 0 ? kStrafeLeft : 0) | (g_rightKeys > 0 ? kStrafeRight : 0); }
+int StrafeKeys() {
+	int held = 0;
+	for (const std::atomic<unsigned char> &direction : g_strafeButton) held |= direction;
+	return held;
+}
 bool InGame() { return engine::MapName()[0] != '\0'; }
 
 }  // namespace gfx

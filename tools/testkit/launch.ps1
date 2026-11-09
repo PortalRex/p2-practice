@@ -39,6 +39,24 @@ if (-not (Get-Process steam -ErrorAction SilentlyContinue)) { throw 'Steam is no
 [string]$root = Join-Path $game "p2practice-test\$Job"
 [string]$profile = Join-Path $root 'portal2'
 [string]$state = Join-Path $repo "build\test\$Job"
+[string]$stateFile = Join-Path $state 'state.json'
+
+# A state.json left by an earlier run names that run's PID. If that copy is still running the job is in use;
+# otherwise the file goes now, so that a failure below can't leave stop.ps1 an old PID to act on.
+if (Test-Path $stateFile) {
+	$old = $null
+	try { $old = Get-Content $stateFile -Raw | ConvertFrom-Json } catch { }
+	if ($old -and $old.pid) {
+		$oldCmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($old.pid) AND Name = 'portal2.exe'" -ErrorAction SilentlyContinue).CommandLine
+		if ($oldCmd -and $oldCmd.IndexOf("p2practice-test\$Job\portal2`"", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+			throw "job '$Job' is still running as pid $($old.pid): end it first (stop.ps1 -Job $Job)"
+		}
+	}
+	Remove-Item -LiteralPath $stateFile -Force
+}
+
+[Diagnostics.Process]$proc = $null
+try {
 New-Item -ItemType Directory -Force -Path (Join-Path $profile 'cfg'), $state | Out-Null
 
 # The splicer's gameinfo: this folder first, then the game's own content
@@ -81,13 +99,28 @@ $cmd = "-game `"$gameArg`" -allowmultiple -novid -condebug -windowed -w $Width -
 if ($Inject) { $env:CHOCOLOAD_EARLY = '1' }
 [object[]]$launchArgs = @([string](Join-Path $game 'portal2.exe'), [string]$cmd, $game, $false, [string]$Inject)
 $start = $asm.GetType('P2DemoSplicer.GameLauncher').GetMethods($static) | Where-Object { $_.Name -eq 'StartInBackground' -and $_.GetParameters().Count -eq 5 }
-[Diagnostics.Process]$proc = $start.Invoke($null, $launchArgs)
+$proc = $start.Invoke($null, $launchArgs)
 $focusBlocked = [bool]$launchArgs[3]
 
+# (startTimeUtc is how stop.ps1 tells this process from a later one that was given the same PID)
 $info = [ordered]@{ job = $Job; pid = $proc.Id; port = $Port; password = $Password; profile = $profile; root = $root
-	focusBlocked = $focusBlocked; muted = $false; gpuLowered = $false; started = (Get-Date).ToString('s'); exited = $null }
-function Save { $info | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $state 'state.json') }
+	focusBlocked = $focusBlocked; muted = $false; gpuLowered = $false; started = (Get-Date).ToString('s')
+	startTimeUtc = $proc.StartTime.ToUniversalTime().ToString('o'); exited = $null }
+function Save { $info | ConvertTo-Json | Set-Content -Encoding utf8 $stateFile }
 Save
+} catch {
+	# Nothing is left for a later run or stop.ps1 to trip over: a game that did start is this script's own child
+	# and is ended, then the half-made profile goes (only ever this job's folder under p2practice-test).
+	if ($proc -and -not $proc.HasExited) { try { $proc.Kill(); [void]$proc.WaitForExit(5000) } catch { } }
+	Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue
+	if ($root -like '*\p2practice-test\*') {
+		for ($i = 0; $i -lt 10 -and (Test-Path $root); $i++) {
+			Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+			if (Test-Path $root) { Start-Sleep -Milliseconds 500 }
+		}
+	}
+	throw
+}
 Write-Output "started pid $($proc.Id), netcon port $Port, focus blocked: $focusBlocked"
 
 # HideFromOtherGames loops until the game exits and LowerGpuPriority until it takes, so both run on pool threads

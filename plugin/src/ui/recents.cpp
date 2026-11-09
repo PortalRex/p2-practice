@@ -35,17 +35,24 @@ std::string Join(const std::vector<std::string> &parts, char separator) {
 	return out;
 }
 
+// A value as it goes into a line: a tab or line end in it (the menu's text boxes take none, but a chamber's or a
+// map's name comes out of a demo file) would break the line up, so each becomes a space
+std::string Field(std::string text) {
+	for (char &c : text)
+		if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+	return text;
+}
+
 // One line: kind, when, name, chamber, map, record, attempts, best (or -), take-over, mode, role, partner,
-// lead-in, speed, files (|-separated). Tabs and line ends never appear in the values (they come from file names
-// and the menu's own text boxes, which take neither).
+// lead-in, speed, files (|-separated)
 std::string Line(const Entry &e) {
 	char numbers[160];
 	snprintf(numbers, sizeof(numbers), "%lld\t", static_cast<long long>(e.when));
 	std::string best = e.hasBest ? std::to_string(e.bestGap) : "-";
 	char choices[160];
 	snprintf(choices, sizeof(choices), "%g\t%d\t%d\t%d\t%g\t%g", e.takeOver, e.mode, e.role, e.partner, e.leadIn, e.speed);
-	return std::string(e.saved ? "S" : "R") + "\t" + numbers + e.name + "\t" + e.chamber + "\t" + e.map + "\t" + e.recordTime + "\t" +
-	       std::to_string(e.attempts) + "\t" + best + "\t" + choices + "\t" + Join(e.files, '|');
+	return std::string(e.saved ? "S" : "R") + "\t" + numbers + Field(e.name) + "\t" + Field(e.chamber) + "\t" + Field(e.map) + "\t" +
+	       Field(e.recordTime) + "\t" + std::to_string(e.attempts) + "\t" + best + "\t" + choices + "\t" + Field(Join(e.files, '|'));
 }
 
 bool Parse(const std::string &line, Entry &e) {

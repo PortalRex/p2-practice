@@ -71,7 +71,8 @@ cmake --build build\x86 --config Release
 - `demodump <file.dem>` prints the whole parsed `Demo` as JSON
   (`--no-entities`, `--no-movers` as in `ParseOptions`). Exit code 1 and a
   message when the file isn't a demo.
-- `tools/tsdump.ts <file.dem>` prints the same JSON from the TypeScript parser.
+- `tools/tsdump.ts <file.dem>` prints the same JSON from the TypeScript parser. It imports that parser from the
+  sar-web project, which has to be checked out beside this one (`H:\Claude\sar-web` beside `H:\Claude\p2-practice`).
 - `tools/compare.mjs` runs both on demos or folders of demos and reports the
   differences, one line per demo and a summary:
 
@@ -80,8 +81,9 @@ cmake --build build\x86 --config Release
   ```
 
   Decimal fields may differ by 0.02 (floats here, doubles there); everything
-  else must be equal. Warnings are not compared. Needs Node 22.6 or later and
-  the sar-web sources next to this folder (`..\sar-web\src`).
+  else must be equal. Warnings are not compared. Needs Node 22.6 or later and,
+  as it runs `tsdump.ts`, the sar-web sources beside this project (`..\sar-web\src`
+  seen from the project folder).
 - `demostress <file.dem>...` parses cut-short and corrupted copies of demos
   (by default 50 cuts, 300 with changed bytes and 75 with both, per demo) and
   fails on a slow parse; any crash ends it. Run it from an AddressSanitizer
