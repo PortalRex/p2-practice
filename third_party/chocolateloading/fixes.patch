@@ -1,3 +1,15 @@
+diff --git a/README.md b/README.md
+index d4b1ba8..6094c55 100644
+--- a/README.md
++++ b/README.md
+@@ -40,6 +40,7 @@ In a map (not in the main menu, not during a loading screen):
+ | `snap_list`           | the snapshots, their map and age                                         |
+ | `snap_info`           | statistics (sizes, number of restores, ...)                              |
+ | `snap_opt cross_map 1`| keep the snapshots when you go to another map (`0`, the default: drop them) |
++| `snap_opt device_state 0`| don't set the Direct3D device back to its state at the save (`1`, the default: do) |
+ 
+ Without a name, `snap_save`, `snap_load` and `snap_drop` use the snapshot `quick`. Names are letters,
+ digits, `_`, `-` and `.` (up to 31, case-insensitive), e.g. `snap_save intro4_segmented`; up to 64
 diff --git a/src/arena.cpp b/src/arena.cpp
 index e72b6d3..5f95880 100644
 --- a/src/arena.cpp
@@ -300,7 +312,7 @@ index 7ee1d1f..49ece75 100644
  // Classification is lock-free (VirtualQuery + the module's PE export name, cached), so it is safe in
  // hooks that run while other threads are suspended.
 diff --git a/src/control.cpp b/src/control.cpp
-index d7713a0..16f77b5 100644
+index d7713a0..b7c0174 100644
 --- a/src/control.cpp
 +++ b/src/control.cpp
 @@ -19,6 +19,7 @@ char     g_pending_name[snapshot::MAX_NAME] = "";
@@ -346,7 +358,35 @@ index d7713a0..16f77b5 100644
  }
  
  // ---- console commands ---------------------------------------------------------------------------
-@@ -184,12 +204,13 @@ bool Request(Op op, const char* name) {
+@@ -120,6 +140,7 @@ void cmd_opt(const CCommand& a) {
+         else if (!_stricmp(n, "zombies")) o.zombie_policy = v ? snapshot::ZOMBIES_KEEP : snapshot::ZOMBIES_FREE;
+         else if (!_stricmp(n, "clear_input")) o.clear_input = v;
+         else if (!_stricmp(n, "verify")) o.verify_heap = v;
++        else if (!_stricmp(n, "device_state")) o.device_state = v;
+         else if (!_stricmp(n, "cross_map")) {
+             o.cross_map = v;
+             if (int dropped = snapshot::DropOtherMaps()) {
+@@ -129,8 +150,8 @@ void cmd_opt(const CCommand& a) {
+         }
+         else util::ConWarn("[snap] unknown option '%s'", n);
+     }
+-    util::Con("[snap] options: suspend_threads %d | zombies %d (0 free, 1 keep) | clear_input %d | verify %d | cross_map %d",
+-              (int)o.suspend_threads, o.zombie_policy, (int)o.clear_input, (int)o.verify_heap, (int)o.cross_map);
++    util::Con("[snap] options: suspend_threads %d | zombies %d (0 free, 1 keep) | clear_input %d | verify %d | device_state %d | cross_map %d",
++              (int)o.suspend_threads, o.zombie_policy, (int)o.clear_input, (int)o.verify_heap, (int)o.device_state, (int)o.cross_map);
+ }
+ 
+ void cmd_domain(const CCommand& a) {
+@@ -164,7 +185,7 @@ void RegisterCommands() {
+     gameapi::AddCommand("snap_list", "List the RAM snapshots", cmd_list);
+     gameapi::AddCommand("snap_info", "Snapshot / arena statistics", cmd_info);
+     gameapi::AddCommand("snap_check", "Check the arena heap consistency", cmd_check);
+-    gameapi::AddCommand("snap_opt", "snap_opt <suspend_threads|zombies|clear_input|verify|cross_map> <0|1>", cmd_opt);
++    gameapi::AddCommand("snap_opt", "snap_opt <suspend_threads|zombies|clear_input|verify|device_state|cross_map> <0|1>", cmd_opt);
+     gameapi::AddCommand("snap_domain", "Show or set the list of modules whose memory is snapshotted", cmd_domain);
+     gameapi::AddCommand("snap_test", "snap_test [cycles] [frames]: restore the current snapshot repeatedly", cmd_test);
+ }
+@@ -184,12 +205,13 @@ bool Request(Op op, const char* name) {
          util::ConWarn("[snap] %d snapshots already exist: drop one first (snap_drop <name>)", snapshot::MAX_SNAPSHOTS);
          return false;
      }
@@ -362,7 +402,7 @@ index d7713a0..16f77b5 100644
      return true;
  }
  
-@@ -198,6 +219,8 @@ uint32_t Frame() { return g_frame; }
+@@ -198,6 +220,8 @@ uint32_t Frame() { return g_frame; }
  
  void OnFrameStart() {
      g_frame++;
@@ -372,10 +412,16 @@ index d7713a0..16f77b5 100644
          util::ConWarn("[snap] test: snapshot '%s' dropped, test stopped", g_test_name);
          g_test_cycles = 0;
 diff --git a/src/d3dguard.cpp b/src/d3dguard.cpp
-index 47401b8..5cc91f3 100644
+index 47401b8..6e16464 100644
 --- a/src/d3dguard.cpp
 +++ b/src/d3dguard.cpp
-@@ -6,7 +6,7 @@
+@@ -1,12 +1,13 @@
+ #define _CRT_SECURE_NO_WARNINGS
+ #include "d3dguard.h"
+ #include "slotmask.h"
++#include "snapshot.h"
+ #include "util.h"
+ #include <windows.h>
  #include <intrin.h>
  #include <stdlib.h>
  
@@ -384,7 +430,28 @@ index 47401b8..5cc91f3 100644
  
  namespace d3dguard {
  
-@@ -142,10 +142,30 @@ bool hook_class(void* obj) {
+@@ -15,6 +16,8 @@ namespace {
+ // IUnknown / IDirect3D9 / IDirect3DDevice9 vtable slots: the COM order of d3d9.h (DXVK implements the
+ // same interfaces). Every method is __stdcall with `this` first.
+ const int SLOT_ADDREF = 1, SLOT_RELEASE = 2;
++const int STATEBLOCK_APPLY = 5;        // IDirect3DStateBlock9::Apply
++const DWORD kAllState = 1;              // D3DSBT_ALL
+ const int D3D_CREATEDEVICE = 16;
+ enum {
+     DEV_Reset = 16, DEV_CreateTexture = 23, DEV_CreateVolumeTexture = 24, DEV_CreateCubeTexture = 25,
+@@ -98,7 +101,10 @@ size_t snapshot_entries(SlotMask mask_filter, SlotMask unpin) {
+ // ---- per snapshot: the engine's reference count of every object it pins, sorted by address -------------
+ const int MAX_SLOTS = MAX_SNAPSHOT_SLOTS;
+ struct Saved { void* p; LONG refs; };
+-struct SlotObjs { Saved* v; size_t n, cap; bool intact; };
++struct SlotObjs {
++    Saved* v; size_t n, cap; bool intact;
++    void* device_state;   // IDirect3DStateBlock9: everything set on the device at save time (see save_device_state)
++};
+ SlotObjs g_slot[MAX_SLOTS];
+ SlotMask g_pinned_slots = 0;     // slots that hold pins
+ 
+@@ -142,10 +148,30 @@ bool hook_class(void* obj) {
      return util::WritePointer(&vt[SLOT_RELEASE], (void*)H_Release);
  }
  
@@ -417,7 +484,27 @@ index 47401b8..5cc91f3 100644
  void track(void* obj, int kind) {
      if (!obj) return;
      EnterCriticalSection(&g_cs);
-@@ -200,65 +220,68 @@ HRESULT __stdcall H_Reset(void* dev, void* params) {
+@@ -164,12 +190,18 @@ void drop_slot(int slot) {
+     g_slot[slot].n = 0;
+ }
+ 
++void drop_device_state(int slot) {
++    void*& state = g_slot[slot].device_state;
++    if (state) release(state);
++    state = nullptr;
++}
++
+ // Before a device reset or a new device: every pin goes, and those snapshots can no longer be restored.
+ void drop_all_pins(const char* why) {
+     if (!g_pinned_slots) return;
+     util::Log("d3dguard: %s while snapshots pin objects: pins released, those snapshots can no longer be restored", why);
+     for (int s = 0; s < MAX_SLOTS; s++)
+-        if (g_pinned_slots & SlotBit(s)) { drop_slot(s); g_slot[s].intact = false; }
++        if (g_pinned_slots & SlotBit(s)) { drop_device_state(s); drop_slot(s); g_slot[s].intact = false; }
+ }
+ 
+ // ---- device hooks ------------------------------------------------------------------------------------
+@@ -200,68 +232,95 @@ HRESULT __stdcall H_Reset(void* dev, void* params) {
      return o_Reset(dev, params);
  }
  
@@ -502,15 +589,66 @@ index 47401b8..5cc91f3 100644
  }
  #undef TRACK_IF_OK
  
-@@ -433,6 +456,8 @@ void OnSave(int slot) {
++// The shader API remembers what it last set on the device (render and sampler states, bound textures and
++// shaders, shader constants, streams...) and skips a call that would set the same value again. That memory
++// is in the arena: a restore takes it back to the save, while the device keeps what the discarded timeline
++// left on it. The two then disagree, and the engine skips exactly the calls that would put the device right.
++// (Seen on Turret Warehouse: the room's projected light drawn without its shadow map, the walls flat yellow
++// for seconds after a restore.) So the device's state is saved with the snapshot, in a Direct3D state block,
++// and a restore applies it: the device is then again what the restored engine believes it to be.
++void save_device_state(int slot) {
++    drop_device_state(slot);
++    if (!snapshot::Opts().device_state) return;
++    void* state = nullptr;
++    // (the device's own method, not our hook: this object is ours, not the engine's)
++    if (o_CreateStateBlock && o_CreateStateBlock(g_device, kAllState, &state) >= 0) g_slot[slot].device_state = state;
++    else util::Log("d3dguard: the device's state could not be saved: after a restore the screen may be drawn wrong for a moment");
++}
++
++void restore_device_state(int slot) {
++    void* state = g_slot[slot].device_state;
++    if (!state || !snapshot::Opts().device_state) return;
++    typedef HRESULT (__stdcall* ApplyFn)(void*);
++    HRESULT hr = (*(ApplyFn**)state)[STATEBLOCK_APPLY](state);
++    if (hr < 0) util::Log("d3dguard: restore: the device's state could not be set back (%08lx)", (unsigned long)hr);
++}
++
+ struct DevHook { int slot; void* fn; void** orig; };
+ const DevHook kDevHooks[] = {
+     { DEV_Reset,                       (void*)H_Reset,                       (void**)&o_Reset },
+@@ -400,6 +459,7 @@ bool Intact(int slot) { return g_active && !g_overflow && slot >= 0 && slot < MA
+ 
+ void OnSave(int slot) {
+     if (!g_active || slot < 0 || slot >= MAX_SLOTS) return;
++    drop_device_state(slot);
+     drop_slot(slot);   // a save replaces whatever the slot held
+     SlotObjs& so = g_slot[slot];
+     size_t n = snapshot_entries(0, 0);
+@@ -433,6 +493,9 @@ void OnSave(int slot) {
                (unsigned)per[K_SURFACE], (unsigned)per[K_VB], (unsigned)per[K_IB], (unsigned)per[K_VS], (unsigned)per[K_PS],
                (unsigned)per[K_DECL], (unsigned)per[K_QUERY], (unsigned)per[K_STATEBLOCK],
                g_overflow ? " - REGISTRY OVERFLOWED" : "");
 +    if (LONG foreign = InterlockedExchange(&g_foreign, 0))
 +        util::Log("d3dguard: %ld objects made on the device by other modules since the last save are not tracked", foreign);
++    save_device_state(slot);
  }
  
  void AfterRestore(int slot) {
+@@ -457,12 +520,14 @@ void AfterRestore(int slot) {
+                   "(%u textures, %u VB, %u IB, %u shaders)", (unsigned)adjusted, (unsigned)freed,
+                   (unsigned)(freed_per[K_TEXTURE] + freed_per[K_CUBE] + freed_per[K_VOLUME]), (unsigned)freed_per[K_VB],
+                   (unsigned)freed_per[K_IB], (unsigned)(freed_per[K_VS] + freed_per[K_PS]));
++    restore_device_state(slot);   // last: what it binds has its references back
+ }
+ 
+ void OnDrop(int slot) {
+     if (!g_active || slot < 0 || slot >= MAX_SLOTS) return;
+     SlotObjs& so = g_slot[slot];
+     unsigned n = (unsigned)so.n;
++    drop_device_state(slot);
+     drop_slot(slot);
+     if (so.v) VirtualFree(so.v, 0, MEM_RELEASE);
+     so = SlotObjs{};   // not intact
 diff --git a/src/gameapi.cpp b/src/gameapi.cpp
 index 93de1ca..2c8be53 100644
 --- a/src/gameapi.cpp
@@ -603,6 +741,23 @@ index 75a4343..97cefbf 100644
  
  // Domain mode: rebuilds the routing table from a space separated module list
  // (e.g. "engine.dll client.dll server.dll"). Modules that are not loaded yet are ignored.
+diff --git a/src/plugin.cpp b/src/plugin.cpp
+index 4c55a0a..a2bcc6e 100644
+--- a/src/plugin.cpp
++++ b/src/plugin.cpp
+@@ -288,6 +288,12 @@ public:
+ 
+ static ChocolatePlugin g_plugin;
+ 
++// For plugins that drive snapshots: 1 when a restore also sets the Direct3D device back to its state at the
++// save (snap_opt device_state), so they need not make the engine send its render state again themselves.
++extern "C" __declspec(dllexport) int ChocoRestoresDeviceState() {
++    return snapshot::Opts().device_state ? 1 : 0;
++}
++
+ extern "C" __declspec(dllexport) void* CreateInterface(const char* name, int* ret) {
+     // The engine dispatches to fixed vtable slots (ClientActive = 9, ClientFullyConnect = 10, ...),
+     // i.e. the 003 layout, which is what IServerPluginCallbacks implements.
 diff --git a/src/snapshot.cpp b/src/snapshot.cpp
 index ff3f2c6..0299808 100644
 --- a/src/snapshot.cpp
@@ -753,6 +908,18 @@ index ff3f2c6..0299808 100644
      ph.log("restore");
      if (segs.va_recommitted) util::Log("[snap] %u VirtualAlloc ranges decommitted since the save were committed again", (unsigned)segs.va_recommitted);
      if (segs.va_skipped || segs.mods_skipped)
+diff --git a/src/snapshot.h b/src/snapshot.h
+index 11ff9d6..fab8ee5 100644
+--- a/src/snapshot.h
++++ b/src/snapshot.h
+@@ -46,6 +46,7 @@ struct Options {
+     bool full_revert     = false;         // diagnostic: copy the whole arena back, not just dirty pages
+     bool capture_va      = true;          // capture the engine's direct VirtualAlloc regions (the hunk)
+     int  copy_threads    = -1;            // extra threads copying the arena image at save time (-1: auto)
++    bool device_state    = true;           // save what is set on the Direct3D device with a snapshot, set it back at a restore
+     bool cross_map       = false;         // keep the snapshots when another map is loaded (else only reloads of the same map)
+ };
+ 
 diff --git a/tests/arena_test.cpp b/tests/arena_test.cpp
 index aa20b42..9401c82 100644
 --- a/tests/arena_test.cpp

@@ -75,6 +75,26 @@ works.
   calls VirtualAlloc straight through its trampoline, without passing its own detour. We saw no sign of that, but
   the stack walk can't tell it apart.
 
+## A later one: wrong lighting after a restore
+
+This one is patch 8 (`0008-d3dguard-save-the-device-s-state-with-a-snapshot-and.patch`). It builds on patch 7
+(d3dguard counting objects made through another plugin's device hook), so it wants the patches before it applied.
+
+**Symptom.** On Turret Warehouse (mp_coop_tbeam_end) with `-vulkan`, the walls were drawn flat yellow for a few
+seconds after some restores: the room's projected light without its shadow map.
+
+**Cause.** The shader API remembers what it last set on the device and skips a call that would set the same value
+again. That memory is in the arena, so a restore takes it back to the save. The device itself keeps whatever the
+discarded timeline left on it. The two disagree, and the engine skips exactly the calls that would fix it.
+
+**Fix (d3dguard.cpp).** `OnSave` creates a `D3DSBT_ALL` state block for the slot (through the device's own
+`CreateStateBlock`, not the hook) and `AfterRestore` applies it last, once the pinned objects have their
+references back. The block is released when the slot is saved again or dropped, and before a device reset.
+`snap_opt device_state 0` turns it off, and the DLL exports `ChocoRestoresDeviceState()` so a plugin can tell.
+
+**Tested.** Turret Warehouse with `-vulkan` and p2boost, screenshots at several moments after each restore: yellow
+frames with the option off, none with it on.
+
 ## Something we saw but did not fix in ChocolateLoading
 
 **Particle crash after a restore.** A few seconds after some restores on sp_a2_laser_stairs, the game crashed on a

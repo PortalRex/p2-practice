@@ -33,6 +33,21 @@ struct Actor {
 	std::string name;
 	bool hasInputs = false;  // buttons and per-tick aim come from the player's own demo
 	std::vector<Sample> samples;  // index = tick - Route::firstTick
+	// Co-op, the host's partner, when both demos are loaded: where the host's game had this player at each tick
+	// (same index as `samples`; empty for everyone else). The samples are the partner's own smooth path, as its
+	// own game saw it. The host's game, the one that decided when the flags were touched, moved the partner only
+	// when its commands arrived, a few ticks' worth at a time, so it had the partner a little behind or ahead of
+	// that path at any one tick. `seenFrom` is the tick from which the player stays near where it finished: from
+	// there a player driven along this path is put where the host's game had it, and touches the flags on the
+	// very tick the run's player did.
+	std::vector<Vec3> seenPos;
+	int seenFrom = 0;
+	bool SeenAt(int tick, int firstTick, Vec3 &pos) const {
+		size_t i = static_cast<size_t>(tick - firstTick);
+		if (seenPos.empty() || tick < seenFrom || tick < firstTick || i >= seenPos.size()) return false;
+		pos = seenPos[i];
+		return true;
+	}
 };
 
 // An object the run moved around: a cube, a turret, a core. Its recorded path can be replayed onto the same

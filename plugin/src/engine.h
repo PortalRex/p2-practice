@@ -26,10 +26,15 @@ void Shutdown();
 void Print(const char *format, ...);
 void Warn(const char *format, ...);  // same, in the warning colour
 void Debug(const char *format, ...); // only into the development trace file (P2PRACTICE_LOG), never the console
-bool RegisterCommand(const char *name, sdk::CommandCallback callback, const char *help);
+// (serverMayRun: the server may send it to this client, which is how VScript's SendToConsole arrives. Without it the
+// game refuses such a command at times: "FCVAR_SERVER_CAN_EXECUTE prevented server running command")
+bool RegisterCommand(const char *name, sdk::CommandCallback callback, const char *help, bool serverMayRun = false);
 
 // Runs one console line now, as if typed (cvars and commands; ';' separates commands).
 void Execute(const char *format, ...);
+// Adds a console line to the game's command buffer, which runs it at the start of the next frame. For commands that
+// must not run from inside a frame being drawn (the menu's code runs there): "disconnect" and level loads.
+void ExecuteLater(const char *format, ...);
 // Calls a console command's handler directly with `arguments` as its raw argument string: nothing is split on
 // ';' or checked against sv_cheats, which VScript code needs. False when no such command exists.
 bool CallCommand(const char *name, const char *arguments);
@@ -38,6 +43,10 @@ bool CommandExists(const char *name);  // a console command of that name is regi
 bool CheatsOn();
 float CvarFloat(const char *name, float fallback = 0);
 std::string CvarString(const char *name);  // "" when there is no such cvar
+// Keeps a cvar at this value or above: whatever sets it lower (the game's own code included) gets this value
+// instead. ReleaseCvar gives it its own limits back; Shutdown releases every one still held.
+void HoldCvarAtLeast(const char *name, float minimum);
+void ReleaseCvar(const char *name);
 
 // ---- VScript ----
 // Statements are collected and run in as few "script" calls as fit (one call holds about 500 characters).
@@ -97,6 +106,8 @@ void SetGodMode(int entIndex, bool on);
 // Scales how far the game's own movement takes a player each tick (m_flLaggedMovementValue: 1 normal, 0 not at
 // all), on the server and in the player's predicted copy on screen alike. False when it can't be set.
 bool SetMovementSpeed(int entIndex, float scale);
+// True when ChocolateLoading puts the graphics card's state back itself at a snapshot restore
+bool SnapshotsRestoreDeviceState();
 // Has the shader API send all of its render state to the graphics card again (false: unknown shader API)
 bool ResetRenderState();
 // Sets a player's Challenge Mode clock (the time in the corner of the screen) to `seconds`

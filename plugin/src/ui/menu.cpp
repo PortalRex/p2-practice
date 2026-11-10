@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -93,6 +94,8 @@ struct State {
 	// messages along the bottom
 	std::string note;
 	DWORD noteUntil = 0;
+	// a level to load once the one that is up has been left (see LoadLevel)
+	std::string pendingAuto, pendingLevel;
 };
 State g;
 
@@ -254,6 +257,54 @@ bool PlainMapName(const std::string &map) {
 	return true;
 }
 
+// Leaving a level for another one goes in steps: end the session, a short pause, "disconnect", a short pause at the
+// main menu, then the level. The disconnect and the level load go through the game's command buffer
+// (engine::ExecuteLater) because this code runs while a frame is being drawn: a "disconnect" run right there tore
+// the level down under the renderer, and the next level then crashed the game as it finished loading (a queued
+// render call on a missing object). "prac_stop" comes a moment earlier so the game has its own settings back,
+// queued rendering among them, before the level goes.
+enum class LevelStep { None, Stopped, Leaving };
+constexpr auto kPauseAfterStop = std::chrono::milliseconds(300);
+constexpr auto kPauseAtMainMenu = std::chrono::milliseconds(500);
+LevelStep g_levelStep = LevelStep::None;
+std::chrono::steady_clock::time_point g_levelStepAt;
+
+void SetLevelStep(LevelStep step) {
+	g_levelStep = step;
+	g_levelStepAt = std::chrono::steady_clock::now();
+}
+
+void RunLevelCommands() {
+	SetLevelStep(LevelStep::None);
+	engine::CallCommand("prac_auto", g.pendingAuto.c_str());
+	engine::ExecuteLater("%s", g.pendingLevel.c_str());
+}
+
+// Loads a level with practice set to start in it. From inside another level, that one is left first: a "map" or
+// "ss_map" given there starts the new level but drops the player from it a moment in ("Disconnected: Game server
+// has been shut down").
+void LoadLevel(const std::string &autoArguments, const std::string &levelCommand) {
+	g.pendingAuto = autoArguments;
+	g.pendingLevel = levelCommand;
+	engine::Execute("prac_stop");
+	if (gfx::InGame()) SetLevelStep(LevelStep::Stopped);
+	else RunLevelCommands();
+}
+
+void TickPendingLevel() {
+	if (g_levelStep == LevelStep::None) return;
+	auto waited = std::chrono::steady_clock::now() - g_levelStepAt;
+	if (g_levelStep == LevelStep::Stopped) {
+		if (waited < kPauseAfterStop) return;
+		if (gfx::InGame()) engine::ExecuteLater("disconnect");
+		SetLevelStep(LevelStep::Leaving);
+	} else if (gfx::InGame()) {
+		SetLevelStep(LevelStep::Leaving);  // (still leaving: the pause counts from the main menu)
+	} else if (waited >= kPauseAtMainMenu) {
+		RunLevelCommands();
+	}
+}
+
 void StartSession(const trainer::Status &s) {
 	if (s.coop) {
 		engine::Execute("prac_role %s", g.role == 1 ? "orange" : "blue");
@@ -269,11 +320,12 @@ void StartSession(const trainer::Status &s) {
 			Note("This demo's map has a name the menu won't load (" + s.map + "): load the map yourself, then START.", 10);
 			return;
 		}
-		engine::Execute("prac_stop");
-		engine::CallCommand("prac_auto", Format("%sat %.3f", watch ? "watch " : "", g.takeOver).c_str());
-		if (!s.coop) engine::Execute("map %s", s.map.c_str());
-		else if (g.partner == 0) engine::Execute("ss_map %s", s.map.c_str());
-		else {
+		std::string autoArguments = Format("%sat %.3f", watch ? "watch " : "", g.takeOver);
+		if (loadsMap) {
+			LoadLevel(autoArguments, (s.coop ? "ss_map " : "map ") + s.map);
+		} else {
+			engine::Execute("prac_stop");
+			engine::CallCommand("prac_auto", autoArguments.c_str());
 			Note("Host " + s.chamber + " with your partner as usual: practice starts once you're both in.", 10);
 			return;
 		}
@@ -1321,6 +1373,14 @@ const std::vector<Step> &SavedScript() {
 	return script;
 }
 
+// Development (prac_menu_tour start): presses the PRACTICE page's START, with whatever run is loaded
+const std::vector<Step> &StartScript() {
+	static const std::vector<Step> script = {
+		{'c', "prac_menu practice"}, {'w', "", 20}, {'m', "start", 15}, {'k'}, {'w', "", 10}, {'e'},
+	};
+	return script;
+}
+
 void EndTour() {
 	if (!g_tour.on) return;
 	g_tour.on = false;
@@ -1337,7 +1397,8 @@ void CmdTour(const sdk::CCommand &args) {
 	bool boardsRace = args.ArgC() >= 2 && !_stricmp(args.Arg(1), "boards");
 	bool uiPages = args.ArgC() >= 2 && !_stricmp(args.Arg(1), "ui");
 	bool savedRuns = args.ArgC() >= 2 && !_stricmp(args.Arg(1), "saved");
-	g_tour.steps = takeOver ? TakeOverScript() : boardsRace ? BoardsRaceScript() : uiPages ? UiScript() : savedRuns ? SavedScript() : TourScript();
+	bool startOnly = args.ArgC() >= 2 && !_stricmp(args.Arg(1), "start");
+	g_tour.steps = startOnly ? StartScript() : takeOver ? TakeOverScript() : boardsRace ? BoardsRaceScript() : uiPages ? UiScript() : savedRuns ? SavedScript() : TourScript();
 	g_tour.x = g_tour.fromX = gfx::ScreenWidth() * 0.5f;
 	g_tour.y = g_tour.fromY = gfx::ScreenHeight() * 0.6f;
 	gfx::SetPuppet(true);
@@ -1442,6 +1503,7 @@ void DrawCursor() {
 
 void Draw() {
 	TickTour();
+	TickPendingLevel();
 	hud::Draw();
 	if (g_tour.on && !g.open) DrawCursor();
 	if (g.saveSettingsIn > 0 && --g.saveSettingsIn == 0) SaveSettings();

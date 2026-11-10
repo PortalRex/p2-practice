@@ -39,6 +39,7 @@ constexpr int FindCommandBase = 13;
 constexpr int GetGameDirectory = 35;
 constexpr int IsRecordingDemo = 79;  // (IsPaused 86 in SAR's table; the header has IsPlayingDemo 78, IsRecordingDemo 79 before it)
 constexpr int ExecuteClientCmd = 104;
+constexpr int ClientCmdUnrestricted = 108;
 // IServerGameDLL (SAR)
 constexpr int GetAllServerClasses = 10;
 constexpr int GetUserMessageInfo = 28;   // (the engine's MessageEnd calls it through this slot)
@@ -110,6 +111,8 @@ struct CCommand {
 
 using CommandCallback = void (*)(const CCommand &args);
 
+constexpr int kFlagServerCanExecute = 1 << 28;  // FCVAR_SERVER_CAN_EXECUTE: the server may have this client run it
+
 // ConCommandBase + ConCommand. The vtable pointer is copied from one of the engine's own commands when ours is
 // registered, so the engine's virtual calls land in its own code and read these fields.
 struct ConCommand {
@@ -126,7 +129,7 @@ struct ConCommand {
 	bool usingCommandCallbackInterface : 1;
 };
 
-// The start of a ConVar, enough to read its value (SAR)
+// The start of a ConVar, enough to read its value and its limits (SAR)
 struct ConVar {
 	void *vtable;
 	ConVar *next;
@@ -141,6 +144,10 @@ struct ConVar {
 	int stringLength;
 	float floatValue;
 	int intValue;
+	bool hasMinimum;
+	float minimum;
+	bool hasMaximum;
+	float maximum;
 };
 
 // ---- network send tables: used only to find where a few entity fields live, by name (SAR) ----

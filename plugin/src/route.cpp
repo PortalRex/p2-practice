@@ -195,6 +195,23 @@ void ApplyHeld(const p2demo::PlayerTrack &track, int tickOffset, int firstTick, 
 	}
 }
 
+// Where the host's game had a player at each tick, from the host's snapshots of it (see Actor::seenPos): the last
+// snapshot's place up to that tick (before the first one, the first one's). Empty when there are no snapshots.
+std::vector<Vec3> SeenPath(const p2demo::PlayerTrack &track, int firstTick, size_t count) {
+	std::vector<const p2demo::PlayerKey *> keys;
+	for (const p2demo::PlayerKey &k : track.keys)
+		if (k.inSnapshot) keys.push_back(&k);
+	if (keys.empty()) return {};
+	std::vector<Vec3> path(count);
+	size_t last = 0;
+	for (size_t i = 0; i < count; i++) {
+		int tick = firstTick + static_cast<int>(i);
+		while (last + 1 < keys.size() && keys[last + 1]->tick <= tick) last++;
+		path[i] = keys[last]->origin;
+	}
+	return path;
+}
+
 // The class an object has in the map, from the class the game networks it as (and, where several map classes
 // share one, its model): the live object is looked up by its map class. Only for objects the trainer can put back
 // on their recorded paths, things physics moves or players carry; doors, lifts and other map machinery are not
@@ -772,6 +789,7 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 			route.notes.push_back(std::string(TeamName(actor.team)) + "'s path comes from 20 snapshots a second and has no inputs; add that player's own demo for both.");
 		}
 		if (seen) ApplyHeld(*seen, 0, route.firstTick, actor.samples);
+		if (seen && secondary && own == secondary) actor.seenPos = SeenPath(*seen, route.firstTick, actor.samples.size());
 		route.actors.push_back(std::move(actor));
 	}
 
@@ -846,6 +864,15 @@ bool Build(const Demo &primary, const Demo *secondary, Route &out, std::string &
 	readSar(primary, 0);
 	if (secondary) readSar(*secondary, secondaryOffset);
 	route.timerEnd = route.ClampTick(route.timerEnd);
+	for (Actor &actor : route.actors) {
+		if (actor.seenPos.empty()) continue;
+		// (the last stretch of the run this player spends within a few steps of where it is at the finish)
+		constexpr float kNearFinish = 128;
+		const Vec3 finish = actor.seenPos[route.timerEnd - route.firstTick];
+		actor.seenFrom = route.timerEnd;
+		while (actor.seenFrom > route.firstTick && Distance(actor.seenPos[actor.seenFrom - 1 - route.firstTick], finish) <= kNearFinish)
+			actor.seenFrom--;
+	}
 
 	// Without SAR's time, the run starts at the first tick every player exists
 	int spawned = route.firstTick;

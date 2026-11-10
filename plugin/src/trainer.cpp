@@ -118,6 +118,7 @@ struct Session {
 	std::chrono::steady_clock::time_point reloadAskedAt{};  // when the trainer last asked for (or waited on) a fresh level
 	bool humanDead = false;       // a person was dead at the last frame (in Challenge Mode the level restarts for it)
 	bool botPartner = false;      // a split-screen bot plays the other robot: the person's view fills the screen
+	bool screenHeld = false;      // ... and the game cannot split it (from the attempt's set-up to the level's end)
 	std::vector<int> placedBots;  // the bots the trainer put in place this tick, with the game's movement off for them
 	int waitTicks = 0;
 	std::vector<Ghost> ghosts;  // one per robot of the run
@@ -175,14 +176,11 @@ int LeadTicks() { return static_cast<int>(g_set.leadIn / g.route.tickInterval + 
 int LiveTick() { return g.cursor - 1; }
 
 // The run's tick of a finish at the flags, counted as the demos count it (SAR's flags record, the end of every
-// record's time). Measured, not derived: in co-op the plugin sees the flags gone one tick before the demos put
-// the touch (a record replayed through its flags, and a person handed the record's last tenth of a second who
-// then pressed nothing and went slower than the record, both read one tick ahead: Vertical Flings 13.70 against
-// 13.71; Bridge Repulsion the same), so the tick is added there. In single player, where the game simulates two
-// ticks in each frame, what the plugin sees is the demos' tick already (Triple Laser, Laser Stairs and Bridge
-// Intro replayed through their flags: exact). Counted like this, every one of those reads exactly the record.
-int FrameTicks();
-int FlagsTick() { return LiveTick() + (FrameTicks() == 1 ? 1 : 0); }
+// record's time): the tick whose outcome the plugin reads the flags gone in. A record replayed through its flags
+// reads its own time, in single player (Triple Laser, Laser Stairs, Bridge Intro) and in co-op (Turret Warehouse,
+// Flings, Team Retrieval, Vertical Flings, Cooperative Polarity), as long as the host's partner is where the
+// host's game had it when it reaches them: see route::Actor::seenPos.
+int FlagsTick() { return LiveTick(); }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Acting on the game (all through the helper script and console commands)
@@ -1013,6 +1011,18 @@ void ReleaseGameSettings() {
 	RestoreRendering();
 }
 
+// Alone with a split-screen bot partner, the person's view takes the whole screen. The game splits it in two again
+// at moments of its own (every time a robot spawns, which a save state coming back counts as; a level's start in
+// Challenge Mode), and both views would show until the trainer noticed: so during an attempt the cvar is held at 1,
+// and the game's "ss_force_primary_fullscreen 0" does nothing. While a level loads it is not held, only put back
+// at the next frame: SAR starts its co-op timer when the game sets it to 0 there.
+void KeepWholeScreen(bool held) {
+	constexpr const char *kCvar = "ss_force_primary_fullscreen";
+	if (g.botPartner && held) engine::HoldCvarAtLeast(kCvar, 1);
+	else engine::ReleaseCvar(kCvar);
+	if (g.botPartner && engine::CvarFloat(kCvar, 1) == 0) engine::Execute("%s 1", kCvar);
+}
+
 void Stop(bool announce) {
 	ReleaseUseKeys();
 	SetDuckKey(false);
@@ -1251,12 +1261,11 @@ void Approach() {
 	// Hands empty: what somebody still carries from an earlier attempt would stay out of the trainer's reach
 	for (const Slot &slot : g.slots)
 		if (slot.entIndex) DropCarried(slot);
-	// Alone with a split-screen bot partner: the person's view takes the whole screen (the game, and SAR on every
-	// load, would otherwise split it in two)
 	g.botPartner = false;
 	for (const Slot &slot : g.slots)
 		if (slot.entIndex && !slot.human) g.botPartner = true;
-	if (g.botPartner) engine::Execute("ss_force_primary_fullscreen 1");
+	g.screenHeld = true;
+	KeepWholeScreen(true);
 	ShieldPlayers(false);
 	ClearGhosts();
 	RegisterGhostModels();
@@ -1537,7 +1546,17 @@ void DriveSlots() {
 		// go a few ticks before (the use key acts only on the bot's next move, and a single tick of being dragged
 		// at that speed is enough to lose the object), and the trainer moves the object along the run's path
 		// through the portal (MoveObjects), as it moves everything nobody holds.
-		if (BotPlacedOnly(g.slots[i])) {
+		//
+		// Near the flags, the host's partner of a co-op run is put where the host's game had it (Actor::seenPos),
+		// in attempts and replays alike, so that it touches them on the tick the run's player did.
+		Vec3 seen;
+		if (driver.actors[actor].SeenAt(tick, driver.firstTick, seen)) {
+			Sample where = s;
+			where.pos = seen;
+			MovePlayer(player, where, {});
+			engine::SetEyeHeight(player, s.ducked ? kDuckEyeHeight : kStandEyeHeight);
+			g.placedBots.push_back(player);
+		} else if (BotPlacedOnly(g.slots[i])) {
 			constexpr int kDropBeforeTrip = 4;
 			for (int ahead = 1; ahead <= kDropBeforeTrip && tick + ahead <= driver.lastTick; ahead++)
 				if (PortalTrip(driver, actor, tick + ahead)) {
@@ -2174,9 +2193,7 @@ void TickDone() {
 }
 
 void TickWaitForPlayers() {
-	// After a restart: wait until everyone is back and standing in the level. Meanwhile the person's view is put
-	// back to full screen again and again: the game and SAR both reset it to split while the level loads.
-	if (g.botPartner && engine::TickCount() % 8 == 0) engine::Execute("ss_force_primary_fullscreen 1");
+	// After a restart: wait until everyone is back and standing in the level.
 	size_t needed = g.route.coop ? 2 : 1;
 	std::vector<LivePlayer> players = LivePlayers();
 	size_t alive = 0;
@@ -2526,17 +2543,16 @@ void CmdSet(const sdk::CCommand &args) {
 
 // Development aid: what the plugin reads from the game right now
 // The development switches of prac_debug answer only after "prac_debug dev 1" (the map tests and the dev
-// scripts send it); "prac_debug" alone (the status, for bug reports) and the helper script's own "ghost" report
-// always work.
+// scripts send it); "prac_debug" alone (the status, for bug reports) always works.
 bool g_devCommands = false;
 
+// From the helper script: the entity number of the ghost it made for a robot
+void CmdGhostEntity(const sdk::CCommand &args) {
+	size_t actor = static_cast<size_t>(atoi(args.Arg(1)));
+	if (args.ArgC() >= 3 && actor < g.ghosts.size()) g.ghosts[actor].entIndex = atoi(args.Arg(2));
+}
+
 void CmdDebug(const sdk::CCommand &args) {
-	if (args.ArgC() >= 4 && !strcmp(args.Arg(1), "ghost")) {
-		// (from the helper script: the entity number of the ghost it made for a robot)
-		size_t actor = static_cast<size_t>(atoi(args.Arg(2)));
-		if (actor < g.ghosts.size()) g.ghosts[actor].entIndex = atoi(args.Arg(3));
-		return;
-	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "dev")) {
 		g_devCommands = atoi(args.Arg(2)) != 0;
 		return;
@@ -2701,6 +2717,7 @@ void CloseGameScreens() {
 void Init() {
 	for (const Command &command : kCommands)
 		if (!engine::RegisterCommand(command.name, command.callback, command.help)) engine::Warn("Couldn't register %s.\n", command.name);
+	engine::RegisterCommand("prac_ghost_entity", CmdGhostEntity, "(used by P2 Practice's own script)", true);
 	WriteHelperScript();
 	engine::HoldClientCommands(HoldBoard);
 }
@@ -2766,6 +2783,10 @@ void OnLevelShutdown() {
 		g.levelWentAt = std::chrono::steady_clock::now();
 	}
 	if (g.mode != Mode::Reloading) g.mode = Mode::Idle;
+	// (a level the attempt does not come back to is the game's to split again)
+	if (g.mode == Mode::Idle && !g.resumeAfterLoad) g.botPartner = false;
+	g.screenHeld = false;
+	KeepWholeScreen(false);
 	ReleaseUseKeys();
 	SetDuckKey(false);
 	g.helperLoaded = false;
@@ -2797,8 +2818,9 @@ void OnFrame(bool simulating) {
 		// that memory back to the save, but not the card, which keeps what the discarded timeline left there. In
 		// Turret Warehouse the room was then drawn with its projected light on and unshadowed (walls flat yellow,
 		// "0 active flashlights" on the client) for seconds after a restore, once the run had gone on past the save.
-		// The shader API is told to set everything on the card again.
-		engine::ResetRenderState();
+		// ChocolateLoading now sets the card back itself, at the restore; one that doesn't (an older build, or the
+		// option off) leaves it to us: the shader API is told to set everything on the card again.
+		if (!engine::SnapshotsRestoreDeviceState()) engine::ResetRenderState();
 		// The game is back at the snapshot's moment and the plugin's memory is not: what the plugin knows about
 		// the level is set back to what held then. (The Challenge Mode start board, the flags, the screen fade.)
 		if (g.snapshotStartScreenOpen) g.startScreenClosed = false;
@@ -2854,10 +2876,8 @@ void OnFrame(bool simulating) {
 	default: break;
 	}
 	SetBotMovement();
-	// Alone with the bot, the person's view keeps the whole screen in every mode (watching too): the game and SAR
-	// put it back to split at moments of their own (a level's start in Challenge Mode)
-	if (g.botPartner && engine::TickCount() % 8 == 0 && engine::CvarFloat("ss_force_primary_fullscreen", 1) == 0)
-		engine::Execute("ss_force_primary_fullscreen 1");
+	// (every frame, in every mode: watching too)
+	if (g.botPartner) KeepWholeScreen(g.screenHeld);
 	engine::FlushScript();
 }
 

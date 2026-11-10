@@ -399,7 +399,7 @@ R"nut(
 	e.__KeyValueFromInt("disableshadows", 1)
 	e.__KeyValueFromInt("SuppressAnimSounds", 1)  // (the robots' animations carry footstep and servo sounds)
 	ghosts[id] <- e
-	SendToConsole("prac_debug ghost " + id + " " + e.entindex())
+	SendToConsole("prac_ghost_entity " + id + " " + e.entindex())
 }
 
 ::PP.Gm <- function(id, x, y, z, yaw) {

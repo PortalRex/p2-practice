@@ -48,5 +48,14 @@ for the author.
    the same arguments sit further up the stack under a return address in the shader API. Objects such a module
    creates for itself stay untracked; a save writes their number to the log.
 
+8. Device state. The shader API remembers what it last set on the Direct3D device (render and sampler states,
+   bound textures and shaders, shader constants) and skips a call that would set the same value again. A restore
+   took that memory back to the save while the device kept what the discarded timeline had left on it, so the
+   engine skipped exactly the calls that would have put the device right: on Turret Warehouse the room's projected
+   light was drawn without its shadow map and the walls were flat yellow for seconds after a retry. A save now
+   also stores the device's state in a Direct3D state block and a restore applies it. "snap_opt device_state 0"
+   turns that off; the export ChocoRestoresDeviceState tells a plugin whether it is on (P2 Practice then no
+   longer makes the engine send its render state again after a restore).
+
 Files: chocoload.exe (starts Portal 2 with the DLL loaded before the engine) and chocolateloading.dll. The
 launcher copies both into the Portal 2 folder when save states are on.

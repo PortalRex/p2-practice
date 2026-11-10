@@ -25,6 +25,18 @@ void *g_commandVtable = nullptr;  // an engine ConCommand's vtable, shared by ou
 std::vector<sdk::ConCommand *> g_commands;
 sdk::ConVar *g_svCheats = nullptr;
 
+// A cvar HoldCvarAtLeast keeps up, with the lower limit it had before
+struct HeldCvar {
+	sdk::ConVar *var;
+	bool hadMinimum;
+	float minimum;
+};
+std::vector<HeldCvar> g_held;
+void ReleaseHeld(const HeldCvar &held) {
+	held.var->hasMinimum = held.hadMinimum;
+	held.var->minimum = held.minimum;
+}
+
 // The hiding flags Init took off cvars, to put back should Init give up
 struct UnhiddenCvar {
 	sdk::ConVar *var;
@@ -297,6 +309,8 @@ void Shutdown() {
 		delete command;
 	}
 	g_commands.clear();
+	for (const HeldCvar &held : g_held) ReleaseHeld(held);
+	g_held.clear();
 	g_scriptBatch.clear();
 	g_unhidden.clear();
 	CloseTrace();
@@ -326,13 +340,14 @@ void Debug(const char *format, ...) {
 	Trace("debug ", text);
 }
 
-bool RegisterCommand(const char *name, sdk::CommandCallback callback, const char *help) {
+bool RegisterCommand(const char *name, sdk::CommandCallback callback, const char *help, bool serverMayRun) {
 	if (!g_cvar || !g_commandVtable || FindCommandBase(name)) return false;
 	auto *command = new sdk::ConCommand{};
 	command->vtable = g_commandVtable;
 	command->name = name;
 	command->helpString = help;
 	command->callback = callback;
+	if (serverMayRun) command->flags |= sdk::kFlagServerCanExecute;
 	command->usingNewCommandCallback = true;
 	CallVirtual<void>(g_cvar, sdk::slot::RegisterConCommand, command);
 	g_commands.push_back(command);
@@ -347,6 +362,16 @@ void Execute(const char *format, ...) {
 	va_end(args);
 	Trace("exec  ", line);
 	if (g_engineClient) CallVirtual<void, const char *>(g_engineClient, sdk::slot::ExecuteClientCmd, line);
+}
+
+void ExecuteLater(const char *format, ...) {
+	char line[1024];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	Trace("later ", line);
+	if (g_engineClient) CallVirtual<void, const char *>(g_engineClient, sdk::slot::ClientCmdUnrestricted, line);
 }
 
 bool CallCommand(const char *name, const char *arguments) {
@@ -376,6 +401,33 @@ float CvarFloat(const char *name, float fallback) {
 std::string CvarString(const char *name) {
 	sdk::ConVar *var = FindVar(name);
 	return var && var->string ? var->string : "";
+}
+
+// The object that holds a cvar's value and limits (a cvar declared in several modules shares one)
+sdk::ConVar *ValueOwner(const char *name) {
+	sdk::ConVar *var = FindVar(name);
+	return var && var->parent ? var->parent : var;
+}
+
+void HoldCvarAtLeast(const char *name, float minimum) {
+	sdk::ConVar *var = ValueOwner(name);
+	if (!var) return;
+	bool held = false;
+	for (const HeldCvar &h : g_held) held = held || h.var == var;
+	if (!held) g_held.push_back({var, var->hasMinimum, var->minimum});
+	var->hasMinimum = true;
+	var->minimum = minimum;
+	if (var->floatValue < minimum) Execute("%s %g", name, minimum);
+}
+
+void ReleaseCvar(const char *name) {
+	sdk::ConVar *var = ValueOwner(name);
+	for (size_t i = 0; i < g_held.size(); i++) {
+		if (g_held[i].var != var) continue;
+		ReleaseHeld(g_held[i]);
+		g_held.erase(g_held.begin() + i);
+		return;
+	}
 }
 
 void Script(const char *format, ...) {
@@ -691,6 +743,12 @@ bool SetMovementSpeed(int entIndex, float scale) {
 	memcpy(field, &scale, sizeof(scale));
 	edict.stateFlags |= kEdictChanged | kEdictFullyChanged;  // (the screens' copy of the player has to hear of it)
 	return true;
+}
+
+bool SnapshotsRestoreDeviceState() {
+	HMODULE module = GetModuleHandleA("chocolateloading.dll");
+	auto restores = module ? reinterpret_cast<int(__cdecl *)()>(GetProcAddress(module, "ChocoRestoresDeviceState")) : nullptr;
+	return restores && restores() != 0;
 }
 
 // IShaderAPI::ResetRenderState(bool bFullReset), slot 144 of ShaderApi029 in Portal 2's shader API: the slot holds
