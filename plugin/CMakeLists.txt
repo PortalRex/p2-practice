@@ -21,6 +21,13 @@ add_library(p2practice SHARED
 	src/ghostmodel.cpp
 	src/plugin.cpp
 	src/trainer.cpp
+	src/trainer_commands.cpp
+	src/trainer_drive.cpp
+	src/trainer_finish.cpp
+	src/trainer_ghosts.cpp
+	src/trainer_hud.cpp
+	src/trainer_path.cpp
+	src/trainer_snapshot.cpp
 	src/ui/boards.cpp
 	src/ui/gfx.cpp
 	src/ui/hud.cpp
