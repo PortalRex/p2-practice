@@ -22,7 +22,8 @@ param(
 	[string[]]$CfgFiles = @(),  # extra cfg files copied into the profile's cfg folder
 	[int]$Width = 1280,
 	[int]$Height = 720,
-	[string]$Inject = ''
+	[string]$Inject = '',
+	[switch]$Sound             # leave the game's sound on (to listen to a change); the game is muted otherwise
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -132,7 +133,7 @@ $lowering = $gpu.BeginInvoke($proc, $null, $null)
 $mute = Splicer AudioMute Mute
 while (-not $proc.HasExited) {
 	$changed = $false
-	if (-not $info.muted) {
+	if (-not $Sound -and -not $info.muted) {
 		try { if ($mute.Invoke($null, [object[]]@([uint32]$proc.Id))) { $info.muted = $true; $changed = $true } }
 		catch { $info.muteError = "$($_.Exception.InnerException.Message)" }
 	}
