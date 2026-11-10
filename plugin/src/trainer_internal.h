@@ -30,6 +30,34 @@ enum class Mode {
 	Done,            // finished: the result stays up for a moment
 };
 
+// The save state for retries (a ChocolateLoading snapshot of the level a moment into a lead-in) and the one
+// operation on it that can be under way. ChocolateLoading does a save or a restore at the end of a frame some
+// frames after it is asked, and reports it in its counts (engine::SnapshotsStatus): Saving and Restoring last
+// until the count of that kind, or the count of failures, has moved past what it was at the request.
+//
+//   Idle --(a lead-in begins)--> Due --(snap_save)--> Saving --(saved, or failed)--> Idle
+//   Idle, a state held --(retry: snap_load)--> Restoring --(restored, or failed: the level restarts)--> Idle
+enum class SavePhase {
+	Idle,       // nothing under way
+	Due,        // the lead-in that just began gets a snapshot in `dueIn` ticks
+	Saving,     // snap_save is asked for
+	Restoring,  // snap_load is asked for
+};
+
+struct SaveState {
+	SavePhase phase = SavePhase::Idle;
+	int dueIn = 0;
+	unsigned doneBefore = 0, failedBefore = 0;  // ChocolateLoading's counts when the save or restore was asked for
+	// The state held (being stored, while Saving)
+	int handover = -1;             // the handover its attempt had, -1: none held
+	bool watch = false;
+	int cursor = 0;                // the run tick it was taken at
+	bool startScreenOpen = false;  // the start board hadn't come and gone yet when it was taken
+	bool holdsDemo = false;        // a demo was being recorded when it was taken (see DropSnapshotAtFlags)
+
+	bool Busy() const { return phase == SavePhase::Saving || phase == SavePhase::Restoring; }
+};
+
 // One player of the route and whoever stands in for them now
 struct Slot {
 	int entIndex = 0;    // live player's entity index, 0 when nobody plays this robot
@@ -73,31 +101,16 @@ struct Session {
 	int worldReached = 0;
 	bool helperLoaded = false;  // this map load
 	bool speedChanged = false;
-	// ChocolateLoading snapshot of the level at the start of a lead-in (see TakeSnapshotIfDue)
-	int snapshotHandover = -1;    // the handover its attempt had, -1: no snapshot
-	bool snapshotStartScreenOpen = false;  // the start board hadn't come and gone yet when it was taken
-	bool snapshotWatch = false;
-	int snapshotCursor = 0;       // the run tick the snapshot was taken at
-	int snapshotIn = 0;           // ticks until the snapshot of the lead-in that just began is taken (0: none due)
-	bool snapshotLoading = false; // snap_load has been asked for: the level's tick count jumps back when it is done
-	std::chrono::steady_clock::time_point snapshotAskedAt{};
-	bool snapshotHoldsDemo = false;  // a demo was being recorded when it was taken (see DropSnapshotAtFlags)
+	SaveState save;               // the save state for retries, and the save or restore under way
 	bool demoToRestart = false;   // a demo was stopped for a save state: a new one starts in demoRestartIn frames
 	int demoRestartIn = 0;
 	bool demoSinceSnapshot = false;  // a demo was recorded at some moment since the snapshot (SAR stops it at the flags)
-	int lastTick = 0;
-	bool queuePinned = false;     // the game's threads are switched off for save states (see SingleThreadedRendering)
-	bool renderThreadOff = false; // queued rendering is off just now (for a save or a restore)
-	std::chrono::steady_clock::time_point queuePinnedAt;  // when it was last switched off
-	int queueResumeIn = 0;        // frames until queued rendering goes back on (0: not due)
-	bool restorePending = false;  // a retry waits for the render thread to stop, then restores the save state
-	int pendingHandover = 0;
-	bool pendingWatch = false;
-	int savedThreadCvars[4] = {}; // mat_queue_mode, host_thread_mode, snd_mix_async, net_queued_packet_thread as they were
+	bool threadsPinned = false;   // the game's worker threads are switched off for save states (see PinThreads)
+	int savedThreadCvars[3] = {}; // host_thread_mode, snd_mix_async, net_queued_packet_thread as they were
 	int savedThreadedParticles = 1;  // r_threaded_particles as it was
 	bool retryAsked = false;      // the game's own restart (the finish board's Replay Map) asked for a retry
 	bool closeScreensAfterRestore = false;  // that retry is a save state on its way: close the boards again when it lands
-	bool stopWhenRestored = false;  // practice was stopped with a save state on its way: the rest of the stop follows it
+	bool stopWhenRestored = false;  // practice was stopped with a save or a restore under way: the rest of the stop follows it
 	bool savesOff = false;        // the game's saving was switched off for practice (and is switched back on at the end)
 	bool levelTouched = false;    // the trainer has worked in this map load: nothing done in it may count as a run
 	bool resumeAfterLoad = false; // the level went away in the middle of an attempt: start it again when it is back
@@ -169,8 +182,6 @@ constexpr const char *kDot = "  \xC2\xB7  ";  // a middle dot between the parts 
 
 constexpr const char *kEndNode = "challenge_mode_end_node";  // the Challenge Mode flags
 
-constexpr int kQueueResumeFrames = 40;  // frames after a save or a restore before queued rendering goes back on
-
 // trainer.cpp
 extern Settings g_set;
 extern Session g;
@@ -189,7 +200,6 @@ extern std::chrono::steady_clock::time_point g_flashUntil;
 
 // trainer_snapshot.cpp
 extern int g_snapshotDelayTicks;
-extern int g_settleMs;
 
 // trainer_drive.cpp
 extern bool g_botPlacedOnly;
@@ -233,7 +243,6 @@ std::vector<int> PlayersOf(const Route &route);
 int LastDrivenTick();
 std::string LoadCommand();
 bool MapMatches();
-bool RestoreOnItsWay();
 bool BusyRestoring();
 void Stop(bool announce);
 void Start(int handover, bool watch);
@@ -267,15 +276,19 @@ void UpdateHud(float hold = -1);
 void Flash(float seconds, const std::string &text);
 
 // trainer_snapshot.cpp
+bool SnapshotsReady();
 bool SnapshotsUsable();
-void SingleThreadedRendering();
-bool ThreadsSettled();
-void TickQueuedRendering();
-void RestoreRendering();
+void PinThreads();
+void ReleaseThreads();
 void DropSnapshot();
+void ForgetSaveState();
 void TickDemoRestart();
+void ScheduleSnapshot();
+void CancelDueSnapshot();
 void TakeSnapshotIfDue();
 bool RestoreSnapshot(int handover, bool watch);
+enum class SaveEvent { None, Saved, SaveFailed, Restored, RestoreFailed };
+SaveEvent TickSaveState();
 
 // trainer_drive.cpp
 void SetPortals(const Route &route, int tick);

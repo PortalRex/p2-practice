@@ -23,16 +23,18 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 
-SP = {'name': 'single player (Dual Lasers)', 'map': 'map sp_a2_dual_lasers', 'demos': ['DualLasers_1086_76561198095730281_308103.dem']}
+SP = {'name': 'single player (Dual Lasers)', 'map': 'map sp_a2_dual_lasers', 'fallback': True, 'demos': ['DualLasers_1086_76561198095730281_308103.dem']}
 COOP = {'name': 'co-op (Flings)', 'map': 'ss_map mp_coop_fling_3',
         'demos': ['Flings_1298_76561198295368421_310304.dem', 'Flings_1298_76561198823602829_310305.dem']}
 
 # What the game's settings must read whenever the trainer is not in the middle of a save or restore
-SETTINGS_IN_ATTEMPT = {'mat_queue_mode': '-1', 'host_timescale': '1'}
-SETTINGS_STOPPED = {'mat_queue_mode': '-1', 'host_timescale': '1', 'save_disable': '0'}
+AS_BEFORE = None  # (whatever the game had before the run was loaded)
+SETTINGS_IN_ATTEMPT = {'mat_queue_mode': AS_BEFORE, 'host_timescale': '1'}
+SETTINGS_STOPPED = {'mat_queue_mode': AS_BEFORE, 'host_timescale': '1', 'save_disable': '0'}
 
 # Console lines that mean something went wrong
-TROUBLE = re.compile(r'AN ERROR HAS OCCURED|did not stop for the save state|Script not found|bad edict|, BAD ', re.I)
+LOST_SAVE_STATE = 'could not bring the save state back'
+TROUBLE = re.compile(r'AN ERROR HAS OCCURED|could not store the save state|could not bring the save state back|Script not found|bad edict|, BAD ', re.I)
 
 
 class Console:
@@ -92,6 +94,7 @@ class Pass:
         self.log_path = os.path.join(info['profile'], 'console.log')
         self.failures = 0
         self.started = time.time()
+        self.before = self.console.cvars(['mat_queue_mode'])
 
     def check(self, ok, what, detail=''):
         self.failures += 0 if ok else 1
@@ -107,6 +110,7 @@ class Pass:
             return log.read().decode('utf-8', 'replace')
 
     def settings(self, expected, when):
+        expected = {name: self.before[name] if value is AS_BEFORE else value for name, value in expected.items()}
         got = self.console.cvars(list(expected))
         wrong = {name: value for name, value in got.items() if value != expected[name]}
         self.check(not wrong, f'settings {when}', f'{wrong}, expected {expected}' if wrong else str(got))
@@ -132,7 +136,6 @@ class Pass:
         if 'ss_map' in level['map']:
             joined = re.findall(r'\[clock\] attempt: .*: (joined|not joined)', self.log_since(mark))
             self.check(joined[:1] == ['joined'], "first attempt on the level's clock", str(joined))
-        time.sleep(1.5)  # (the render thread is back on by now)
         self.settings(SETTINGS_IN_ATTEMPT, 'in the attempt')
 
         snapshots = 'snap_save' in c.send('find snap_save', wait=0.6)
@@ -148,9 +151,10 @@ class Pass:
             self.check(mode == 'run', f'retry {attempt + 1} back in an attempt', f'mode {mode} after {took:.1f} s')
             if snapshots:
                 self.check(restarts == 0, f'retry {attempt + 1} through the save state', f'{restarts} level restart(s), {took:.1f} s')
-            time.sleep(1.5)
             self.settings(SETTINGS_IN_ATTEMPT, f'after retry {attempt + 1}')
 
+        if snapshots and level.get('fallback'):
+            self.fallback()
         if not self.args.no_perf:
             self.perf()
         c.send('prac_stop', wait=1.5)
@@ -159,8 +163,22 @@ class Pass:
         c.send('disconnect', wait=4)
         self.settings(SETTINGS_STOPPED, 'at the menu')
         trouble = [line.strip() for line in self.log_since(mark).splitlines() if TROUBLE.search(line)]
+        if level.get('fallback'):
+            trouble = [line for line in trouble if LOST_SAVE_STATE not in line]  # (asked for, in fallback)
         self.check(not trouble, 'no errors in the console', ' | '.join(trouble[:5]))
         return True
+
+    def fallback(self):
+        """A save state that is gone when the retry asks for it: the retry restarts the level instead."""
+        c = self.console
+        before = self.log_size()
+        c.send('snap_drop p2practice', wait=0.5)
+        c.send('prac_retry', wait=0.8)
+        mode = c.wait_for_mode(['run'], 60)
+        log = self.log_since(before)
+        restarted = len(re.findall(r'Host_NewGame|Host_Changelevel', log)) > 0
+        self.check(mode == 'run' and restarted and LOST_SAVE_STATE in log, 'a lost save state falls back to a level restart',
+                   f'mode {mode}, restarted {restarted}, said so {LOST_SAVE_STATE in log}')
 
     def fps(self, seconds):
         self.console.send('prac_debug perf', wait=0.3)  # (a call starts a new measurement and reports the one before it)

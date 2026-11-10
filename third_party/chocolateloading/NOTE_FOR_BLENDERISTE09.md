@@ -95,6 +95,29 @@ references back. The block is released when the slot is saved again or dropped, 
 **Tested.** Turret Warehouse with `-vulkan` and p2boost, screenshots at several moments after each restore: yellow
 frames with the option off, none with it on.
 
+## Two more: queued rendering stays on, and a status export
+
+Patches 9 and 10 (`0009-snapshot-hold-the-material-system-s-lock-...`, `0010-control-count-the-saves-and-restores-...`).
+
+**Queued rendering stays on (snapshot.cpp, control.cpp).** `force_threading_off` set `mat_queue_mode 0` around every
+operation, so the render thread stopped and started each time. That costs a stutter, and when the switch hadn't
+taken effect yet (it is a queued command, the material system changes over at the end of a frame) a restore landed
+in a game whose render thread was still running: yellow lightmaps on Turret Warehouse, crashes on the render
+thread a few seconds later. A save and a restore now run inside `IMaterialSystem::Lock()` / `Unlock()`
+(`VMaterialSystem080`, slots 116 and 117), which is what the engine itself uses to hold the render thread: Lock
+waits for the queue to drain and keeps the thread idle until Unlock. `mat_queue_mode` is left alone. A snapshot
+notes whether it was saved under the lock, and restoring one that wasn't while the lock is in use is refused.
+`snap_opt render_lock 0` gives the old behaviour back.
+
+Tested with `-vulkan` and `mat_queue_mode 2`: more than 300 restores on the maps that crashed before
+(Turret Warehouse, mp_coop_laser_2, sp_a2_laser_stairs), none went wrong; a restore takes as long as before.
+
+**Status export (control.cpp, plugin.cpp).** `ChocoGetSnapshotStatus(ChocoSnapshotStatus*)` gives the number of
+saves done, restores done and requests failed (every `snap_save` / `snap_load` ends up in exactly one of them, also
+one refused at the command or dropped by a level change), and whether queued rendering stays on. A plugin that
+sends `snap_save` notes the counts and knows its operation is over when one of them has moved, instead of waiting
+a number of frames and guessing.
+
 ## Something we saw but did not fix in ChocolateLoading
 
 **Particle crash after a restore.** A few seconds after some restores on sp_a2_laser_stairs, the game crashed on a

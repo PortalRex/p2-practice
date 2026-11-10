@@ -1,0 +1,127 @@
+From b5b4879e4fd8d64f55dba1585a0c1842405ed358 Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 08:01:47 -0600
+Subject: [PATCH 10/10] control: count the saves and restores done and the
+ requests failed; export ChocoGetSnapshotStatus so a plugin can wait for the
+ operation it asked for
+
+---
+ AGENTS.md       |  2 ++
+ src/control.cpp | 10 ++++++++--
+ src/control.h   |  6 ++++++
+ src/plugin.cpp  | 20 ++++++++++++++++++++
+ 4 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index cf6c413..d643cdc 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -303,6 +303,8 @@ the memory it brought back is the locked state of that moment. `snap_opt render_
+ behaviour (a snapshot taken that way can only be restored that way). Tested with -vulkan: 60-80 restores
+ in a row in sp_a2_laser_stairs and mp_coop_laser_2 (the maps that crashed) and level changes after them.
+ 
++**Exports for plugins that drive snapshots** (`src/plugin.cpp`): `ChocoRestoresDeviceState()` (1 when a restore sets the Direct3D device back too) and `ChocoGetSnapshotStatus(ChocoSnapshotStatus*)`: counts of saves done, restores done and requests failed (`control::Done()`; every request ends up in exactly one of them, also one refused at the command or dropped by a level change), and whether queued rendering stays on. A plugin compares the counts with what they were when it sent `snap_save` / `snap_load`, instead of waiting a number of frames.
++
+ Next ideas:
+ - Shorter snap_load latency: a request waits 4 frames for the workers to drain unless the threading
+   cvars are already forced - now longer than the restore itself (~9 ms). Keeping them forced while a
+diff --git a/src/control.cpp b/src/control.cpp
+index f91b5c5..f352d9f 100644
+--- a/src/control.cpp
++++ b/src/control.cpp
+@@ -22,6 +22,7 @@ double   g_request_time = 0;
+ uint32_t g_request_frame = 0;
+ int      g_levelinits = 0;
+ char     g_domain[1024] = "";
++Counts   g_done = {};
+ 
+ // ---- stress test (snap_test / autotest) -------------------------------------------------------
+ int      g_test_cycles = 0;
+@@ -104,6 +105,9 @@ void run_pending() {
+         if (ok) sarlink::RecordDemoCommand("snap_load", name);   // the demo is back at the save now
+     }
+     sarlink::UpdateHud();
++    if (!ok) g_done.failed++;
++    else if (op == OP_SAVE) g_done.saved++;
++    else g_done.restored++;
+     if (!ok) util::ConWarn("[snap] %s of '%s' failed: %s", op == OP_SAVE ? "save" : "restore", name, err);
+     else if (op == OP_LOAD) util::Con("[snap] snap_load: %.0f ms from the command to the restored state (%u frames)", (util::Now() - g_request_time) * 1000.0, g_frame - g_request_frame);
+ }
+@@ -111,8 +115,8 @@ void run_pending() {
+ // ---- console commands ---------------------------------------------------------------------------
+ const char* name_arg(const CCommand& a) { return a.ArgC() >= 2 ? a.Arg(1) : snapshot::DEFAULT_NAME; }
+ 
+-void cmd_save(const CCommand& a) { Request(OP_SAVE, name_arg(a)); }
+-void cmd_load(const CCommand& a) { Request(OP_LOAD, name_arg(a)); }
++void cmd_save(const CCommand& a) { if (!Request(OP_SAVE, name_arg(a))) g_done.failed++; }
++void cmd_load(const CCommand& a) { if (!Request(OP_LOAD, name_arg(a))) g_done.failed++; }
+ void cmd_list(const CCommand&) { snapshot::PrintList(); }
+ void cmd_info(const CCommand&) { snapshot::PrintInfo(); }
+ 
+@@ -223,6 +227,7 @@ bool Request(Op op, const char* name) {
+ }
+ 
+ bool Busy() { return g_pending != OP_NONE; }
++const Counts& Done() { return g_done; }
+ uint32_t Frame() { return g_frame; }
+ 
+ void OnFrameStart() {
+@@ -267,6 +272,7 @@ void OnLevelInit(const char* map) {
+ }
+ 
+ void OnLevelShutdown() {
++    if (g_pending != OP_NONE) g_done.failed++;   // (the level ended before its frame came)
+     g_pending = OP_NONE;
+     g_test_cycles = 0;
+     snapshot::OnLevelShutdown();
+diff --git a/src/control.h b/src/control.h
+index ba62596..47372e1 100644
+--- a/src/control.h
++++ b/src/control.h
+@@ -19,6 +19,12 @@ void RegisterCommands();
+ // snapshot when there are already snapshot::MAX_SNAPSHOTS.
+ bool Request(Op op, const char* name);
+ bool Busy();                  // an operation is queued
++
++// What became of the requests so far, for a plugin that drives snapshots and waits for each (the export
++// ChocoGetSnapshotStatus): every request ends up counted once, as a save done, a restore done, or as failed
++// (refused, gone wrong, or dropped because the level ended first).
++struct Counts { uint32_t saved, restored, failed; };
++const Counts& Done();
+ void OnFrameStart();          // drive the queue; call once per FRAME_START
+ uint32_t Frame();             // FRAME_STARTs seen so far
+ 
+diff --git a/src/plugin.cpp b/src/plugin.cpp
+index a2bcc6e..b9d69be 100644
+--- a/src/plugin.cpp
++++ b/src/plugin.cpp
+@@ -294,6 +294,26 @@ extern "C" __declspec(dllexport) int ChocoRestoresDeviceState() {
+     return snapshot::Opts().device_state ? 1 : 0;
+ }
+ 
++// For plugins that drive snapshots (snap_save / snap_load run a few frames after the command): how many saves
++// and restores have been done and how many requests failed, so that the plugin can wait for the one it asked
++// for instead of guessing when it has happened. The caller sets `size`; 0 is returned for a size not known here.
++struct ChocoSnapshotStatus {
++    unsigned size;
++    unsigned saved, restored;       // saves and restores done since the game started
++    unsigned failed;                // requests refused, gone wrong, or dropped because the level ended first
++    unsigned keeps_render_thread;   // 1: queued rendering stays on through an operation (snap_opt render_lock)
++};
++
++extern "C" __declspec(dllexport) int ChocoGetSnapshotStatus(ChocoSnapshotStatus* out) {
++    if (!out || out->size != sizeof(ChocoSnapshotStatus)) return 0;
++    const control::Counts& done = control::Done();
++    out->saved = done.saved;
++    out->restored = done.restored;
++    out->failed = done.failed;
++    out->keeps_render_thread = snapshot::RenderLockUsable() ? 1 : 0;
++    return 1;
++}
++
+ extern "C" __declspec(dllexport) void* CreateInterface(const char* name, int* ret) {
+     // The engine dispatches to fixed vtable slots (ClientActive = 9, ClientFullyConnect = 10, ...),
+     // i.e. the 003 layout, which is what IServerPluginCallbacks implements.
+-- 
+2.43.0.windows.1
+

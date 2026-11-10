@@ -1,7 +1,7 @@
 From 53f27d63287602b97c54337e510979aa844ad078 Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 10:39:19 -0600
-Subject: [PATCH 1/6] arena: align every payload to 16 bytes, as tier0's heap
+Subject: [PATCH 01/10] arena: align every payload to 16 bytes, as tier0's heap
  does
 
 Blocks were multiples of 8 with the payload 8 bytes after the header, so

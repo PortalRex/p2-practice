@@ -1,9 +1,9 @@
 From 98f9f5a8f45b568aafe43c0a0f0c536f76a8023e Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Mon, 9 Nov 2026 20:38:38 -0600
-Subject: [PATCH] d3dguard: save the device's state with a snapshot and set it
- back at a restore (the shader API's memory of it went back, the device did
- not: wrong lighting for seconds after a restore)
+Subject: [PATCH 08/10] d3dguard: save the device's state with a snapshot and
+ set it back at a restore (the shader API's memory of it went back, the device
+ did not: wrong lighting for seconds after a restore)
 
 ---
  README.md        |  1 +

@@ -262,7 +262,7 @@ bool PlainMapName(const std::string &map) {
 // (engine::ExecuteLater) because this code runs while a frame is being drawn: a "disconnect" run right there tore
 // the level down under the renderer, and the next level then crashed the game as it finished loading (a queued
 // render call on a missing object). "prac_stop" comes a moment earlier so the game has its own settings back,
-// queued rendering among them, before the level goes.
+// its worker threads among them, before the level goes.
 enum class LevelStep { None, Stopped, Leaving };
 constexpr auto kPauseAfterStop = std::chrono::milliseconds(300);
 constexpr auto kPauseAtMainMenu = std::chrono::milliseconds(500);
@@ -1204,7 +1204,7 @@ void SettingsPage(Rect area, const trainer::Status &s) {
 	if (s.snapshotsReady) {
 		ui::Label("ChocolateLoading is running: retries return in about 10 ms.", Font::Small, theme::kGreen);
 	} else {
-		ui::Label("ChocolateLoading must start with the game. Once, in Steam:", Font::Small, theme::kDim);
+		ui::Label("The ChocolateLoading that comes with P2 Practice must start with the game. Once, in Steam:", Font::Small, theme::kDim);
 		ui::Label("Portal 2 > Properties > Launch Options, put this first:", Font::Small, theme::kDim);
 		Rect line = ui::Take(Px(34));
 		ui::Panel(line, theme::kField, theme::kLine);

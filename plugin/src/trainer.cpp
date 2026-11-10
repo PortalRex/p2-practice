@@ -304,14 +304,14 @@ void ClearScene() {
 	engine::Execute("clear_debug_overlays");
 }
 
-// Gives the game's own settings back as they were: saving, the game's speed, threaded rendering
+// Gives the game's own settings back as they were: saving, the game's speed, its worker threads
 void ReleaseGameSettings() {
 	if (g.savesOff) {
 		engine::Execute("save_disable 0");
 		g.savesOff = false;
 	}
 	RestoreSpeed();
-	RestoreRendering();
+	ReleaseThreads();
 }
 
 // Alone with a split-screen bot partner, the person's view takes the whole screen. The game splits it in two again
@@ -326,17 +326,11 @@ void KeepWholeScreen(bool held) {
 	if (g.botPartner && engine::CvarFloat(kCvar, 1) == 0) engine::Execute("%s 1", kCvar);
 }
 
-// Whether a save state asked for a moment ago is still to come back (ChocolateLoading brings it a few frames after
-// the request; one that hasn't come after three seconds never will)
-bool RestoreOnItsWay() {
-	return g.snapshotLoading && std::chrono::steady_clock::now() - g.snapshotAskedAt < std::chrono::seconds(3);
-}
-
-// Whether an attempt can't be started right now because a retry's save state is about to be asked for or is on
-// its way (ChocolateLoading holds one request at a time: a second one would replace it halfway). Says so.
+// Whether an attempt can't be started right now because a save state is being stored or brought back
+// (ChocolateLoading holds one request at a time: a second one would replace it halfway). Says so.
 bool BusyRestoring() {
-	if (!g.restorePending && !RestoreOnItsWay()) return false;
-	engine::Print("A save state is on its way back: try again in a moment.\n");
+	if (!g.save.Busy()) return false;
+	engine::Print("A save state is on its way: try again in a moment.\n");
 	return true;
 }
 
@@ -347,10 +341,9 @@ void Stop(bool announce) {
 	g.mode = Mode::Idle;
 	g.resumeAfterLoad = false;
 	g.closeScreensAfterRestore = false;
-	if (RestoreOnItsWay()) {
-		// (the game's threads stay off and the save state stays until it has landed: switched on or freed under a
-		// restore, they crashed the game. OnFrame finishes the stop.)
-		g.restorePending = false;
+	if (g.save.Busy()) {
+		// (the game's threads stay off and the save state stays until the save or the restore is over: switched on
+		// or freed under a restore, they crashed the game. OnFrame finishes the stop.)
 		g.stopWhenRestored = true;
 		if (announce && wasActive) engine::Print("Practice stopped.\n");
 		return;
@@ -373,7 +366,7 @@ bool WorldEventsBetween(int after, int upTo) {
 
 // Puts everyone on the route at the lead-in's start and lets the run play itself to the handover.
 void BeginLeadIn() {
-	g.snapshotIn = SnapshotsUsable() ? g_snapshotDelayTicks : 0;
+	ScheduleSnapshot();
 	g.cursor = g.leadStart;
 	SetPortals(Driver(), DriverTick(g.cursor));
 	g.objectLastDriven.clear();
@@ -516,11 +509,9 @@ int BeforeStuck(int handover) {
 
 // Starts an attempt whose handover is at `handover`; reloads the map first when its state is past that point.
 void Start(int handover, bool watch) {
-	// (a snapshot restore asked for a moment ago is still on its way: ChocolateLoading holds one request at a time,
-	// so a second retry now would replace it halfway)
-	if (RestoreOnItsWay()) return;
-	if (g.restorePending) return;  // (or about to be asked for)
-	g.snapshotLoading = false;  // (one that never came, after a failed restore: the retry goes ahead)
+	// (a save or a restore asked for a moment ago is still on its way: ChocolateLoading holds one request at a time,
+	// so a second one now would replace it halfway)
+	if (g.save.Busy()) return;
 	g.stopWhenRestored = false;
 	if (!g.hasRoute) {
 		engine::Warn("No route loaded. Use prac_load <demo> [partner's demo].\n");
@@ -582,8 +573,8 @@ void MarkWorld() {
 }
 
 void TickCatchUp() {
-	// (with save states: the render thread goes now, well before the lead-in's snapshot)
-	if (SnapshotsUsable()) SingleThreadedRendering();
+	// (with save states: the worker threads go now, well before the lead-in's snapshot)
+	if (SnapshotsUsable()) PinThreads();
 	DriveSlots();
 	MoveObjects(false);
 	PlacePortals();
@@ -614,9 +605,9 @@ void TickLeadIn() {
 	if (g.cursor > g.handover && FrameStartsNow()) {
 		// The players have just been given the run's state at the handover, and a frame begins: it is theirs
 		// (the snapshot of this attempt, if one was stored, is for the handover as it is now: a retry asks for it)
-		if (g.snapshotHandover == g.handover) g.snapshotHandover = g.cursor - 1;
+		if (g.save.handover == g.handover) g.save.handover = g.cursor - 1;
 		g.handover = g.cursor - 1;  // (in single player the handover falls on the tick before a frame)
-		g.snapshotIn = 0;  // (a lead-in too short for its save state: the attempt goes without, with its render thread)
+		CancelDueSnapshot();  // (a lead-in too short for its save state: the attempt goes without)
 		for (Slot &slot : g.slots) slot.partStart = g.handover;  // (the first part's time counts from here)
 		g.mode = Mode::Run;
 		ShieldPlayers(true);  // the people are on their own again; bots stay protected
@@ -646,7 +637,7 @@ void TickWatch() {
 		SetDuckKey(false);
 		g.mode = Mode::Done;
 		g.doneTicks = 0;
-		g.snapshotIn = 0;
+		CancelDueSnapshot();
 	}
 }
 
@@ -812,17 +803,14 @@ void Shutdown() {
 		g.placedBots.clear();
 		SetBotMovement();  // (the bots move by themselves again)
 	}
-	g.snapshotLoading = false;  // (no waiting for a save state on its way: the game gets its settings back now)
+	ForgetSaveState();  // (no waiting for a save state on its way: the game gets its settings back now)
 	Stop(false);
 	g = Session{};
 }
 
 void OnLevelInit(const char *mapName) {
 	// A new map load: nothing made in the old one exists any more
-	DropSnapshot();
-	g.snapshotIn = 0;
-	g.snapshotLoading = false;
-	g.restorePending = false;
+	ForgetSaveState();
 	g.helperLoaded = false;
 	g.levelTouched = false;
 	g.startScreenClosed = false;
@@ -874,7 +862,7 @@ void OnLevelShutdown() {
 	if (g.mode == Mode::Idle && !g.resumeAfterLoad) {
 		g.botPartner = false;
 		// (and the game has its own settings back: at the menu nothing else would give them back)
-		g.snapshotLoading = false;
+		g.save.phase = SavePhase::Idle;
 		g.stopWhenRestored = false;
 		ReleaseGameSettings();
 	}
@@ -940,13 +928,9 @@ void PrintPerf() {
 
 void OnFrame(bool simulating) {
 	if (g_logArrivals) LogAlivePlayers(simulating);
-	// A snapshot restore takes a few frames to come: the trainer runs on meanwhile, so when the level's clock
-	// jumps back to the snapshot's, the run's cursor is set back to where the snapshot was taken
-	int tick = engine::TickCount();
-	bool restored = g.snapshotLoading && tick < g.lastTick;
+	SaveEvent saveEvent = TickSaveState();
+	bool restored = saveEvent == SaveEvent::Restored;
 	if (restored) {
-		g.cursor = g.snapshotCursor;
-		g.snapshotLoading = false;
 		// (the restore took long enough for the short lead-in to end: the game is back in it)
 		if (g.mode == Mode::Run) g.mode = Mode::LeadIn;
 		// The shader API remembers what it has set on the graphics card, to skip setting it again: the restore takes
@@ -958,7 +942,7 @@ void OnFrame(bool simulating) {
 		if (!engine::SnapshotsRestoreDeviceState()) engine::ResetRenderState();
 		// The game is back at the snapshot's moment and the plugin's memory is not: what the plugin knows about
 		// the level is set back to what held then. (The Challenge Mode start board, the flags, the screen fade.)
-		if (g.snapshotStartScreenOpen) g.startScreenClosed = false;
+		if (g.save.startScreenOpen) g.startScreenClosed = false;
 		g.pausedFrames = 0;
 		g.flagsUp = ChallengeMode() && engine::EntityExists(kEndNode);
 		g.flagsGone = false;
@@ -966,26 +950,14 @@ void OnFrame(bool simulating) {
 		if (g.closeScreensAfterRestore) CloseGameScreens();
 		g.closeScreensAfterRestore = false;
 	}
-	if (g_scanEdicts) ScanEdicts(tick, restored);
-	g.lastTick = tick;
-	if (restored) g.queueResumeIn = kQueueResumeFrames;
-	if (g.stopWhenRestored && !RestoreOnItsWay()) Stop(false);  // (the stop that waited for the save state to land)
-	TickQueuedRendering();
-	if (g.restorePending) {
-		// (the retry that waited for the render thread: the restore, or a level restart if the save state went
-		// meanwhile. A thread that won't stop - something else holds its cvar on - gets two seconds: the retry
-		// then goes without the save state.)
-		bool gaveUp = !ThreadsSettled() && std::chrono::steady_clock::now() - g.queuePinnedAt > std::chrono::seconds(2);
-		if (gaveUp) {
-			engine::Warn("The game's threads did not stop for the save state: restarting the level instead.\n");
-			DropSnapshot();
-		}
-		if (gaveUp || ThreadsSettled()) {
-			g.restorePending = false;
-			Start(g.pendingHandover, g.pendingWatch);
-		}
+	if (g_scanEdicts) ScanEdicts(engine::TickCount(), restored);
+	if (g.stopWhenRestored && !g.save.Busy()) {
+		Stop(false);  // (the stop that waited for the save or the restore to be over)
+	} else if (saveEvent == SaveEvent::RestoreFailed) {
+		// (the attempt was set up for a level that didn't come back: with the save state gone, this restarts it)
+		Start(g.handover, g.watch);
 	}
-	if (g.snapshotHandover >= 0 && !g.snapshotLoading && engine::RecordingDemo()) g.demoSinceSnapshot = true;
+	if (g.save.handover >= 0 && !g.save.Busy() && engine::RecordingDemo()) g.demoSinceSnapshot = true;
 	TickDemoRestart();
 	ReleaseStaleBoard();
 	if (g.retryAsked) {
@@ -997,7 +969,7 @@ void OnFrame(bool simulating) {
 		// a few frames later, so the closing is repeated once it has: CloseGameScreens)
 		CloseGameScreens();
 		CmdRetry(sdk::CCommand{});
-		g.closeScreensAfterRestore = g.snapshotLoading || g.restorePending;
+		g.closeScreensAfterRestore = g.save.phase == SavePhase::Restoring;
 		engine::FlushScript();
 		return;
 	}
@@ -1055,7 +1027,7 @@ void UseDrawnHud(bool on) { g_drawnHud = on; }
 
 Status CurrentStatus() {
 	Status s;
-	s.snapshotsReady = engine::CommandExists("snap_save") && engine::CommandExists("snap_load");
+	s.snapshotsReady = SnapshotsReady();
 	if (!g.hasRoute) return s;
 	const Route &r = g.route;
 	s.loaded = true;

@@ -331,9 +331,13 @@ void CmdSet(const sdk::CCommand &args) {
 	}
 	else if (name == "snapshots") {
 		g_set.snapshots = on;
-		g.snapshotHandover = -1;
+		// (one being stored or brought back just now is left to finish: the next attempt does without)
+		if (!g.save.Busy()) DropSnapshot();
 		if (on && !engine::CommandExists("snap_save"))
 			engine::Print("ChocolateLoading isn't running (no snap_save command): retries will restart the level as usual.\n");
+		else if (on && !SnapshotsReady())
+			engine::Print("This ChocolateLoading can't be used for retries: they need the build that comes with P2 Practice, with "
+			              "its \"snap_opt render_lock\" left on. Retries will restart the level as usual.\n");
 	}
 	else {
 		engine::Warn("No setting named %s.\n", name.c_str());
@@ -409,10 +413,6 @@ void CmdDebug(const sdk::CCommand &args) {
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "snapdelay")) {
 		g_snapshotDelayTicks = std::max(1, atoi(args.Arg(2)));
-		return;
-	}
-	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "settle")) {
-		g_settleMs = std::max(0, atoi(args.Arg(2)));
 		return;
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "edicts")) {

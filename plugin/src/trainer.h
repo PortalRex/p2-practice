@@ -78,7 +78,7 @@ struct Status {
 	float runSeconds = 0;
 	std::vector<Part> parts;
 	bool mapLoaded = false;   // the run's map is the one up now
-	bool snapshotsReady = false;  // ChocolateLoading is running
+	bool snapshotsReady = false;  // a ChocolateLoading that retries can use is running
 	// the session
 	bool active = false;      // practicing or watching
 	bool watching = false;

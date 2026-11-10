@@ -1,7 +1,7 @@
 From fb801de5afd3892423823d4ea880c2f37d062c51 Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 10:49:50 -0600
-Subject: [PATCH 2/6] callsite: let a reservation through the Steam overlay's
+Subject: [PATCH 02/10] callsite: let a reservation through the Steam overlay's
  detour count
 
 With the overlay enabled, gameoverlayrenderer.dll detours kernel32 and

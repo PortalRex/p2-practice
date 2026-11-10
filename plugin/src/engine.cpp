@@ -753,6 +753,25 @@ bool SnapshotsRestoreDeviceState() {
 	return restores && restores() != 0;
 }
 
+SnapshotStatus SnapshotsStatus() {
+	// (ChocolateLoading's own struct: the caller sets its size, so a later build can add to the end)
+	struct ChocoSnapshotStatus {
+		unsigned size, saved, restored, failed, keepsRenderThread;
+	};
+	SnapshotStatus status;
+	HMODULE module = GetModuleHandleA("chocolateloading.dll");
+	auto get = module ? reinterpret_cast<int(__cdecl *)(ChocoSnapshotStatus *)>(GetProcAddress(module, "ChocoGetSnapshotStatus")) : nullptr;
+	ChocoSnapshotStatus choco{};
+	choco.size = sizeof(choco);
+	if (!get || get(&choco) != 1) return status;
+	status.available = true;
+	status.keepsRenderThread = choco.keepsRenderThread != 0;
+	status.saved = choco.saved;
+	status.restored = choco.restored;
+	status.failed = choco.failed;
+	return status;
+}
+
 // IShaderAPI::ResetRenderState(bool bFullReset), slot 144 of ShaderApi029 in Portal 2's shader API: the slot holds
 // an adjustor thunk (sub ecx,0x248; jmp CShaderAPIDx8::ResetRenderState), checked byte for byte so a different
 // build is left alone. The same in shaderapidx9.dll (DirectX 9) and shaderapivk.dll (-vulkan: built from the same

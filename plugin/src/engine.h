@@ -108,6 +108,15 @@ void SetGodMode(int entIndex, bool on);
 bool SetMovementSpeed(int entIndex, float scale);
 // True when ChocolateLoading puts the graphics card's state back itself at a snapshot restore
 bool SnapshotsRestoreDeviceState();
+// What ChocolateLoading says of its snapshots (its ChocoGetSnapshotStatus export). The counts only go up, so an
+// operation asked for is over when the count of its kind, or the count of failures, has moved.
+struct SnapshotStatus {
+	bool available = false;          // ChocolateLoading is in the game and is a build that reports this
+	bool keepsRenderThread = false;  // queued rendering stays on through a save or a restore
+	unsigned saved = 0, restored = 0;  // saves and restores done since the game started
+	unsigned failed = 0;             // requests refused, gone wrong, or dropped because the level ended first
+};
+SnapshotStatus SnapshotsStatus();
 // Has the shader API send all of its render state to the graphics card again (false: unknown shader API)
 bool ResetRenderState();
 // Sets a player's Challenge Mode clock (the time in the corner of the screen) to `seconds`

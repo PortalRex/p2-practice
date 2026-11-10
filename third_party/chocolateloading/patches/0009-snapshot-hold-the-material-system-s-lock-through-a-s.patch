@@ -1,0 +1,316 @@
+From 5fee168a4c2b58ba24137884f1656db6835a5b60 Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 08:01:20 -0600
+Subject: [PATCH 09/10] snapshot: hold the material system's lock through a
+ save and a restore, so queued rendering stays on (no render thread stop and
+ start around every operation); snap_opt render_lock
+
+---
+ AGENTS.md        | 19 +++++++++++---
+ src/control.cpp  | 17 +++++++++----
+ src/sdk.h        |  7 ++++++
+ src/snapshot.cpp | 65 +++++++++++++++++++++++++++++++++++++++++++++++-
+ src/snapshot.h   |  4 +++
+ 5 files changed, 103 insertions(+), 9 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 03e38d0..cf6c413 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -82,7 +82,7 @@ imports only KERNEL32: tier0/vstdlib/engine/client are resolved at runtime.
+ 2. In a map: `snap_save [name]`, `snap_load [name]` (default name `quick`; letters, digits, `_ - .`, up
+    to 31 characters, case-insensitive), `snap_drop [name|*]`, `snap_list`, `snap_info`, `snap_check`
+    (arena consistency), `snap_test [cycles] [frames]` (restore the current snapshot repeatedly),
+-   `snap_opt <suspend_threads|zombies|clear_input|verify|cross_map> <0|1>`, `snap_domain [modules]`
++   `snap_opt <suspend_threads|zombies|clear_input|verify|render_lock|cross_map> <0|1>`, `snap_domain [modules]`
+    (show/set the captured modules).
+ - Log file: `<Portal 2>\chocolateloading.log` (always written, even without `-condebug`).
+ 
+@@ -149,8 +149,9 @@ initialisation, `memhook::InstallEarly` patches the `CStdMemAlloc` vtable (found
+    log lists them as `vatrack:   <owner> <base> reserved/committed`.
+ 
+ **Save / restore.** Requested from the console, they run at the next safe `FRAME_START` (`control.cpp`):
+-the threading cvars (`mat_queue_mode`, `host_thread_mode`, `snd_mix_async`, `net_queued_packet_thread`)
+-are forced to 0 a few frames before, the job pool and async filesystem are suspended, every other thread
++the threading cvars (`host_thread_mode`, `snd_mix_async`, `net_queued_packet_thread`) are forced to 0 a
++few frames before, the material system is locked (see below), the job pool and async filesystem are
++suspended, every other thread
+ is suspended, then memory is copied. The arena is reserved with MEM_WRITE_WATCH, so a restore copies back
+ only the pages written since the snapshot; blocks allocated after the snapshot ("zombies") are freed,
+ the free lists are rebuilt, `CEngine`'s real-time frame accumulators keep their current value, and held
+@@ -290,6 +291,18 @@ x2, 100 restores, quit), sp_a2_turret_intro (reload x2), sp_a2_bts3 (changelevel
+ drop, and demos: an in-map session records `snap_save` / `snap_load`, ends with dem_stop and SAR's
+ signature, and plays back with `playdemo`. Not verified: co-op.
+ 
++**Queued rendering stays on (the render lock).** With `mat_queue_mode 2` the main thread fills one of two
++queued render contexts while a job on the thread pool plays the other back, and which one is the main
++thread's lives in a thread-local pointer outside the snapshot. A restore that left it alone crashed in the
++render calls a moment later, so `mat_queue_mode` used to be forced to 0 around every operation (a stutter
++each way, and a third of the frame rate for a tool that kept it off). Now a save and a restore run inside
++`IMaterialSystem::Lock()` (`VMaterialSystem080`, vtable slots in `sdk.h` `matslot`, checked at init): it
++waits for the render job, takes the material system's mutex and gives the thread the device's context.
++The save keeps what `Lock()` returned and a restore calls `Unlock()` with the value of *that save*, since
++the memory it brought back is the locked state of that moment. `snap_opt render_lock 0` is the old
++behaviour (a snapshot taken that way can only be restored that way). Tested with -vulkan: 60-80 restores
++in a row in sp_a2_laser_stairs and mp_coop_laser_2 (the maps that crashed) and level changes after them.
++
+ Next ideas:
+ - Shorter snap_load latency: a request waits 4 frames for the workers to drain unless the threading
+   cvars are already forced - now longer than the restore itself (~9 ms). Keeping them forced while a
+diff --git a/src/control.cpp b/src/control.cpp
+index b7c0174..f91b5c5 100644
+--- a/src/control.cpp
++++ b/src/control.cpp
+@@ -36,15 +36,21 @@ char     g_test_name[snapshot::MAX_NAME] = "";
+ // requested (the engine notices on the next frames and stops queueing work to those threads) and
+ // restored to the user's values once the operation, or the stress test, is over. The value fields are
+ // written directly: no change callback runs, the engine reads them every frame.
++//
++// Queued rendering (the first of them) stays on when the operation holds the material system's lock instead
++// (snapshot.cpp, "the render lock"): switching it stopped and started the render thread around every save
++// and restore, a stutter each time.
+ const char* const kThreadCvars[] = { "mat_queue_mode", "host_thread_mode", "snd_mix_async", "net_queued_packet_thread" };
+ const int   kThreadCvarCount = 4;
+ bool  g_forced = false;
++int   g_forced_from = 0;              // index of the first cvar forced (1: queued rendering left alone)
+ int   g_saved_int[kThreadCvarCount];
+ float g_saved_float[kThreadCvarCount];
+ 
+ void force_threading_off(bool on) {
+     if (on == g_forced) return;
+-    for (int i = 0; i < kThreadCvarCount; i++) {
++    if (on) g_forced_from = snapshot::RenderLockUsable() ? 1 : 0;
++    for (int i = g_forced_from; i < kThreadCvarCount; i++) {
+         ConVar* v = gameapi::FindVar(kThreadCvars[i]);
+         if (!v) continue;
+         if (on) {
+@@ -72,7 +78,7 @@ bool thread_cvars_zero() {
+         g_thread_vars_found = g_thread_vars[0] != nullptr;   // (not before the console is up)
+         if (!g_thread_vars_found) return false;
+     }
+-    for (int i = 0; i < kThreadCvarCount; i++)
++    for (int i = snapshot::RenderLockUsable() ? 1 : 0; i < kThreadCvarCount; i++)
+         if (g_thread_vars[i] && g_thread_vars[i]->m_nValue != 0) return false;
+     return true;
+ }
+@@ -141,6 +147,7 @@ void cmd_opt(const CCommand& a) {
+         else if (!_stricmp(n, "clear_input")) o.clear_input = v;
+         else if (!_stricmp(n, "verify")) o.verify_heap = v;
+         else if (!_stricmp(n, "device_state")) o.device_state = v;
++        else if (!_stricmp(n, "render_lock")) o.render_lock = v;
+         else if (!_stricmp(n, "cross_map")) {
+             o.cross_map = v;
+             if (int dropped = snapshot::DropOtherMaps()) {
+@@ -150,8 +157,8 @@ void cmd_opt(const CCommand& a) {
+         }
+         else util::ConWarn("[snap] unknown option '%s'", n);
+     }
+-    util::Con("[snap] options: suspend_threads %d | zombies %d (0 free, 1 keep) | clear_input %d | verify %d | device_state %d | cross_map %d",
+-              (int)o.suspend_threads, o.zombie_policy, (int)o.clear_input, (int)o.verify_heap, (int)o.device_state, (int)o.cross_map);
++    util::Con("[snap] options: suspend_threads %d | zombies %d (0 free, 1 keep) | clear_input %d | verify %d | device_state %d | render_lock %d | cross_map %d",
++              (int)o.suspend_threads, o.zombie_policy, (int)o.clear_input, (int)o.verify_heap, (int)o.device_state, (int)o.render_lock, (int)o.cross_map);
+ }
+ 
+ void cmd_domain(const CCommand& a) {
+@@ -185,7 +192,7 @@ void RegisterCommands() {
+     gameapi::AddCommand("snap_list", "List the RAM snapshots", cmd_list);
+     gameapi::AddCommand("snap_info", "Snapshot / arena statistics", cmd_info);
+     gameapi::AddCommand("snap_check", "Check the arena heap consistency", cmd_check);
+-    gameapi::AddCommand("snap_opt", "snap_opt <suspend_threads|zombies|clear_input|verify|device_state|cross_map> <0|1>", cmd_opt);
++    gameapi::AddCommand("snap_opt", "snap_opt <suspend_threads|zombies|clear_input|verify|device_state|render_lock|cross_map> <0|1>", cmd_opt);
+     gameapi::AddCommand("snap_domain", "Show or set the list of modules whose memory is snapshotted", cmd_domain);
+     gameapi::AddCommand("snap_test", "snap_test [cycles] [frames]: restore the current snapshot repeatedly", cmd_test);
+ }
+diff --git a/src/sdk.h b/src/sdk.h
+index c169aff..28067f3 100644
+--- a/src/sdk.h
++++ b/src/sdk.h
+@@ -87,6 +87,13 @@ namespace kvslot { enum { AllocKeyValuesMemory = 1, FreeKeyValuesMemory = 2 }; }
+ // ---- IThreadPool (vstdlib g_pThreadPool) ------------------------------------------------------
+ namespace poolslot { enum { NumThreads = 7, NumIdleThreads = 8, SuspendExecution = 9, ResumeExecution = 10 }; }
+ 
++// ---- IMaterialSystem ("VMaterialSystem080", materialsystem.dll) --------------------------------
++// GetThreadMode returns CMaterialSystem's current mode (0 = everything on the main thread, 2 = queued: each
++// frame's render calls run as a job on the thread pool while the main thread simulates the next one).
++// Lock() waits for that job, takes the material system's mutex and makes the device's own render context the
++// calling thread's; it returns the context the thread had, which Unlock() takes and puts back.
++namespace matslot { enum { GetThreadMode = 14, Lock = 116, Unlock = 117 }; }
++
+ // ---- IFileSystem (VFileSystem017) -------------------------------------------------------------
+ namespace fsslot { enum { AsyncFinishAll = 44, AsyncSuspend = 47, AsyncResume = 48 }; }
+ 
+diff --git a/src/snapshot.cpp b/src/snapshot.cpp
+index 0299808..dd7516c 100644
+--- a/src/snapshot.cpp
++++ b/src/snapshot.cpp
+@@ -26,6 +26,7 @@ Options g_opts;
+ // ---- engine interfaces used to quiesce worker threads --------------------------------------------
+ void*    g_pool = nullptr;      // IThreadPool*  (vstdlib g_pThreadPool)
+ void*    g_fs = nullptr;        // IFileSystem*  (VFileSystem017)
++void*    g_matsys = nullptr;    // IMaterialSystem* (VMaterialSystem080), for the render lock
+ void*    g_client = nullptr;    // IBaseClientDLL* (VClient016), for IN_ClearStates
+ void*    g_sound = nullptr;     // IEngineSound* (IEngineSoundClient003)
+ uint8_t* g_cengine = nullptr;   // the CEngine instance (its frame timing must survive a restore)
+@@ -33,6 +34,8 @@ uint8_t* g_cengine = nullptr;   // the CEngine instance (its frame timing must s
+ typedef int  (__thiscall* PoolIntFn)(void*);
+ typedef void (__thiscall* FsFinishAllFn)(void*, int);
+ typedef bool (__thiscall* FsBoolFn)(void*);
++typedef void* (__thiscall* MatLockFn)(void*);
++typedef int  (__thiscall* MatUnlockFn)(void*, void*);
+ typedef void (__thiscall* VoidFn)(void*);
+ typedef void (__thiscall* StopAllSoundsFn)(void*, bool);
+ 
+@@ -98,6 +101,48 @@ void cvars_after_restore() {
+     g_kept_count = 0;
+ }
+ 
++// ---- the render lock ------------------------------------------------------------------------------
++// With queued rendering (mat_queue_mode 2) the main thread fills one of two queued render contexts while a job
++// plays the other one back to the device, and which of the two is the main thread's is kept in a thread-local
++// pointer, outside the snapshot. A restore brought the material system's memory back and left that pointer:
++// with the two contexts swapped since the save (every frame swaps them) the game queued its render calls into
++// the context the material system was about to play back, and with the mode changed since the save it drew
++// straight to the device while the material system took it for queued. Either ends in a crash in the render
++// calls a moment later, which is why queued rendering used to be switched off around every operation.
++//
++// The material system has a lock for exactly this (what the engine takes to touch materials from the main
++// thread in the middle of a frame): Lock() waits for the render job, takes the mutex and gives the thread the
++// device's context; Unlock() gives it back the context that Lock() returned. So a save is taken inside the
++// lock and keeps the context it got, and a restore, inside the lock as well, unlocks with the context of the
++// save: the state it has just brought back is the locked one of that moment, and Unlock() leaves the thread
++// with the context that goes with it.
++void* render_lock() {
++    return RenderLockUsable() ? vfunc<MatLockFn>(g_matsys, matslot::Lock)(g_matsys) : nullptr;
++}
++
++void render_unlock(void* context) {
++    if (context) vfunc<MatUnlockFn>(g_matsys, matslot::Unlock)(g_matsys, context);
++}
++
++bool module_code(const util::Module& m, const uint8_t* p) { return (uintptr_t)p >= m.base && (uintptr_t)p < m.end; }
++
++// Finds the material system and checks the vtable layout: GetThreadMode is a plain read of the mode field,
++// and the lock functions lie in the module's code.
++void find_material_system() {
++    g_matsys = gameapi::Interface("materialsystem.dll", "VMaterialSystem080");
++    util::Module ms;
++    if (!g_matsys || !util::GetModule("materialsystem.dll", &ms)) { g_matsys = nullptr; return; }
++    static const uint8_t kGetThreadMode[] = { 0x8B, 0x81, 0xA8, 0x2A, 0x00, 0x00, 0xC3 };   // mov eax,[ecx+2AA8h] / ret
++    const uint8_t* mode = vfunc<const uint8_t*>(g_matsys, matslot::GetThreadMode);
++    bool ok = module_code(ms, mode) && !memcmp(mode, kGetThreadMode, sizeof(kGetThreadMode))
++           && module_code(ms, vfunc<const uint8_t*>(g_matsys, matslot::Lock))
++           && module_code(ms, vfunc<const uint8_t*>(g_matsys, matslot::Unlock));
++    if (!ok) {
++        util::Log("material system layout check failed: queued rendering is switched off for every operation");
++        g_matsys = nullptr;
++    }
++}
++
+ bool g_pool_suspended = false, g_fs_suspended = false;
+ 
+ // Drain and park the job pool and the async filesystem so no job runs while memory is copied.
+@@ -212,6 +257,7 @@ struct Snap {
+     int       restores;
+     uint64_t  checksum;
+     uint64_t  order;                     // save order, for Names()
++    void*     render_context;            // what the material system's Lock() returned at the save (null: taken without it)
+ };
+ Snap     g_snaps[MAX_SNAPSHOTS];
+ int      g_synced = -1;      // the snapshot the arena's write watch and frozen blocks follow (last saved/restored)
+@@ -721,6 +767,7 @@ int suspend_others() {
+ } // namespace
+ 
+ Options& Opts() { return g_opts; }
++bool RenderLockUsable() { return g_matsys && g_opts.render_lock; }
+ 
+ bool Init(CreateInterfaceFn engine_factory, char* err, size_t errlen) {
+     HMODULE vs = GetModuleHandleA("vstdlib.dll");
+@@ -759,7 +806,8 @@ bool Init(CreateInterfaceFn engine_factory, char* err, size_t errlen) {
+     g_preserve_count = 0;
+     if (g_cengine) add_preserve(g_cengine + 0x10, 0x1C, "CEngine frame timing");
+ 
+-    util::Log("snapshot init: pool=%p fs=%p client=%p sound=%p", g_pool, g_fs, g_client, g_sound);
++    find_material_system();
++    util::Log("snapshot init: pool=%p fs=%p client=%p sound=%p matsys=%p", g_pool, g_fs, g_client, g_sound, g_matsys);
+     if (!g_fs) { snprintf(err, errlen, "VFileSystem017 not found"); return false; }
+     return true;
+ }
+@@ -861,6 +909,7 @@ bool Save(const char* name, char* err, size_t errlen) {
+     double t0 = util::Now();
+ 
+     // 1) prepare, with the other threads running
++    void* render_context = render_lock();
+     quiesce_begin();
+     refresh_modules();
+     bool capture_va = g_opts.capture_va && vatrack::Installed();
+@@ -870,6 +919,7 @@ bool Save(const char* name, char* err, size_t errlen) {
+     char why[160];
+     if (const char* fail = prepare_store(s, capture_va, &arena_room, why, sizeof(why))) {
+         quiesce_end();
++        render_unlock(render_context);
+         buffers_free(s);
+         snprintf(err, errlen, "%s", fail);
+         return false;
+@@ -901,6 +951,8 @@ bool Save(const char* name, char* err, size_t errlen) {
+     ph.mark("resume");
+     util::MuteConsole(false);
+     quiesce_end();
++    render_unlock(render_context);
++    s.render_context = render_context;
+     arena::FlushPendingOld();
+     double t2 = util::Now();
+     if (fail) {
+@@ -954,10 +1006,18 @@ bool Restore(const char* name, char* err, size_t errlen) {
+     }
+     bool other_level = s.level_gen != g_level_gen;   // the snapshot outlived a level change
+     if (other_level) util::Log("[snap] restoring '%s' (map '%s') from '%s'", s.name, s.map, g_map);
++    // (a snapshot taken with the render lock switched off holds the game between two frames of a render thread
++    // that was stopped for it: it can't be restored into a game whose render thread is running)
++    if (!s.render_context && RenderLockUsable()) {
++        snprintf(err, errlen, "taken with render_lock 0: switch it off again to restore this one (snap_opt render_lock 0)");
++        return false;
++    }
+     double t0 = util::Now();
+     if (!dirty_ensure((s.image_end - arena::Base()) / 4096 + 16)) { snprintf(err, errlen, "out of memory (dirty page list)"); return false; }
+ 
+     // 1) let go of the outside objects of the timeline being discarded, with the other threads running
++    // (inside the render lock from here: the guards talk to the device, which a render job would be using)
++    void* render_context = render_lock();
+     stop_all_sounds();
+     cvars_before_restore();
+     guards_before_restore(slot);
+@@ -1013,6 +1073,9 @@ bool Restore(const char* name, char* err, size_t errlen) {
+     ph.mark("resume");
+     util::MuteConsole(false);
+     quiesce_end();
++    // (the state now in memory is the one locked at the save: unlocked with that lock's context, also when the
++    // lock has been switched off since. A restore that failed left the current state.)
++    render_unlock(fail[0] ? render_context : s.render_context);
+     double t2 = util::Now();
+     if (fail[0]) { g_kept_count = 0; snprintf(err, errlen, "%s", fail); return false; }
+     cvars_after_restore();
+diff --git a/src/snapshot.h b/src/snapshot.h
+index fab8ee5..7d9bff0 100644
+--- a/src/snapshot.h
++++ b/src/snapshot.h
+@@ -47,6 +47,7 @@ struct Options {
+     bool capture_va      = true;          // capture the engine's direct VirtualAlloc regions (the hunk)
+     int  copy_threads    = -1;            // extra threads copying the arena image at save time (-1: auto)
+     bool device_state    = true;           // save what is set on the Direct3D device with a snapshot, set it back at a restore
++    bool render_lock     = true;          // hold the material system's lock over a save/restore (else queued rendering is switched off for it)
+     bool cross_map       = false;         // keep the snapshots when another map is loaded (else only reloads of the same map)
+ };
+ 
+@@ -54,6 +55,9 @@ struct Options {
+ bool Init(CreateInterfaceFn engine_factory, char* err, size_t errlen);
+ void SetDomain(const char* module_list);    // modules whose writable sections are captured
+ Options& Opts();
++// True when a save or restore holds the material system's lock, so that queued rendering (mat_queue_mode) can
++// stay on through it.
++bool RenderLockUsable();
+ 
+ // Names: letters, digits, '_', '-' and '.', up to MAX_NAME - 1 characters; case-insensitive.
+ bool ValidName(const char* name);
+-- 
+2.43.0.windows.1
+

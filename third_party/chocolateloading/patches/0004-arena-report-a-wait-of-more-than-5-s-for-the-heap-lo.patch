@@ -1,7 +1,7 @@
 From 51a5c3364375a186b5866065c94de729f84b140b Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Sun, 8 Nov 2026 19:49:00 -0600
-Subject: [PATCH 4/6] arena: report a wait of more than 5 s for the heap lock
+Subject: [PATCH 04/10] arena: report a wait of more than 5 s for the heap lock
  (holder thread, whether it is alive, where it took the lock)
 
 ---

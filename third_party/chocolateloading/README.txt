@@ -57,5 +57,18 @@ for the author.
    turns that off; the export ChocoRestoresDeviceState tells a plugin whether it is on (P2 Practice then no
    longer makes the engine send its render state again after a restore).
 
+9. Queued rendering stays on. A save or a restore used to switch the game's queued rendering (mat_queue_mode)
+   off and on again around itself: the render thread stopped and started every time, which cost a stutter, and
+   restoring into a game whose render thread was still running broke the renderer (wrong lightmaps, crashes on
+   that thread). An operation now runs inside the material system's own lock (IMaterialSystem::Lock, which waits
+   for the render thread to finish its queue and holds it there), so the render thread is idle for exactly the
+   length of the operation and nothing is switched. "snap_opt render_lock 0" gives the old behaviour back.
+
+10. Status for plugins. The export ChocoGetSnapshotStatus tells a plugin how many saves and restores have been
+   done and how many requests failed (refused, gone wrong, or dropped by a level change), and whether queued
+   rendering stays on (9). P2 Practice compares the counts with what they were when it sent snap_save or
+   snap_load, so it knows the moment its operation is done or has failed instead of waiting a number of frames,
+   and it offers save states only with a ChocolateLoading that has this export.
+
 Files: chocoload.exe (starts Portal 2 with the DLL loaded before the engine) and chocolateloading.dll. The
 launcher copies both into the Portal 2 folder when save states are on.
