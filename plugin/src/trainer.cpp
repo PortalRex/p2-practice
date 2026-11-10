@@ -963,7 +963,10 @@ void OnFrame(bool simulating) {
 		g.flagsUp = ChallengeMode() && engine::EntityExists(kEndNode);
 		g.flagsGone = false;
 		g.dimmed = false;
-		Quiet(false);
+		// (the save state is from the lead-in's first moments, with the sound still fading in after a catch-up: the
+		// game would fade it in again at every restore. Only the attempt that played the catch-up gets the fade.)
+		g.quiet = false;
+		engine::Execute("soundfade 0 0 0 0");
 		if (g.closeScreensAfterRestore) CloseGameScreens();
 		g.closeScreensAfterRestore = false;
 	}
