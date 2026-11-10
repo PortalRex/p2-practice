@@ -1,27 +1,34 @@
-// The route drawn in the level.
+// The route drawn in the level: a ribbon along the run's path ahead of each player, and a mark where each portal
+// of the run goes. Drawn by the plugin itself each frame (gfx's drawing in the level), so the whole of it costs a
+// few batches of triangles however long the route is.
 #include "trainer_internal.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
+#include "ui/gfx.h"
+
 namespace trainer {
 
-constexpr int kPathLineBudget = 120;   // debug lines on screen at once, portal marks aside
-constexpr int kPathBand = 3;           // lines drawn per stretch (a debug line is one pixel wide)
 constexpr float kPathTolerance = 3;    // how far, in units, the thinned line may leave the run's path
 constexpr int kPathBehindTicks = 30;   // how much of the route behind a player stays drawn
-constexpr int kPathStride = 6;         // stretches a player passes before the drawn window moves on
+constexpr float kPathAhead = 20;       // seconds of the route drawn ahead of a player...
+constexpr float kPathClear = 8;        // ...of which this much at full strength; from there it fades out
+constexpr int kPathAlpha = 220;
+constexpr float kPathHalfWidth = 1.5f;
+constexpr float kPathLift = 4;         // above the floor the player stood on
+constexpr float kMarkSize = 14, kMarkHalfWidth = 0.75f, kShotHalfWidth = 0.4f;
+constexpr float kEyeHeight = 56;
 
 struct PathStretch {
 	int from = 0, to = 0;  // run ticks
 };
 struct ActorPath {
 	std::vector<PathStretch> stretches;  // in tick order; empty for a robot whose route isn't drawn
-	int shownFrom = 0;                   // the first stretch drawn
 };
-std::vector<ActorPath> g_paths;  // one per robot of the run, for the attempt in progress
-int g_pathShare = 0;             // stretches drawn per robot at once; 0: the whole route is drawn
+std::vector<ActorPath> g_paths;          // one per robot of the run, for the attempt in progress
+std::vector<gfx::WorldVertex> g_shapes;  // what a frame draws (kept between frames for its memory)
 
 float DistanceToStretch(Vec3 p, Vec3 a, Vec3 b) {
 	Vec3 ab = Sub(b, a), ap = Sub(p, a);
@@ -90,87 +97,103 @@ int FirstStretchAhead(size_t actor) {
 	return first;
 }
 
-void DrawStretch(int actor, const PathStretch &s, Rgb c, float seconds) {
-	const Vec3 p = g.route.At(actor, s.from).pos, q = g.route.At(actor, s.to).pos;
-	// Three lines, a unit apart sideways and upwards, read as a band
-	float dx = q.x - p.x, dy = q.y - p.y;
-	float length = std::sqrt(dx * dx + dy * dy);
-	float sx = length > 0.01f ? -dy / length : 1, sy = length > 0.01f ? dx / length : 0;
-	static const float offsets[kPathBand][2] = {{0, 0}, {1, 0}, {-1, 1}};  // sideways, up
-	for (const auto &offset : offsets)
-		engine::Script("::PP.Line(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%.0f)", p.x + sx * offset[0], p.y + sy * offset[0], p.z + 4 + offset[1],
-		               q.x + sx * offset[0], q.y + sy * offset[0], q.z + 4 + offset[1], c.r, c.g, c.b, seconds);
+gfx::WorldVertex Corner(Vec3 at, float sx, float sy, float sz, float scale, gfx::Color color) {
+	gfx::WorldVertex v;
+	v.x = at.x + sx * scale;
+	v.y = at.y + sy * scale;
+	v.z = at.z + sz * scale;
+	v.color = color;
+	return v;
+}
+
+// A straight beam from p to q: two flat strips crossing each other along it, so it has width from every side
+void AddBeam(Vec3 p, Vec3 q, float halfWidth, gfx::Color atP, gfx::Color atQ) {
+	Vec3 along = Sub(q, p);
+	float length = std::sqrt(along.x * along.x + along.y * along.y + along.z * along.z);
+	if (length < 0.01f || (!atP.a && !atQ.a)) return;
+	along = {along.x / length, along.y / length, along.z / length};
+	// sideways: level and square to the beam (any level direction for a beam going straight up or down)
+	float sx = -along.y, sy = along.x;
+	float level = std::sqrt(sx * sx + sy * sy);
+	if (level < 0.01f) {
+		sx = 1;
+		sy = 0;
+	} else {
+		sx /= level;
+		sy /= level;
+	}
+	// the other way across: square to both
+	float ux = sy * along.z, uy = -sx * along.z, uz = sx * along.y - sy * along.x;
+	for (int strip = 0; strip < 2; strip++) {
+		float ax = strip ? ux : sx, ay = strip ? uy : sy, az = strip ? uz : 0;
+		g_shapes.push_back(Corner(p, ax, ay, az, -halfWidth, atP));
+		g_shapes.push_back(Corner(p, ax, ay, az, halfWidth, atP));
+		g_shapes.push_back(Corner(q, ax, ay, az, halfWidth, atQ));
+		g_shapes.push_back(Corner(q, ax, ay, az, -halfWidth, atQ));
+	}
+}
+
+// How strongly the route shows at a run tick, for a player who has got to `progress`
+int PathAlpha(int tick, int progress) {
+	float ahead = (tick - progress) * g.route.tickInterval;
+	if (ahead <= kPathClear) return kPathAlpha;
+	if (ahead >= kPathAhead) return 0;
+	return static_cast<int>(kPathAlpha * (kPathAhead - ahead) / (kPathAhead - kPathClear));
 }
 
 // A small cross where a portal of the run goes, and the line of the shot from the shooter's eye
-void DrawPortalShot(int actor, const route::PortalChange &portal, float seconds) {
-	const Sample &shooter = g.route.At(actor, portal.tick);
+void AddPortalShot(int actor, const route::PortalChange &portal, int alpha) {
+	const gfx::Color white(255, 255, 255, alpha);
 	for (int axis = 0; axis < 3; axis++) {
 		Vec3 lo = portal.pos, hi = portal.pos;
-		(&lo.x)[axis] -= 14;
-		(&hi.x)[axis] += 14;
-		engine::Script("::PP.Line(%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,255,255,255,%.0f)", lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, seconds);
+		(&lo.x)[axis] -= kMarkSize;
+		(&hi.x)[axis] += kMarkSize;
+		AddBeam(lo, hi, kMarkHalfWidth, white, white);
 	}
-	engine::Script("::PP.Line(%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,255,255,255,%.0f)", shooter.pos.x, shooter.pos.y, shooter.pos.z + 56, portal.pos.x,
-	               portal.pos.y, portal.pos.z, seconds);
+	Vec3 eye = g.route.At(actor, portal.tick).pos;
+	eye.z += kEyeHeight;
+	AddBeam(eye, portal.pos, kShotHalfWidth, white.Alpha(alpha / 2), white.Alpha(alpha / 2));
 }
 
-// Draws what is due of the routes now: all of them, or each one's stretch ahead of its player
-void RedrawPaths() {
-	engine::Execute("clear_debug_overlays");
-	const float kForever = 100000;
-	for (size_t a = 0; a < g_paths.size(); a++) {
-		ActorPath &path = g_paths[a];
-		if (path.stretches.empty()) continue;
-		int count = static_cast<int>(path.stretches.size());
-		int first = g_pathShare ? FirstStretchAhead(a) : 0;
-		int last = g_pathShare ? std::min(count, first + g_pathShare) - 1 : count - 1;
-		path.shownFrom = first;
-		Rgb c = TeamColor(g.route.actors[a].team);
-		for (int i = first; i <= last; i++) DrawStretch(static_cast<int>(a), path.stretches[i], c, kForever);
-		// (the portals shot along the drawn stretch; of a route drawn whole, all from the handover on)
-		int fromTick = g_pathShare ? path.stretches[first].from : g.handover;
-		int toTick = g_pathShare ? path.stretches[last].to : g.route.timerEnd;
-		for (const auto &portal : g.route.portals) {
-			if (!portal.active || portal.actor != static_cast<int>(a) || portal.tick < fromTick || portal.tick > toTick) continue;
-			DrawPortalShot(static_cast<int>(a), portal, kForever);
-		}
-	}
-}
-
-// Sets up the attempt's drawn routes (at the start of its lead-in)
-void DrawRoute() {
+void ClearRoute() {
 	g_paths.clear();
-	g_pathShare = 0;
-	engine::Execute("clear_debug_overlays");
+	g_shapes.clear();
+}
+
+// Sets up the attempt's drawn routes (at the start of its lead-in, and when the setting changes in an attempt)
+void SetUpRoute() {
+	ClearRoute();
 	if (!g_set.path) return;
 	g_paths.resize(g.route.actors.size());
-	int drawn = 0, stretches = 0;
-	for (size_t a = 0; a < g_paths.size() && a < g.slots.size(); a++) {
-		if (!g.slots[a].human && !g.replaying) continue;
-		g_paths[a].stretches = BuildPath(static_cast<int>(a));
-		if (g_paths[a].stretches.empty()) continue;
-		drawn++;
-		stretches += static_cast<int>(g_paths[a].stretches.size());
-	}
-	if (!drawn) return;
-	if (stretches * kPathBand > kPathLineBudget) g_pathShare = std::max(kPathStride + 1, kPathLineBudget / kPathBand / drawn);
-	RedrawPaths();
+	for (size_t a = 0; a < g_paths.size() && a < g.slots.size(); a++)
+		if (g.slots[a].human || g.replaying) g_paths[a].stretches = BuildPath(static_cast<int>(a));
 }
 
-// Moves the drawn stretch of a long route on with its players (every tick of an attempt)
-void FollowRoute() {
-	if (!g_pathShare) return;
-	for (size_t a = 0; a < g_paths.size(); a++) {
-		const ActorPath &path = g_paths[a];
-		if (path.stretches.empty()) continue;
-		int first = FirstStretchAhead(a);
-		// (on, or back: a player who went wrong is found again further back on the route)
-		if (first >= path.shownFrom + kPathStride || first < path.shownFrom) {
-			RedrawPaths();
-			return;
+// Draws the routes in the level: once per view of it in each frame (see gfx::SetWorldCallback)
+void DrawRouteInLevel() {
+	if (g_paths.empty() || (g.mode != Mode::LeadIn && g.mode != Mode::Run && g.mode != Mode::Watch)) return;
+	g_shapes.clear();
+	for (size_t a = 0; a < g_paths.size() && a < g.route.actors.size(); a++) {
+		const std::vector<PathStretch> &stretches = g_paths[a].stretches;
+		if (stretches.empty()) continue;
+		const int actor = static_cast<int>(a);
+		const int progress = PathProgress(a);
+		const int lastTick = progress + static_cast<int>(kPathAhead / g.route.tickInterval);
+		const Rgb team = TeamColor(g.route.actors[a].team);
+		const gfx::Color color(team.r, team.g, team.b);
+		const size_t first = static_cast<size_t>(FirstStretchAhead(a));
+		for (size_t i = first; i < stretches.size() && stretches[i].from < lastTick; i++) {
+			Vec3 p = g.route.At(actor, stretches[i].from).pos, q = g.route.At(actor, stretches[i].to).pos;
+			p.z += kPathLift;
+			q.z += kPathLift;
+			AddBeam(p, q, kPathHalfWidth, color.Alpha(PathAlpha(stretches[i].from, progress)), color.Alpha(PathAlpha(stretches[i].to, progress)));
+		}
+		for (const auto &portal : g.route.portals) {
+			if (!portal.active || portal.actor != actor || portal.tick < stretches[first].from || portal.tick >= lastTick) continue;
+			AddPortalShot(actor, portal, PathAlpha(portal.tick, progress));
 		}
 	}
+	if (!g_shapes.empty()) gfx::WorldQuads(g_shapes.data(), static_cast<int>(g_shapes.size() / 4));
 }
 
 }  // namespace trainer

@@ -83,7 +83,8 @@ class Console:
         return mode
 
     def cvars(self, names):
-        text = self.send(*names, wait=0.6)
+        # until the game has answered for the last of them (it can be busy for a moment right after a retry)
+        text = self.send(*names, wait=3.0, until=rf'"{names[-1]}" = "')
         return {name: (re.search(rf'"{name}" = "([^"]*)"', text) or [None, None])[1] for name in names}
 
 

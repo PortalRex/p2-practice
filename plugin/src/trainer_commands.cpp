@@ -299,8 +299,8 @@ void CmdSet(const sdk::CCommand &args) {
 	else if (name == "strafe") g_set.strafe = on;
 	else if (name == "path") {
 		g_set.path = on;
-		// (in an attempt the lines come or go at once)
-		if (g.mode == Mode::LeadIn || g.mode == Mode::Run || g.mode == Mode::Watch) DrawRoute();
+		// (in an attempt the line comes or goes at once)
+		if (g.mode == Mode::LeadIn || g.mode == Mode::Run || g.mode == Mode::Watch) SetUpRoute();
 	}
 	else if (name == "partner") g_set.partner = on;
 	else if (name == "loop") g_set.loop = on;

@@ -1556,6 +1556,7 @@ bool Init() {
 	engine::RegisterCommand("prac_menu_tour", CmdTour, "prac_menu_tour [record <video> | stop] - a scripted walk through the menu, for showing it");
 	engine::RegisterCommand("prac_folders", CmdFolders, "prac_folders - the folders the menu's RUNS page reads");
 	gfx::SetDrawCallback(Draw);
+	gfx::SetWorldCallback(trainer::DrawRouteInLevel);
 	trainer::UseDrawnHud(true);
 	std::error_code ec;
 	if (std::filesystem::exists(std::filesystem::u8path(SettingsPath()), ec)) engine::Execute("exec p2practice/settings");

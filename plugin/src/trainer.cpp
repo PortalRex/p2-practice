@@ -295,13 +295,13 @@ void UnshieldPlayers() {
 }
 
 void ClearScene() {
+	ClearRoute();
 	if (!g.helperLoaded) return;
 	UnshieldPlayers();
 	ClearGhosts();
 	Undim();
 	engine::Script("::PP.ClearTexts()");
 	engine::FlushScript();
-	engine::Execute("clear_debug_overlays");
 }
 
 // Gives the game's own settings back as they were: saving, the game's speed, its worker threads
@@ -380,7 +380,7 @@ void BeginLeadIn() {
 		slot.part = g.route.SegmentAt(g.handover);
 		slot.finished = false;
 	}
-	DrawRoute();
+	SetUpRoute();
 }
 
 // Gets the map into the state the run had at the lead-in's start, then begins the lead-in.
@@ -999,7 +999,6 @@ void OnFrame(bool simulating) {
 	case Mode::Done: TickDone(); break;
 	default: break;
 	}
-	if (g.mode == Mode::LeadIn || g.mode == Mode::Run || g.mode == Mode::Watch) FollowRoute();
 	SetBotMovement();
 	// (every frame, in every mode: watching too)
 	if (g.botPartner) KeepWholeScreen(g.screenHeld);

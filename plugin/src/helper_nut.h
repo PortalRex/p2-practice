@@ -542,14 +542,6 @@ R"nut(
 	if (portal != null) EntFireByHandle(portal, "SetActivatedState", "0", 0, null, null)
 }
 
-::PP.Line <- function(x1, y1, z1, x2, y2, z2, r, g, b, seconds) {
-	DebugDrawLine(Vector(x1, y1, z1), Vector(x2, y2, z2), r, g, b, false, seconds)
-}
-
-::PP.Box <- function(x, y, z, size, r, g, b, seconds) {
-	DebugDrawBox(Vector(x, y, z), Vector(-size, -size, -size), Vector(size, size, size), r, g, b, 60, seconds)
-}
-
 ::PP.ready <- true
 )nut";
 

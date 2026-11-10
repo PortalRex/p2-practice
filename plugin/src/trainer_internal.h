@@ -262,8 +262,8 @@ Vec3 VelocityAt(const Route &route, int actor, int tick);
 void MoveGhosts();
 
 // trainer_path.cpp
-void DrawRoute();
-void FollowRoute();
+void SetUpRoute();
+void ClearRoute();
 
 // trainer_hud.cpp
 void Say(int entIndex, int channel, float hold, const std::string &text);

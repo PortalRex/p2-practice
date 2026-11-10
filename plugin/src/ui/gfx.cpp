@@ -52,6 +52,26 @@ constexpr int InKeyEvent = 20;          // (int down, ButtonCode_t, const char *
 constexpr int UpdateButtonState = 87;   // (const InputEvent_t *)
 constexpr int ResetInputContext = 88;   // (HInputContext)
 constexpr int InputContextField = 0xce8;  // the input's current context handle (m_hContext)
+// IVRenderView (VEngineRenderView013)
+constexpr int Draw3DDebugOverlays = 3;  // (): once per view, after the level is drawn, with its 3D state still set
+// IMaterialSystem (VMaterialSystem080)
+constexpr int FindMaterial = 82;        // (name, textureGroup, bool complain, const char *prefix) -> IMaterial *
+constexpr int GetRenderContext = 113;   // () -> IMatRenderContext *, with a reference taken
+// IMaterial
+constexpr int GetName = 0;
+constexpr int IncrementReferenceCount = 12;
+constexpr int DecrementReferenceCount = 13;
+// IMatRenderContext
+constexpr int Release = 1;
+constexpr int BeginRender = 2;
+constexpr int EndRender = 3;
+constexpr int Bind = 9;                 // (IMaterial *, void *proxyData)
+constexpr int GetDynamicMesh = 57;      // (bool buffered, IMesh *vertexOverride, IMesh *indexOverride, IMaterial *autoBind) -> IMesh *
+// IMesh
+constexpr int SetPrimitiveType = 10;    // (MaterialPrimitiveType_t)
+constexpr int MeshDraw = 12;            // (int firstIndex = -1, int indexCount = 0)
+constexpr int LockMesh = 17;            // (int vertices, int indices, MeshDesc &, settings = null)
+constexpr int UnlockMesh = 20;          // (int vertices, int indices, MeshDesc &)
 }  // namespace slot
 
 constexpr int kPaintUiPanels = 1;  // PaintMode_t: the 2D panels pass (HUD, menus)
@@ -135,7 +155,79 @@ public:
 	void *const next;
 };
 
-Patch g_paint, g_lockCursor, g_keyEvent, g_buttonState, g_inputEvent;
+Patch g_paint, g_lockCursor, g_keyEvent, g_buttonState, g_inputEvent, g_view;
+
+// ---- drawing in the level ----
+// What the game hands out for writing a mesh (MeshDesc_t): for each kind of vertex data its size in bytes per
+// vertex (0 where the material has none: the pointer then leads to scrap memory) and where to write it.
+struct MeshDesc {
+	int positionSize, boneWeightSize, boneMatrixIndexSize, normalSize, colorSize, specularSize, texCoordSize[8];
+	int tangentSSize, tangentTSize, wrinkleSize, userDataSize;
+	int vertexSize, compression, boneWeights;
+	float *position, *boneWeight;
+	unsigned char *boneMatrixIndex;
+	float *normal;
+	unsigned char *color, *specular;  // (blue, green, red, alpha)
+	float *texCoord[8];
+	float *tangentS, *tangentT, *wrinkle, *userData;
+	int firstVertex, vertexMemOffset;
+	unsigned short *indices;
+	int indexMemOffset, firstIndex, indexSize;  // (indexSize 0: no index memory was given, all writes go to one scrap index)
+	int spare[16];
+};
+
+constexpr int kTriangles = 2;         // MaterialPrimitiveType_t
+constexpr int kQuadsPerMesh = 1024;   // 4096 vertices and 12288 indices: well inside the game's dynamic buffers
+// (a material the game itself loads for its debug shapes: unlit, the vertices' own colour and transparency)
+constexpr const char *kWorldMaterial = "debug/debugtranslucentvertexcolor";
+
+void *g_renderView, *g_materials;
+void *g_worldMaterial = nullptr;
+void *g_worldContext = nullptr;  // the render context of the view being drawn, once something was drawn in it
+bool g_inWorld = false, g_worldBroken = false;
+void (*g_drawWorld)() = nullptr;
+
+void WorldOff(const char *why) {
+	if (!g_worldBroken) engine::Warn("Drawing in the level is off (the route line): %s.\n", why);
+	g_worldBroken = true;
+}
+
+// The render context with the material set, from the first shape of a view on
+void *WorldContext() {
+	if (g_worldContext || g_worldBroken) return g_worldContext;
+	if (!g_worldMaterial) {
+		void *material = Call<void *, const char *, const char *, bool, const char *>(g_materials, slot::FindMaterial, kWorldMaterial,
+		                                                                              "Other textures", false, nullptr);
+		// (a material that isn't there comes back as the game's error material)
+		const char *name = material ? Call<const char *>(material, slot::GetName) : nullptr;
+		if (!name || !strstr(name, "debugtranslucentvertexcolor")) {
+			WorldOff("the game's material for it wasn't found");
+			return nullptr;
+		}
+		Call<void>(material, slot::IncrementReferenceCount);
+		g_worldMaterial = material;
+	}
+	void *context = Call<void *>(g_materials, slot::GetRenderContext);
+	if (!context) return nullptr;
+	Call<void>(context, slot::BeginRender);
+	Call<void, void *, void *>(context, slot::Bind, g_worldMaterial, nullptr);
+	g_worldContext = context;
+	return context;
+}
+
+void __fastcall ViewHook(void *self, void *) {
+	Passing call(g_view);
+	reinterpret_cast<void(__thiscall *)(void *)>(call.next)(self);
+	if (!call.own || !g_ready || !g_drawWorld || g_worldBroken) return;
+	perf::Scope timed(perf::kPaint);
+	g_inWorld = true;
+	g_drawWorld();
+	g_inWorld = false;
+	if (!g_worldContext) return;
+	Call<void>(g_worldContext, slot::EndRender);
+	Call<void>(g_worldContext, slot::Release);
+	g_worldContext = nullptr;
+}
 
 // ---- input state ----
 bool g_down[kButtonCount], g_wasDown[kButtonCount];
@@ -338,6 +430,12 @@ bool Init() {
 		return false;
 	}
 	g_ready = true;
+	// Drawing in the level is its own part: without it the menu and HUD still work
+	g_renderView = GetInterface("engine.dll", "VEngineRenderView013");
+	g_materials = GetInterface("materialsystem.dll", "VMaterialSystem080");
+	g_worldBroken = false;
+	if (!g_renderView || !g_materials) WorldOff("the game's 3D drawing interfaces weren't found");
+	else if (!Install(g_view, g_renderView, slot::Draw3DDebugOverlays, reinterpret_cast<void *>(&ViewHook))) WorldOff("couldn't hook the game's 3D drawing");
 	return true;
 }
 
@@ -345,6 +443,10 @@ void Shutdown() {
 	g_capture = false;
 	if (g_cursorShown && g_engineClient) ShowCursor(false);
 	g_ready = false;
+	Remove(g_view);
+	if (g_worldMaterial) Call<void>(g_worldMaterial, slot::DecrementReferenceCount);
+	g_worldMaterial = nullptr;
+	g_drawWorld = nullptr;
 	Remove(g_inputEvent);
 	Remove(g_buttonState);
 	Remove(g_keyEvent);
@@ -355,6 +457,50 @@ void Shutdown() {
 
 bool Ready() { return g_ready; }
 void SetDrawCallback(void (*draw)()) { g_draw = draw; }
+
+void SetWorldCallback(void (*draw)()) { g_drawWorld = draw; }
+bool WorldReady() { return g_ready && !g_worldBroken; }
+
+void WorldQuads(const WorldVertex *corners, int quads) {
+	// (each shape as two triangles, and the same two the other way round for its back)
+	static constexpr int kCorner[12] = {0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0};
+	while (quads > 0 && g_inWorld) {
+		void *context = WorldContext();
+		if (!context) return;
+		void *mesh = Call<void *, bool, void *, void *, void *>(context, slot::GetDynamicMesh, true, nullptr, nullptr, nullptr);
+		if (!mesh) return;
+		const int count = quads < kQuadsPerMesh ? quads : kQuadsPerMesh;
+		const int vertices = count * 4, indices = count * 12;
+		MeshDesc desc = {};
+		Call<void, int>(mesh, slot::SetPrimitiveType, kTriangles);
+		Call<void, int, int, MeshDesc *, void *>(mesh, slot::LockMesh, vertices, indices, &desc, nullptr);
+		if (!desc.position || !desc.color || !desc.indices || desc.positionSize <= 0 || desc.colorSize <= 0) {
+			Call<void, int, int, MeshDesc *>(mesh, slot::UnlockMesh, 0, 0, &desc);
+			WorldOff("the game gave no memory for the shapes");
+			return;
+		}
+		auto *position = reinterpret_cast<unsigned char *>(desc.position);
+		auto *texCoord = reinterpret_cast<unsigned char *>(desc.texCoord[0]);
+		unsigned char *color = desc.color;
+		for (int v = 0; v < vertices; v++) {
+			const WorldVertex &from = corners[v];
+			const float xyz[3] = {from.x, from.y, from.z};
+			memcpy(position, xyz, sizeof(xyz));
+			const unsigned char bgra[4] = {from.color.b, from.color.g, from.color.r, from.color.a};
+			memcpy(color, bgra, sizeof(bgra));
+			if (desc.texCoordSize[0] >= 8) memset(texCoord, 0, 8);
+			position += desc.positionSize;
+			color += desc.colorSize;
+			texCoord += desc.texCoordSize[0];
+		}
+		for (int i = 0; i < indices; i++)
+			desc.indices[i * desc.indexSize] = static_cast<unsigned short>(desc.firstVertex + (i / 12) * 4 + kCorner[i % 12]);
+		Call<void, int, int, MeshDesc *>(mesh, slot::UnlockMesh, vertices, indices, &desc);
+		Call<void, int, int>(mesh, slot::MeshDraw, -1, 0);
+		corners += vertices;
+		quads -= count;
+	}
+}
 
 int ScreenWidth() { return g_width; }
 int ScreenHeight() { return g_height; }

@@ -54,6 +54,9 @@ const Settings &CurrentSettings();
 // then go to the partner over the network only.
 void UseDrawnHud(bool on);
 
+// Draws the attempt's route in the level; gfx's world callback (once per view of the level in each frame)
+void DrawRouteInLevel();
+
 // ---- what the session is doing, for the menu and the HUD ----
 struct Part {
 	std::string name;

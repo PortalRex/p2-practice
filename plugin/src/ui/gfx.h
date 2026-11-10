@@ -6,9 +6,10 @@
 // released this frame; the mouse wheel; the cursor). While the menu has the input (`SetCapture(true)`), the
 // cursor is freed and shown, and neither the game nor its own menus see keys or clicks.
 //
-// This is where the plugin hooks the game (but for one slot in engine.cpp, see HoldClientCommands): five
+// This is where the plugin hooks the game (but for one slot in engine.cpp, see HoldClientCommands): six
 // function-table slots (the end of VGUI's paint, the cursor lock, the client's key events, VGUI's button input,
-// the surface's input events), each patched in the table the object uses at that moment and put back by Shutdown.
+// the surface's input events, the end of a view's 3D drawing), each patched in the table the object uses at that
+// moment and put back by Shutdown.
 // SAR hooks the same objects by giving them a copy of their table; patching the table in use keeps both working
 // whichever of the two was loaded first.
 #pragma once
@@ -69,6 +70,22 @@ int FontHeight(Font font);
 // Fonts are sized for a 1080-pixel-high screen and scaled to the real one; called again when the size changes.
 void RebuildFonts();
 float Scale();  // screen height / 1080
+
+// ---- drawing in the level ----
+// Once per view of the level (each split-screen half), after the game drew the level and before its 2D
+// interface, the world callback may draw in the level itself: flat coloured shapes in world coordinates, hidden
+// behind walls like anything else there. Everything given in one frame goes to the graphics card in a few
+// batches, whatever its amount.
+struct WorldVertex {
+	float x = 0, y = 0, z = 0;
+	Color color;
+};
+void SetWorldCallback(void (*draw)());
+// False when the game's 3D drawing wasn't found (said once in the console): nothing is drawn in the level
+bool WorldReady();
+// Four-cornered shapes, four vertices each, going round the shape; seen from both sides. Only inside the world
+// callback.
+void WorldQuads(const WorldVertex *corners, int quads);
 
 // ---- input (read inside the draw callback) ----
 bool KeyDown(int key);
