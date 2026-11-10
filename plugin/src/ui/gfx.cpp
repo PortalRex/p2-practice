@@ -8,6 +8,7 @@
 #include <string>
 
 #include "engine.h"
+#include "perf.h"
 
 namespace gfx {
 namespace {
@@ -213,6 +214,8 @@ void __fastcall PaintHook(void *self, void *, int mode) {
 	Passing call(g_paint);
 	reinterpret_cast<void(__thiscall *)(void *, int)>(call.next)(self, mode);
 	if (!call.own || !g_ready || !(mode & kPaintUiPanels) || !g_draw) return;
+	perf::g_counters.frames++;
+	perf::Scope timed(perf::kPaint);
 	g_startDrawing(g_surface);
 	Call<void, int *, int *>(g_surface, slot::GetScreenSize, &g_width, &g_height);
 	if (g_height != g_fontScreenHeight) RebuildFonts();

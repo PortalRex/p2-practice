@@ -80,7 +80,7 @@ foreach ($dll in @($Plugins | ForEach-Object { $_ -split ',' } | ForEach-Object 
 if ($Sar) {
 	Copy-Item (Join-Path $game 'sar.dll') (Join-Path $profile 'sar.dll')
 	$load += 'plugin_load sar'
-	$autoexec += 'sar_disable_no_focus_sleep 1'
+	$load += 'sar_disable_no_focus_sleep 1'  # (after the load: the setting doesn't exist before it)
 }
 # -File passes "a,b" as one string: split lists back into items
 $Plugins = @($Plugins | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })

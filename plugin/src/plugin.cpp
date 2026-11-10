@@ -4,6 +4,7 @@
 
 #include "bhop.h"
 #include "engine.h"
+#include "perf.h"
 #include "sdk.h"
 #include "trainer.h"
 #include "ui/menu.h"
@@ -55,6 +56,7 @@ public:
 	void ServerActivate(sdk::Edict *, int, int) override {}
 	void GameFrame(bool simulating) override {
 		if (!loaded_) return;
+		perf::Scope timed(perf::kGameFrame);
 		trainer::OnFrame(simulating);
 		if (simulating) bhop::Tick();
 	}
@@ -62,10 +64,10 @@ public:
 		if (loaded_) trainer::OnLevelShutdown();
 	}
 
-	void ClientActive(sdk::Edict *) override {}
-	void ClientFullyConnect(sdk::Edict *) override {}
+	void ClientActive(sdk::Edict *) override { trainer::NoteArrival("is active"); }
+	void ClientFullyConnect(sdk::Edict *) override { trainer::NoteArrival("is fully connected"); }
 	void ClientDisconnect(sdk::Edict *) override {}
-	void ClientPutInServer(sdk::Edict *, const char *) override {}
+	void ClientPutInServer(sdk::Edict *, const char *) override { trainer::NoteArrival("was put in the server"); }
 	void SetCommandClient(int) override {}
 	void ClientSettingsChanged(sdk::Edict *) override {}
 	sdk::PluginResult ClientConnect(bool *, sdk::Edict *, const char *, const char *, char *, int) override { return sdk::kPluginContinue; }

@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "perf.h"
 
 #include <windows.h>
 
@@ -458,6 +459,7 @@ void FlushScript() {
 		args.argv[0] = "script";
 		args.argv[1] = args.argSBuffer + args.argv0Size;
 		Trace("script", args.argv[1]);
+		perf::Scope timed(perf::kScript);
 		Dispatch(static_cast<sdk::ConCommand *>(base), args);
 	}
 	g_scriptBatch.clear();

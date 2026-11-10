@@ -15,6 +15,7 @@ void Shutdown();  // ends any session and gives the game back as it was
 void OnLevelInit(const char *mapName);
 void OnLevelShutdown();
 void OnFrame(bool simulating);  // once per server tick
+void NoteArrival(const char *what);  // development: a player came a step further into the level
 
 // A prac_ command typed by a player who doesn't have the plugin (the co-op partner): true when handled.
 bool OnClientCommand(const sdk::CCommand &args);

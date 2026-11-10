@@ -1,4 +1,5 @@
 #include "trainer.h"
+#include "perf.h"
 
 #include <algorithm>
 #include <chrono>
@@ -21,6 +22,10 @@
 #include "route.h"
 
 namespace trainer {
+
+void PrintPerf();
+extern bool g_logArrivals;
+
 namespace {
 
 using engine::Vec3;
@@ -105,12 +110,18 @@ struct Session {
 	int demoRestartIn = 0;
 	bool demoSinceSnapshot = false;  // a demo was recorded at some moment since the snapshot (SAR stops it at the flags)
 	int lastTick = 0;
-	bool queuePinned = false;     // queued rendering switched off for save states (see SingleThreadedRendering)
-	std::chrono::steady_clock::time_point queuePinnedAt;  // when it was switched off
+	bool queuePinned = false;     // the game's threads are switched off for save states (see SingleThreadedRendering)
+	bool renderThreadOff = false; // queued rendering is off just now (for a save or a restore)
+	std::chrono::steady_clock::time_point queuePinnedAt;  // when it was last switched off
+	int queueResumeIn = 0;        // frames until queued rendering goes back on (0: not due)
+	bool restorePending = false;  // a retry waits for the render thread to stop, then restores the save state
+	int pendingHandover = 0;
+	bool pendingWatch = false;
 	int savedThreadCvars[4] = {}; // mat_queue_mode, host_thread_mode, snd_mix_async, net_queued_packet_thread as they were
 	int savedThreadedParticles = 1;  // r_threaded_particles as it was
 	bool retryAsked = false;      // the game's own restart (the finish board's Replay Map) asked for a retry
 	bool closeScreensAfterRestore = false;  // that retry is a save state on its way: close the boards again when it lands
+	bool stopWhenRestored = false;  // practice was stopped with a save state on its way: the rest of the stop follows it
 	bool savesOff = false;        // the game's saving was switched off for practice (and is switched back on at the end)
 	bool levelTouched = false;    // the trainer has worked in this map load: nothing done in it may count as a run
 	bool resumeAfterLoad = false; // the level went away in the middle of an attempt: start it again when it is back
@@ -783,42 +794,180 @@ void MoveGhosts() {
 	}
 }
 
-// Draws each played robot's line through the level from the handover to the finish, and where its portals go.
-// These are debug overlays: only the player hosting the game sees them.
+// ---------------------------------------------------------------------------------------------------------------
+// The route drawn in the level
+// ---------------------------------------------------------------------------------------------------------------
+//
+// Each played robot's line through the level from the handover to the finish, and where its portals go. These are
+// debug overlays: only the player hosting the game sees them.
+//
+// The game draws every debug line with a draw call of its own, every frame: a thousand of them took a third off
+// the frame rate (Turret Warehouse: 510 fps down to 350). So the line is thinned to the straight stretches it is
+// made of, and of a route that still has more of them than kPathLineBudget only the stretch ahead of each player
+// is drawn, moving on with them.
+
+constexpr int kPathLineBudget = 120;   // debug lines on screen at once, portal marks aside
+constexpr int kPathBand = 3;           // lines drawn per stretch (a debug line is one pixel wide)
+constexpr float kPathTolerance = 3;    // how far, in units, the thinned line may leave the run's path
+constexpr int kPathBehindTicks = 30;   // how much of the route behind a player stays drawn
+constexpr int kPathStride = 6;         // stretches a player passes before the drawn window moves on
+
+struct PathStretch {
+	int from = 0, to = 0;  // run ticks
+};
+struct ActorPath {
+	std::vector<PathStretch> stretches;  // in tick order; empty for a robot whose route isn't drawn
+	int shownFrom = 0;                   // the first stretch drawn
+};
+std::vector<ActorPath> g_paths;  // one per robot of the run, for the attempt in progress
+int g_pathShare = 0;             // stretches drawn per robot at once; 0: the whole route is drawn
+
+float DistanceToStretch(Vec3 p, Vec3 a, Vec3 b) {
+	Vec3 ab = Sub(b, a), ap = Sub(p, a);
+	float lengthSquared = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+	float along = lengthSquared > 0 ? std::clamp((ab.x * ap.x + ab.y * ap.y + ab.z * ap.z) / lengthSquared, 0.0f, 1.0f) : 0;
+	return Distance(p, {a.x + ab.x * along, a.y + ab.y * along, a.z + ab.z * along});
+}
+
+// Thins the unbroken piece of robot `actor`'s path between two ticks to straight stretches that stay within
+// kPathTolerance of it (Douglas-Peucker: split at the sample furthest from the straight line, until none is far).
+void ThinPath(int actor, int first, int last, std::vector<PathStretch> &out) {
+	std::vector<PathStretch> todo{{first, last}};
+	while (!todo.empty()) {
+		PathStretch s = todo.back();
+		todo.pop_back();
+		const Vec3 a = g.route.At(actor, s.from).pos, b = g.route.At(actor, s.to).pos;
+		float furthest = 0;
+		int split = -1;
+		for (int tick = s.from + 1; tick < s.to; tick++) {
+			float off = DistanceToStretch(g.route.At(actor, tick).pos, a, b);
+			if (off > furthest) {
+				furthest = off;
+				split = tick;
+			}
+		}
+		if (furthest <= kPathTolerance) {
+			out.push_back(s);
+		} else {
+			// (the later half goes on the stack first: the stretches come out in tick order)
+			todo.push_back({split, s.to});
+			todo.push_back({s.from, split});
+		}
+	}
+}
+
+// The straight stretches of robot `actor`'s path from the handover to the finish. The path breaks where the
+// player wasn't in the level or went through a portal: nothing is drawn across a break.
+std::vector<PathStretch> BuildPath(int actor) {
+	std::vector<PathStretch> stretches;
+	const float kBreak = 64 + 3500 * g.route.tickInterval;  // further than a player gets in a tick
+	int pieceStart = -1;
+	for (int tick = g.handover; tick <= g.route.timerEnd; tick++) {
+		const Sample &s = g.route.At(actor, tick);
+		bool joined = pieceStart >= 0 && s.present && Distance(g.route.At(actor, tick - 1).pos, s.pos) <= kBreak;
+		if (!joined) {
+			if (pieceStart >= 0 && tick - 1 > pieceStart) ThinPath(actor, pieceStart, tick - 1, stretches);
+			pieceStart = s.present ? tick : -1;
+		}
+	}
+	if (pieceStart >= 0 && g.route.timerEnd > pieceStart) ThinPath(actor, pieceStart, g.route.timerEnd, stretches);
+	return stretches;
+}
+
+// The tick of the run robot `actor`'s player has got to: the drawn route starts just behind it
+int PathProgress(size_t actor) {
+	if (g.mode == Mode::Run && !g.replaying && g.slots[actor].human) return g.slots[actor].progress;
+	return std::clamp(g.cursor, g.handover, g.route.timerEnd);
+}
+
+// The first stretch still of use to robot `actor`'s player
+int FirstStretchAhead(size_t actor) {
+	const std::vector<PathStretch> &stretches = g_paths[actor].stretches;
+	int behind = PathProgress(actor) - kPathBehindTicks;
+	int first = 0;
+	while (first + 1 < static_cast<int>(stretches.size()) && stretches[first].to <= behind) first++;
+	return first;
+}
+
+void DrawStretch(int actor, const PathStretch &s, Rgb c, float seconds) {
+	const Vec3 p = g.route.At(actor, s.from).pos, q = g.route.At(actor, s.to).pos;
+	// Three lines, a unit apart sideways and upwards, read as a band
+	float dx = q.x - p.x, dy = q.y - p.y;
+	float length = std::sqrt(dx * dx + dy * dy);
+	float sx = length > 0.01f ? -dy / length : 1, sy = length > 0.01f ? dx / length : 0;
+	static const float offsets[kPathBand][2] = {{0, 0}, {1, 0}, {-1, 1}};  // sideways, up
+	for (const auto &offset : offsets)
+		engine::Script("::PP.Line(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%.0f)", p.x + sx * offset[0], p.y + sy * offset[0], p.z + 4 + offset[1],
+		               q.x + sx * offset[0], q.y + sy * offset[0], q.z + 4 + offset[1], c.r, c.g, c.b, seconds);
+}
+
+// A small cross where a portal of the run goes, and the line of the shot from the shooter's eye
+void DrawPortalShot(int actor, const route::PortalChange &portal, float seconds) {
+	const Sample &shooter = g.route.At(actor, portal.tick);
+	for (int axis = 0; axis < 3; axis++) {
+		Vec3 lo = portal.pos, hi = portal.pos;
+		(&lo.x)[axis] -= 14;
+		(&hi.x)[axis] += 14;
+		engine::Script("::PP.Line(%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,255,255,255,%.0f)", lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, seconds);
+	}
+	engine::Script("::PP.Line(%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,255,255,255,%.0f)", shooter.pos.x, shooter.pos.y, shooter.pos.z + 56, portal.pos.x,
+	               portal.pos.y, portal.pos.z, seconds);
+}
+
+// Draws what is due of the routes now: all of them, or each one's stretch ahead of its player
+void RedrawPaths() {
+	engine::Execute("clear_debug_overlays");
+	const float kForever = 100000;
+	for (size_t a = 0; a < g_paths.size(); a++) {
+		ActorPath &path = g_paths[a];
+		if (path.stretches.empty()) continue;
+		int count = static_cast<int>(path.stretches.size());
+		int first = g_pathShare ? FirstStretchAhead(a) : 0;
+		int last = g_pathShare ? std::min(count, first + g_pathShare) - 1 : count - 1;
+		path.shownFrom = first;
+		Rgb c = TeamColor(g.route.actors[a].team);
+		for (int i = first; i <= last; i++) DrawStretch(static_cast<int>(a), path.stretches[i], c, kForever);
+		// (the portals shot along the drawn stretch; of a route drawn whole, all from the handover on)
+		int fromTick = g_pathShare ? path.stretches[first].from : g.handover;
+		int toTick = g_pathShare ? path.stretches[last].to : g.route.timerEnd;
+		for (const auto &portal : g.route.portals) {
+			if (!portal.active || portal.actor != static_cast<int>(a) || portal.tick < fromTick || portal.tick > toTick) continue;
+			DrawPortalShot(static_cast<int>(a), portal, kForever);
+		}
+	}
+}
+
+// Sets up the attempt's drawn routes (at the start of its lead-in)
 void DrawRoute() {
+	g_paths.clear();
+	g_pathShare = 0;
 	engine::Execute("clear_debug_overlays");
 	if (!g_set.path) return;
-	const float kForever = 100000;
-	int from = g.handover, to = g.route.timerEnd;
-	int step = std::max(2, (to - from) / 300);
-	for (size_t a = 0; a < g.route.actors.size(); a++) {
+	g_paths.resize(g.route.actors.size());
+	int drawn = 0, stretches = 0;
+	for (size_t a = 0; a < g_paths.size() && a < g.slots.size(); a++) {
 		if (!g.slots[a].human && !g.replaying) continue;
-		Rgb c = TeamColor(g.route.actors[a].team);
-		for (int tick = from; tick + step <= to; tick += step) {
-			const Sample &p = g.route.At(static_cast<int>(a), tick), &q = g.route.At(static_cast<int>(a), tick + step);
-			if (!p.present || !q.present || Distance(p.pos, q.pos) > 64 + 3500 * step * g.route.tickInterval) continue;
-			// A debug line is one pixel wide. Three of them, a unit apart sideways and upwards, read as a band.
-			float dx = q.pos.x - p.pos.x, dy = q.pos.y - p.pos.y;
-			float length = std::sqrt(dx * dx + dy * dy);
-			float sx = length > 0.01f ? -dy / length : 1, sy = length > 0.01f ? dx / length : 0;
-			static const float offsets[3][2] = {{0, 0}, {1, 0}, {-1, 1}};  // sideways, up
-			for (const auto &offset : offsets)
-				engine::Script("::PP.Line(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%.0f)", p.pos.x + sx * offset[0], p.pos.y + sy * offset[0],
-				               p.pos.z + 4 + offset[1], q.pos.x + sx * offset[0], q.pos.y + sy * offset[0], q.pos.z + 4 + offset[1], c.r, c.g, c.b,
-				               kForever);
-		}
-		for (const auto &portal : g.route.portals) {
-			if (!portal.active || portal.actor != static_cast<int>(a) || portal.tick < from) continue;
-			const Sample &shooter = g.route.At(static_cast<int>(a), portal.tick);
-			// a small cross where the portal goes, and the line of the shot from the shooter's eye
-			for (int axis = 0; axis < 3; axis++) {
-				Vec3 lo = portal.pos, hi = portal.pos;
-				(&lo.x)[axis] -= 14;
-				(&hi.x)[axis] += 14;
-				engine::Script("::PP.Line(%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,255,255,255,%.0f)", lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, kForever);
-			}
-			engine::Script("::PP.Line(%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,255,255,255,%.0f)", shooter.pos.x, shooter.pos.y, shooter.pos.z + 56, portal.pos.x,
-			               portal.pos.y, portal.pos.z, kForever);
+		g_paths[a].stretches = BuildPath(static_cast<int>(a));
+		if (g_paths[a].stretches.empty()) continue;
+		drawn++;
+		stretches += static_cast<int>(g_paths[a].stretches.size());
+	}
+	if (!drawn) return;
+	if (stretches * kPathBand > kPathLineBudget) g_pathShare = std::max(kPathStride + 1, kPathLineBudget / kPathBand / drawn);
+	RedrawPaths();
+}
+
+// Moves the drawn stretch of a long route on with its players (every tick of an attempt)
+void FollowRoute() {
+	if (!g_pathShare) return;
+	for (size_t a = 0; a < g_paths.size(); a++) {
+		const ActorPath &path = g_paths[a];
+		if (path.stretches.empty()) continue;
+		int first = FirstStretchAhead(a);
+		// (on, or back: a player who went wrong is found again further back on the route)
+		if (first >= path.shownFrom + kPathStride || first < path.shownFrom) {
+			RedrawPaths();
+			return;
 		}
 	}
 }
@@ -932,19 +1081,20 @@ bool MapMatches() {
 // Which tick of the practiced run the live level's own clock is at. A level's lifts, doors and timers run on
 // the server's tick count from the map's load, and the demo says what that count was when its recording began:
 // where the two counts agree, everything the level does by itself happens exactly when it did in the run.
-// kNoClock in co-op (there the level waits for both players before it starts, a different wait every time)
-// and for demos that don't carry the count.
+// kNoClock for demos that don't carry the count.
 //
-// (Measured 2026-11-09: in co-op the machinery that starts with the map does run on that count - Bridge Testing's
-// conveyor of light bridges passes the same track within a third of a second of the run's - but the players
-// arrive at a different moment of it: the split-screen bot came in 2.6 s later by that count than the run's
-// partner did, so joining the clock skipped the run's first seconds, Team Retrieval's button among them. The
-// conveyor's bridges are met at another point of their round instead: a known limit.)
+// In co-op the machinery that starts with the map runs on that count too (Bridge Testing's conveyor of light
+// bridges, Gel Maze's sprayers), but the players arrive at a different moment of it every time: the level waits
+// for both. Where the live players are in before the run's were, the attempt waits for the clock and everything
+// is in step; where they are a little late, it joins the clock and the run's first moments are skipped; where
+// they are too late for that (a start by hand long after the load, a retry without a save state), the attempt
+// runs off the clock as it always did in co-op, and the timed machinery is met at another point of its round.
+// A level restart (prac_set reset reload) or a save state brings it back in step.
 constexpr int kNoClock = INT_MIN;
 constexpr const char *kEndNode = "challenge_mode_end_node";  // the Challenge Mode flags
 int LevelClock() {
 	const Route &driver = Driver();
-	if (driver.coop || driver.levelTickAtZero == p2demo::Demo::kNoServerTick) return kNoClock;
+	if (driver.levelTickAtZero == p2demo::Demo::kNoServerTick) return kNoClock;
 	int driverTick = engine::TickCount() - driver.levelTickAtZero;
 	return g.replaying ? driverTick - g.replay.timerStart + g.route.timerStart : driverTick;
 }
@@ -1023,12 +1173,36 @@ void KeepWholeScreen(bool held) {
 	if (g.botPartner && engine::CvarFloat(kCvar, 1) == 0) engine::Execute("%s 1", kCvar);
 }
 
+// Whether a save state asked for a moment ago is still to come back (ChocolateLoading brings it a few frames after
+// the request; one that hasn't come after three seconds never will)
+bool RestoreOnItsWay() {
+	return g.snapshotLoading && std::chrono::steady_clock::now() - g.snapshotAskedAt < std::chrono::seconds(3);
+}
+
+// Whether an attempt can't be started right now because a retry's save state is about to be asked for or is on
+// its way (ChocolateLoading holds one request at a time: a second one would replace it halfway). Says so.
+bool BusyRestoring() {
+	if (!g.restorePending && !RestoreOnItsWay()) return false;
+	engine::Print("A save state is on its way back: try again in a moment.\n");
+	return true;
+}
+
 void Stop(bool announce) {
 	ReleaseUseKeys();
 	SetDuckKey(false);
 	bool wasActive = g.mode != Mode::Idle;
 	g.mode = Mode::Idle;
 	g.resumeAfterLoad = false;
+	g.closeScreensAfterRestore = false;
+	if (RestoreOnItsWay()) {
+		// (the game's threads stay off and the save state stays until it has landed: switched on or freed under a
+		// restore, they crashed the game. OnFrame finishes the stop.)
+		g.restorePending = false;
+		g.stopWhenRestored = true;
+		if (announce && wasActive) engine::Print("Practice stopped.\n");
+		return;
+	}
+	g.stopWhenRestored = false;
 	ReleaseGameSettings();
 	// (the save state holds the level with the ghosts and texts that go now: a retry sets the attempt up afresh)
 	DropSnapshot();
@@ -1059,9 +1233,11 @@ bool SnapshotsUsable() {
 
 // ChocolateLoading switches the game's queued rendering off for every save and restore and back on after it. Each
 // switch stops or starts the render thread, which costs a stutter, and the game crashed on that thread a few
-// seconds after a restore ("pure virtual function call" in the queued render calls, mp_coop_laser_2). With save
-// states in use, rendering stays on the main thread for the whole session instead (the setting isn't saved; it is
-// put back when practice stops).
+// seconds after a restore ("pure virtual function call" in the queued render calls, mp_coop_laser_2). So the
+// plugin makes the switch itself, with time for it to take effect on either side: off well before a save or a
+// restore, on again a moment after it (kQueueResumeFrames). In between the game renders on its own thread as
+// usual: on the main thread all the time, it ran a third slower (Turret Warehouse: 530 fps down to 360). The
+// price is a retry that comes g_settleMs later.
 //
 // The switch is a queued command and the material system changes over at the end of a frame, so a snapshot taken
 // in the same frame (as the first one of a session was) held the game with its render thread still running, and
@@ -1078,28 +1254,59 @@ bool SnapshotsUsable() {
 // kept off, a retry's restore comes at the next frame.
 const char *const kThreadCvars[] = {"mat_queue_mode", "host_thread_mode", "snd_mix_async", "net_queued_packet_thread"};
 
+constexpr int kQueueResumeFrames = 40;  // frames after a save or a restore before queued rendering goes back on
+int g_settleMs = 100;                  // how long the render thread gets to stop (prac_debug settle)
+
+// Switches the game's threads off for a save or a restore: the render thread until a moment after it, the others
+// (which cost no frame rate) until practice stops
 void SingleThreadedRendering() {
-	if (g.queuePinned) return;
-	g.queuePinned = true;
-	g.queuePinnedAt = std::chrono::steady_clock::now();
-	for (size_t i = 0; i < std::size(kThreadCvars); i++) {
-		g.savedThreadCvars[i] = static_cast<int>(engine::CvarFloat(kThreadCvars[i], 0));
-		if (g.savedThreadCvars[i] != 0) engine::Execute("%s 0", kThreadCvars[i]);
+	g.queueResumeIn = 0;
+	if (!g.queuePinned) {
+		g.queuePinned = true;
+		for (size_t i = 0; i < std::size(kThreadCvars); i++) {
+			g.savedThreadCvars[i] = static_cast<int>(engine::CvarFloat(kThreadCvars[i], 0));
+			if (i > 0 && g.savedThreadCvars[i] != 0) engine::Execute("%s 0", kThreadCvars[i]);
+		}
+		g.savedThreadedParticles = static_cast<int>(engine::CvarFloat("r_threaded_particles", 1));
+		engine::Execute("r_threaded_particles 0");
 	}
-	g.savedThreadedParticles = static_cast<int>(engine::CvarFloat("r_threaded_particles", 1));
-	engine::Execute("r_threaded_particles 0");
+	if (g.renderThreadOff) return;
+	g.renderThreadOff = true;
+	g.queuePinnedAt = std::chrono::steady_clock::now();
+	if (g.savedThreadCvars[0] != 0) engine::Execute("mat_queue_mode 0");
 }
 
 bool ThreadsSettled() {
-	if (!g.queuePinned || std::chrono::steady_clock::now() - g.queuePinnedAt < std::chrono::milliseconds(250)) return false;
+	if (!g.renderThreadOff) return false;
+	// (nothing to wait for in a game that had queued rendering off anyway)
+	bool waited = std::chrono::steady_clock::now() - g.queuePinnedAt >= std::chrono::milliseconds(g_settleMs);
+	if (g.savedThreadCvars[0] != 0 && !waited) return false;
 	for (const char *name : kThreadCvars)
 		if (engine::CvarFloat(name, 0) != 0) return false;
 	return engine::CvarFloat("r_threaded_particles", 1) == 0;
 }
 
+// Queued rendering goes back on when the save or restore it was switched off for is well over (every frame)
+void TickQueuedRendering() {
+	if (RestoreOnItsWay() || g.restorePending || g.snapshotIn > 0 || g.mode == Mode::CatchUp) return;
+	if (!g.renderThreadOff) {
+		g.queueResumeIn = 0;
+		return;
+	}
+	// (switched off for a save or a restore that never came - the level changed, the restore failed, the save
+	// state was gone: it goes back on all the same)
+	if (g.queueResumeIn <= 0) g.queueResumeIn = kQueueResumeFrames;
+	if (--g.queueResumeIn > 0) return;
+	g.renderThreadOff = false;
+	if (g.savedThreadCvars[0] != 0) engine::Execute("mat_queue_mode %d", g.savedThreadCvars[0]);
+}
+
 void RestoreRendering() {
+	g.queueResumeIn = 0;
+	g.restorePending = false;
 	if (!g.queuePinned) return;
 	g.queuePinned = false;
+	g.renderThreadOff = false;
 	for (size_t i = 0; i < std::size(kThreadCvars); i++)
 		if (g.savedThreadCvars[i] != 0) engine::Execute("%s %d", kThreadCvars[i], g.savedThreadCvars[i]);
 	if (g.savedThreadedParticles != 0) engine::Execute("r_threaded_particles %d", g.savedThreadedParticles);
@@ -1196,11 +1403,20 @@ void TakeSnapshotIfDue() {
 	g.demoSinceSnapshot = false;
 	engine::Execute("snap_save %s", kSnapshotName);
 	g.demoRestartIn = kDemoAfterSaveFrames;
+	g.queueResumeIn = kDemoAfterSaveFrames + kQueueResumeFrames;
 }
 
 // Returns to the snapshot of this very attempt, if there is one. True when it did.
 bool RestoreSnapshot(int handover, bool watch) {
 	if (!SnapshotsUsable() || g.snapshotHandover != handover || g.snapshotWatch != watch || g.slots.empty()) return false;
+	SingleThreadedRendering();
+	if (!ThreadsSettled()) {
+		// (the render thread has to stop first: the attempt goes on until it has, see TickPendingRestore)
+		g.restorePending = true;
+		g.pendingHandover = handover;
+		g.pendingWatch = watch;
+		return true;
+	}
 	g.watch = watch;
 	g.handover = handover;
 	g.segment = g.route.SegmentAt(handover);
@@ -1216,7 +1432,6 @@ bool RestoreSnapshot(int handover, bool watch) {
 		slot.finished = false;
 	}
 	engine::FlushScript();
-	SingleThreadedRendering();
 	StopDemoForRestore();
 	engine::Execute("snap_load %s", kSnapshotName);
 	g.snapshotLoading = true;
@@ -1283,6 +1498,10 @@ void Approach() {
 	// ride the lift exactly as the run's players did, and step out as its doors open.
 	int clock = LevelClock();
 	bool joined = clock != kNoClock && clock >= common && clock <= g.handover - kShortestLeadTicks;
+	// (in co-op only where the run did nothing to the level in the moments that joining skips)
+	if (joined && g.route.coop && g.worldReached < clock && WorldEventsBetween(DriverTick(std::max(common, g.worldReached)), DriverTick(clock)))
+		joined = false;
+	if (g_logArrivals) engine::Print("[clock] attempt: level clock %d, first common tick %d, handover %d: %s\n", clock, common, g.handover, joined ? "joined" : "not joined");
 	if (joined) g.leadStart = std::max(g.leadStart, clock);
 	// (with instant retries too: a retry never reloads the level, but a level that hasn't seen the run's start yet,
 	// a fresh one, still has to be brought up to the lead-in, or a button the run pressed before it stays up)
@@ -1368,8 +1587,10 @@ int BeforeStuck(int handover) {
 void Start(int handover, bool watch) {
 	// (a snapshot restore asked for a moment ago is still on its way: ChocolateLoading holds one request at a time,
 	// so a second retry now would replace it halfway)
-	if (g.snapshotLoading && std::chrono::steady_clock::now() - g.snapshotAskedAt < std::chrono::seconds(3)) return;
+	if (RestoreOnItsWay()) return;
+	if (g.restorePending) return;  // (or about to be asked for)
 	g.snapshotLoading = false;  // (one that never came, after a failed restore: the retry goes ahead)
+	g.stopWhenRestored = false;
 	if (!g.hasRoute) {
 		engine::Warn("No route loaded. Use prac_load <demo> [partner's demo].\n");
 		return;
@@ -1390,7 +1611,8 @@ void Start(int handover, bool watch) {
 	bool past = g.worldReached > leadStart && WorldEventsBetween(DriverTick(leadStart), DriverTick(g.worldReached));
 	// (the level's own clock can't be turned back either: past the attempt's start, only a fresh level has it right)
 	int clock = LevelClock();
-	bool late = clock != kNoClock && clock > g.handover - kShortestLeadTicks;
+	// (not in co-op, where a restart takes long and both players with it: there a late attempt runs off the clock)
+	bool late = !g.route.coop && clock != kNoClock && clock > g.handover - kShortestLeadTicks;
 	if (g_set.reset == kResetReload || WrongLevelMode() || g.flagsGone || (g_set.reset == kResetAuto && (past || late))) {
 		ReloadLevel();
 		return;
@@ -2071,6 +2293,7 @@ void TickLeadIn() {
 		// (the snapshot of this attempt, if one was stored, is for the handover as it is now: a retry asks for it)
 		if (g.snapshotHandover == g.handover) g.snapshotHandover = g.cursor - 1;
 		g.handover = g.cursor - 1;  // (in single player the handover falls on the tick before a frame)
+		g.snapshotIn = 0;  // (a lead-in too short for its save state: the attempt goes without, with its render thread)
 		for (Slot &slot : g.slots) slot.partStart = g.handover;  // (the first part's time counts from here)
 		g.mode = Mode::Run;
 		ShieldPlayers(true);  // the people are on their own again; bots stay protected
@@ -2100,6 +2323,7 @@ void TickWatch() {
 		SetDuckKey(false);
 		g.mode = Mode::Done;
 		g.doneTicks = 0;
+		g.snapshotIn = 0;
 	}
 }
 
@@ -2198,7 +2422,9 @@ void TickWaitForPlayers() {
 	std::vector<LivePlayer> players = LivePlayers();
 	size_t alive = 0;
 	for (const LivePlayer &p : players) alive += p.state.alive ? 1 : 0;
-	if (alive < std::min(needed, players.size()) || players.empty()) {
+	// (a partner still on the way in gets ten seconds: an attempt started without them has no place for them)
+	bool partnerDue = players.size() < needed && std::chrono::steady_clock::now() - g.reloadAskedAt < std::chrono::seconds(10);
+	if (alive < std::min(needed, players.size()) || players.empty() || partnerDue) {
 		g.waitTicks = 0;
 		return;
 	}
@@ -2220,7 +2446,9 @@ void TickAutoStart() {
 		g.waitTicks = 0;
 		return;
 	}
-	if (++g.waitTicks < 90) return;
+	// (in co-op as soon as the level's clock allows: later, the attempt could no longer join it)
+	int clock = g.route.coop ? LevelClock() : kNoClock;
+	if (clock == kNoClock ? ++g.waitTicks < 90 : (++g.waitTicks < 8 || clock < FirstCommonTick(g.route))) return;
 	int part = g.autoPart;
 	float seconds = g.autoSeconds;
 	g.autoPart = -1;
@@ -2309,12 +2537,16 @@ int PartArgument(const sdk::CCommand &args, int fallback) {
 	return args.ArgC() >= 2 ? atoi(args.Arg(1)) - 1 : fallback;
 }
 
+constexpr const char *kNoRoute = "No route loaded. Use prac_load <demo> [partner's demo].\n";
+
 void CmdStart(const sdk::CCommand &args) {
+	if (BusyRestoring()) return;
 	g.replaying = false;
 	StartPart(PartArgument(args, g.hasRoute && g.attempts ? g.segment : 0), false);
 }
 
 void CmdWatch(const sdk::CCommand &args) {
+	if (BusyRestoring()) return;
 	g.replaying = false;
 	StartPart(PartArgument(args, 0), true);
 }
@@ -2325,10 +2557,15 @@ int TickAtSeconds(float seconds) {
 }
 
 void CmdGoto(const sdk::CCommand &args) {
-	if (args.ArgC() < 2 || !g.hasRoute) {
+	if (args.ArgC() < 2) {
 		engine::Print("prac_goto <seconds> [watch] - practice from that time of the run (or watch it from there)\n");
 		return;
 	}
+	if (!g.hasRoute) {
+		engine::Warn(kNoRoute);
+		return;
+	}
+	if (BusyRestoring()) return;
 	g.replaying = false;
 	bool watch = args.ArgC() >= 3 && !_stricmp(args.Arg(2), "watch");
 	Start(TickAtSeconds(static_cast<float>(atof(args.Arg(1)))), watch);
@@ -2337,10 +2574,15 @@ void CmdGoto(const sdk::CCommand &args) {
 // The same attempt, taking over a little later (or earlier) in the run: for a pair of binds that move the
 // handover while practicing
 void CmdNudge(const sdk::CCommand &args) {
-	if (args.ArgC() < 2 || !g.hasRoute) {
+	if (args.ArgC() < 2) {
 		engine::Print("prac_nudge <seconds> - take over this many seconds later in the run (negative: earlier) and start again\n");
 		return;
 	}
+	if (!g.hasRoute) {
+		engine::Warn(kNoRoute);
+		return;
+	}
+	if (BusyRestoring()) return;
 	int from = g.attempts ? g.handover : g.route.segments[0].startTick;
 	g.replaying = false;
 	Start(from + static_cast<int>(std::lround(atof(args.Arg(1)) / g.route.tickInterval)), g.watch);
@@ -2348,14 +2590,17 @@ void CmdNudge(const sdk::CCommand &args) {
 
 void CmdRetry(const sdk::CCommand &) {
 	if (g.hasRoute) Start(g.attempts ? g.handover : g.route.segments[0].startTick, g.watch);
+	else engine::Warn(kNoRoute);
 }
 
 void CmdNext(const sdk::CCommand &) {
+	if (BusyRestoring()) return;
 	g.replaying = false;
 	StartPart(g.segment + 1, false);
 }
 
 void CmdPrev(const sdk::CCommand &) {
+	if (BusyRestoring()) return;
 	g.replaying = false;
 	StartPart(g.segment - 1, false);
 }
@@ -2389,6 +2634,7 @@ void CmdReplay(const sdk::CCommand &args) {
 		engine::Print("prac_replay <demo> [partner's demo] - play another run in the level against the loaded one\n");
 		return;
 	}
+	if (BusyRestoring()) return;
 	Route other;
 	if (!LoadRoute(args, other)) return;
 	if (other.map != g.route.map) {
@@ -2501,7 +2747,11 @@ void CmdSet(const sdk::CCommand &args) {
 	else if (name == "hud") g_set.hud = on;
 	else if (name == "speedometer") g_set.speedometer = on;
 	else if (name == "strafe") g_set.strafe = on;
-	else if (name == "path") g_set.path = on;
+	else if (name == "path") {
+		g_set.path = on;
+		// (in an attempt the lines come or go at once)
+		if (g.mode == Mode::LeadIn || g.mode == Mode::Run || g.mode == Mode::Watch) DrawRoute();
+	}
 	else if (name == "partner") g_set.partner = on;
 	else if (name == "loop") g_set.loop = on;
 	else if (name == "autoreset") g_set.autoReset = std::max(0.0f, number);
@@ -2611,11 +2861,23 @@ void CmdDebug(const sdk::CCommand &args) {
 		g_snapshotDelayTicks = std::max(1, atoi(args.Arg(2)));
 		return;
 	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "settle")) {
+		g_settleMs = std::max(0, atoi(args.Arg(2)));
+		return;
+	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "edicts")) {
 		g_scanEdicts = atoi(args.Arg(2)) != 0;
 		g_lastBadEdict = -1;
 		for (size_t a = 0; a < g.ghosts.size(); a++) engine::Print("ghost %d: entity %d\n", static_cast<int>(a), g.ghosts[a].entIndex);
 		ScanEdicts(engine::TickCount(), false);
+		return;
+	}
+	if (args.ArgC() >= 2 && !strcmp(args.Arg(1), "perf")) {
+		PrintPerf();
+		return;
+	}
+	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "arrivals")) {
+		g_logArrivals = atoi(args.Arg(2)) != 0;
 		return;
 	}
 	if (args.ArgC() >= 3 && !strcmp(args.Arg(1), "parity")) {
@@ -2727,6 +2989,7 @@ void Shutdown() {
 		g.placedBots.clear();
 		SetBotMovement();  // (the bots move by themselves again)
 	}
+	g.snapshotLoading = false;  // (no waiting for a save state on its way: the game gets its settings back now)
 	Stop(false);
 	g = Session{};
 }
@@ -2736,6 +2999,7 @@ void OnLevelInit(const char *mapName) {
 	DropSnapshot();
 	g.snapshotIn = 0;
 	g.snapshotLoading = false;
+	g.restorePending = false;
 	g.helperLoaded = false;
 	g.levelTouched = false;
 	g.startScreenClosed = false;
@@ -2784,7 +3048,13 @@ void OnLevelShutdown() {
 	}
 	if (g.mode != Mode::Reloading) g.mode = Mode::Idle;
 	// (a level the attempt does not come back to is the game's to split again)
-	if (g.mode == Mode::Idle && !g.resumeAfterLoad) g.botPartner = false;
+	if (g.mode == Mode::Idle && !g.resumeAfterLoad) {
+		g.botPartner = false;
+		// (and the game has its own settings back: at the menu nothing else would give them back)
+		g.snapshotLoading = false;
+		g.stopWhenRestored = false;
+		ReleaseGameSettings();
+	}
 	g.screenHeld = false;
 	KeepWholeScreen(false);
 	ReleaseUseKeys();
@@ -2804,7 +3074,49 @@ void NoteDeaths() {
 	g.humanDead = dead;
 }
 
+bool g_logArrivals = false;  // development: "prac_debug arrivals 1" prints when the players come into a level
+int g_aliveLogged = -1;
+
+void NoteArrival(const char *what) {
+	if (g_logArrivals) engine::Print("[arrive] tick %d: a player %s\n", engine::TickCount(), what);
+}
+
+void LogAlivePlayers(bool simulating) {
+	int alive = 0;
+	for (int i = 1; i <= engine::MaxClients(); i++) {
+		engine::PlayerState state;
+		if (engine::GetPlayer(i, state) && state.alive) alive++;
+	}
+	if (alive == g_aliveLogged) return;
+	g_aliveLogged = alive;
+	engine::Print("[arrive] tick %d: %d alive%s\n", engine::TickCount(), alive, simulating ? "" : " (paused)");
+}
+
+// Development: frames a second and the plugin's share of each, since the last report
+void PrintPerf() {
+	perf::Counters &c = perf::g_counters;
+	LARGE_INTEGER frequency;
+	QueryPerformanceFrequency(&frequency);
+	long long now = perf::Now();
+	double seconds = c.since ? static_cast<double>(now - c.since) / frequency.QuadPart : 0;
+	if (seconds > 0 && c.frames > 0) {
+		double frameMs = seconds * 1000 / c.frames;
+		engine::Print("[perf] %.1f s, %d frames: %.0f fps (%.3f ms a frame), mode %d\n", seconds, c.frames, c.frames / seconds, frameMs, static_cast<int>(g.mode));
+		static const char *const names[] = {"game frame", "script", "paint"};
+		for (int i = 0; i < perf::kSections; i++) {
+			double ms = static_cast<double>(c.ticks[i]) * 1000 / frequency.QuadPart;
+			engine::Print("[perf]   %-10s %6d calls, %.4f ms each, %.4f ms a frame (%.1f%%)\n", names[i], c.calls[i], c.calls[i] ? ms / c.calls[i] : 0,
+			              ms / c.frames, ms / c.frames / frameMs * 100);
+		}
+	} else {
+		engine::Print("[perf] measuring from now (nothing drawn since the last report)\n");
+	}
+	c = perf::Counters{};
+	c.since = now;
+}
+
 void OnFrame(bool simulating) {
+	if (g_logArrivals) LogAlivePlayers(simulating);
 	// A snapshot restore takes a few frames to come: the trainer runs on meanwhile, so when the level's clock
 	// jumps back to the snapshot's, the run's cursor is set back to where the snapshot was taken
 	int tick = engine::TickCount();
@@ -2833,6 +3145,23 @@ void OnFrame(bool simulating) {
 	}
 	if (g_scanEdicts) ScanEdicts(tick, restored);
 	g.lastTick = tick;
+	if (restored) g.queueResumeIn = kQueueResumeFrames;
+	if (g.stopWhenRestored && !RestoreOnItsWay()) Stop(false);  // (the stop that waited for the save state to land)
+	TickQueuedRendering();
+	if (g.restorePending) {
+		// (the retry that waited for the render thread: the restore, or a level restart if the save state went
+		// meanwhile. A thread that won't stop - something else holds its cvar on - gets two seconds: the retry
+		// then goes without the save state.)
+		bool gaveUp = !ThreadsSettled() && std::chrono::steady_clock::now() - g.queuePinnedAt > std::chrono::seconds(2);
+		if (gaveUp) {
+			engine::Warn("The game's threads did not stop for the save state: restarting the level instead.\n");
+			DropSnapshot();
+		}
+		if (gaveUp || ThreadsSettled()) {
+			g.restorePending = false;
+			Start(g.pendingHandover, g.pendingWatch);
+		}
+	}
 	if (g.snapshotHandover >= 0 && !g.snapshotLoading && engine::RecordingDemo()) g.demoSinceSnapshot = true;
 	TickDemoRestart();
 	ReleaseStaleBoard();
@@ -2845,7 +3174,7 @@ void OnFrame(bool simulating) {
 		// a few frames later, so the closing is repeated once it has: CloseGameScreens)
 		CloseGameScreens();
 		CmdRetry(sdk::CCommand{});
-		g.closeScreensAfterRestore = g.snapshotLoading;
+		g.closeScreensAfterRestore = g.snapshotLoading || g.restorePending;
 		engine::FlushScript();
 		return;
 	}
@@ -2875,6 +3204,7 @@ void OnFrame(bool simulating) {
 	case Mode::Done: TickDone(); break;
 	default: break;
 	}
+	if (g.mode == Mode::LeadIn || g.mode == Mode::Run || g.mode == Mode::Watch) FollowRoute();
 	SetBotMovement();
 	// (every frame, in every mode: watching too)
 	if (g.botPartner) KeepWholeScreen(g.screenHeld);
