@@ -1,0 +1,154 @@
+From fb5fecc24ef51513ba033a36eac410b79c050911 Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 19:08:35 -0600
+Subject: [PATCH] d3dguard: track objects the engine creates through another
+ module's device hook (p2boost wraps CreateTexture: textures were left out of
+ the pin and freed under the restored state)
+
+---
+ src/d3dguard.cpp | 63 +++++++++++++++++++++++++++++++++---------------
+ 1 file changed, 44 insertions(+), 19 deletions(-)
+
+diff --git a/src/d3dguard.cpp b/src/d3dguard.cpp
+index 47401b8..5cc91f3 100644
+--- a/src/d3dguard.cpp
++++ b/src/d3dguard.cpp
+@@ -6,7 +6,7 @@
+ #include <intrin.h>
+ #include <stdlib.h>
+ 
+-#pragma intrinsic(_ReturnAddress)
++#pragma intrinsic(_ReturnAddress, _AddressOfReturnAddress)
+ 
+ namespace d3dguard {
+ 
+@@ -142,10 +142,30 @@ bool hook_class(void* obj) {
+     return util::WritePointer(&vt[SLOT_RELEASE], (void*)H_Release);
+ }
+ 
+-inline bool engine_call(void* dev, void* ret) {
+-    return dev == g_device && (uintptr_t)ret - g_api_lo < g_api_hi - g_api_lo;
++inline bool in_shader_api(void* code) { return (uintptr_t)code - g_api_lo < g_api_hi - g_api_lo; }
++
++// Whether the engine made this device call. `frame` is the hook's stack frame as the caller left it: the return
++// address, then the `nargs` arguments.
++//
++// Normally the shader API calls the device itself. But other plugins hook the same device slots (p2boost
++// wraps CreateTexture), and then the caller is their hook, which passes the engine's call on with the same
++// arguments. That hook's own frame lies a little further up the stack: the same arguments again, under a
++// return address inside the shader API. What such a plugin creates for itself (other arguments, or no
++// shader API caller) stays its own and is not tracked.
++bool engine_call(void** frame, int nargs) {
++    void** args = frame + 1;
++    if (args[0] != g_device) return false;
++    if (in_shader_api(frame[0])) return true;
++    void** end = (void**)((NT_TIB*)NtCurrentTeb())->StackBase - nargs;
++    if (end - args > 256) end = args + 256;   // a pass-through hook's frame is small
++    size_t bytes = nargs * sizeof(void*);
++    for (void** up = args + nargs + 1; up <= end; up++)
++        if (up[0] == args[0] && !memcmp(up, args, bytes) && in_shader_api(up[-1])) return true;
++    return false;
+ }
+ 
++LONG g_foreign = 0;   // objects other modules created on the engine's device since the last save (not tracked)
++
+ void track(void* obj, int kind) {
+     if (!obj) return;
+     EnterCriticalSection(&g_cs);
+@@ -200,65 +220,68 @@ HRESULT __stdcall H_Reset(void* dev, void* params) {
+     return o_Reset(dev, params);
+ }
+ 
+-#define TRACK_IF_OK(kind) \
+-    if (hr >= 0 && out && engine_call(dev, _ReturnAddress())) track(*out, kind); \
++#define TRACK_IF_OK(kind, nargs) \
++    if (hr >= 0 && out) { \
++        if (engine_call((void**)_AddressOfReturnAddress(), nargs)) track(*out, kind); \
++        else if (dev == g_device) InterlockedIncrement(&g_foreign); \
++    } \
+     return hr
+ 
+ HRESULT __stdcall H_CreateTexture(void* dev, UINT w, UINT h, UINT levels, DWORD usage, DWORD fmt, DWORD pool, void** out, HANDLE* sh) {
+     HRESULT hr = o_CreateTexture(dev, w, h, levels, usage, fmt, pool, out, sh);
+-    TRACK_IF_OK(K_TEXTURE);
++    TRACK_IF_OK(K_TEXTURE, 9);
+ }
+ HRESULT __stdcall H_CreateVolumeTexture(void* dev, UINT w, UINT h, UINT d, UINT levels, DWORD usage, DWORD fmt, DWORD pool, void** out, HANDLE* sh) {
+     HRESULT hr = o_CreateVolumeTexture(dev, w, h, d, levels, usage, fmt, pool, out, sh);
+-    TRACK_IF_OK(K_VOLUME);
++    TRACK_IF_OK(K_VOLUME, 10);
+ }
+ HRESULT __stdcall H_CreateCubeTexture(void* dev, UINT edge, UINT levels, DWORD usage, DWORD fmt, DWORD pool, void** out, HANDLE* sh) {
+     HRESULT hr = o_CreateCubeTexture(dev, edge, levels, usage, fmt, pool, out, sh);
+-    TRACK_IF_OK(K_CUBE);
++    TRACK_IF_OK(K_CUBE, 7);
+ }
+ HRESULT __stdcall H_CreateVertexBuffer(void* dev, UINT len, DWORD usage, DWORD fvf, DWORD pool, void** out, HANDLE* sh) {
+     HRESULT hr = o_CreateVertexBuffer(dev, len, usage, fvf, pool, out, sh);
+-    TRACK_IF_OK(K_VB);
++    TRACK_IF_OK(K_VB, 7);
+ }
+ HRESULT __stdcall H_CreateIndexBuffer(void* dev, UINT len, DWORD usage, DWORD fmt, DWORD pool, void** out, HANDLE* sh) {
+     HRESULT hr = o_CreateIndexBuffer(dev, len, usage, fmt, pool, out, sh);
+-    TRACK_IF_OK(K_IB);
++    TRACK_IF_OK(K_IB, 7);
+ }
+ HRESULT __stdcall H_CreateRenderTarget(void* dev, UINT w, UINT h, DWORD fmt, DWORD ms, DWORD msq, BOOL lockable, void** out, HANDLE* sh) {
+     HRESULT hr = o_CreateRenderTarget(dev, w, h, fmt, ms, msq, lockable, out, sh);
+-    TRACK_IF_OK(K_SURFACE);
++    TRACK_IF_OK(K_SURFACE, 9);
+ }
+ HRESULT __stdcall H_CreateDepthStencilSurface(void* dev, UINT w, UINT h, DWORD fmt, DWORD ms, DWORD msq, BOOL discard, void** out, HANDLE* sh) {
+     HRESULT hr = o_CreateDepthStencilSurface(dev, w, h, fmt, ms, msq, discard, out, sh);
+-    TRACK_IF_OK(K_SURFACE);
++    TRACK_IF_OK(K_SURFACE, 9);
+ }
+ HRESULT __stdcall H_CreateOffscreenPlainSurface(void* dev, UINT w, UINT h, DWORD fmt, DWORD pool, void** out, HANDLE* sh) {
+     HRESULT hr = o_CreateOffscreenPlainSurface(dev, w, h, fmt, pool, out, sh);
+-    TRACK_IF_OK(K_SURFACE);
++    TRACK_IF_OK(K_SURFACE, 7);
+ }
+ HRESULT __stdcall H_CreateStateBlock(void* dev, DWORD type, void** out) {
+     HRESULT hr = o_CreateStateBlock(dev, type, out);
+-    TRACK_IF_OK(K_STATEBLOCK);
++    TRACK_IF_OK(K_STATEBLOCK, 3);
+ }
+ HRESULT __stdcall H_EndStateBlock(void* dev, void** out) {
+     HRESULT hr = o_EndStateBlock(dev, out);
+-    TRACK_IF_OK(K_STATEBLOCK);
++    TRACK_IF_OK(K_STATEBLOCK, 2);
+ }
+ HRESULT __stdcall H_CreateVertexDeclaration(void* dev, const void* elements, void** out) {
+     HRESULT hr = o_CreateVertexDeclaration(dev, elements, out);
+-    TRACK_IF_OK(K_DECL);
++    TRACK_IF_OK(K_DECL, 3);
+ }
+ HRESULT __stdcall H_CreateVertexShader(void* dev, const void* code, void** out) {
+     HRESULT hr = o_CreateVertexShader(dev, code, out);
+-    TRACK_IF_OK(K_VS);
++    TRACK_IF_OK(K_VS, 3);
+ }
+ HRESULT __stdcall H_CreatePixelShader(void* dev, const void* code, void** out) {
+     HRESULT hr = o_CreatePixelShader(dev, code, out);
+-    TRACK_IF_OK(K_PS);
++    TRACK_IF_OK(K_PS, 3);
+ }
+ HRESULT __stdcall H_CreateQuery(void* dev, DWORD type, void** out) {   // out == null: support check only
+     HRESULT hr = o_CreateQuery(dev, type, out);
+-    TRACK_IF_OK(K_QUERY);
++    TRACK_IF_OK(K_QUERY, 3);
+ }
+ #undef TRACK_IF_OK
+ 
+@@ -433,6 +456,8 @@ void OnSave(int slot) {
+               (unsigned)per[K_SURFACE], (unsigned)per[K_VB], (unsigned)per[K_IB], (unsigned)per[K_VS], (unsigned)per[K_PS],
+               (unsigned)per[K_DECL], (unsigned)per[K_QUERY], (unsigned)per[K_STATEBLOCK],
+               g_overflow ? " - REGISTRY OVERFLOWED" : "");
++    if (LONG foreign = InterlockedExchange(&g_foreign, 0))
++        util::Log("d3dguard: %ld objects made on the device by other modules since the last save are not tracked", foreign);
+ }
+ 
+ void AfterRestore(int slot) {
+-- 
+2.43.0.windows.1
+

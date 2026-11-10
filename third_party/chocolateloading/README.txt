@@ -40,5 +40,13 @@ for the author.
    take effect even when they had been 0 all along (P2 Practice keeps them off during a practice session): once
    they have been 0 for 4 frames, an operation runs at the next frame.
 
+7. Device hooks of other plugins. A save pins every Direct3D object the engine made, and "the engine made it" was
+   judged by the return address of the device call. p2boost (with -vulkan) wraps CreateTexture and passes the call
+   on, so the return address was p2boost's: every texture made after it loaded was left out (176 pinned instead of
+   about 900 on Turret Warehouse), and one freed after the save was used again after a restore (DXVK heap fault,
+   the game closes after a few retries). A call that arrives from another module now counts as the engine's when
+   the same arguments sit further up the stack under a return address in the shader API. Objects such a module
+   creates for itself stay untracked; a save writes their number to the log.
+
 Files: chocoload.exe (starts Portal 2 with the DLL loaded before the engine) and chocolateloading.dll. The
 launcher copies both into the Portal 2 folder when save states are on.
