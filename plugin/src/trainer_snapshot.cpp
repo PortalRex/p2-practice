@@ -130,6 +130,18 @@ void TickDemoRestart() {
 	engine::Execute("record \"demos/p2practice/%s_%s\"", engine::MapName(), stamp);
 }
 
+static SetupChoices CurrentChoices() {
+	SetupChoices c;
+	c.role = g_set.role;
+	c.ghostStyle = g_set.ghostStyle;
+	c.partner = g_set.partner;
+	c.ghost = g_set.ghost;
+	c.challenge = g_set.challenge;
+	c.leadIn = g_set.leadIn;
+	c.speed = g_set.speed;
+	return c;
+}
+
 // A lead-in begins: its snapshot is taken a few ticks in
 void ScheduleSnapshot() {
 	if (g.save.Busy()) return;
@@ -165,6 +177,7 @@ void TakeSnapshotIfDue() {
 	// (the one held until now is replaced: ChocolateLoading keeps one snapshot per name)
 	g.save.handover = g.handover;
 	g.save.watch = g.watch;
+	g.save.choices = CurrentChoices();
 	engine::FlushScript();
 	// The game keeps its coroutines (Steam's game coordinator jobs run in them) in a list per thread, made the
 	// first time a thread creates one and found again through a thread-local pointer, which a restore doesn't bring
@@ -184,6 +197,9 @@ void TakeSnapshotIfDue() {
 bool RestoreSnapshot(int handover, bool watch) {
 	if (g.save.phase != SavePhase::Idle || g.save.handover != handover || g.save.watch != watch) return false;
 	if (!SnapshotsUsable() || g.slots.empty()) return false;
+	// (the level it holds has the robots, the partner and the ghosts of the settings it was taken with: playing
+	// the other robot now, say, the person would be back in the one they had)
+	if (!(g.save.choices == CurrentChoices())) return false;
 	PinThreads();
 	g.watch = watch;
 	g.handover = handover;

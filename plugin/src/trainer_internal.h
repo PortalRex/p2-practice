@@ -44,6 +44,20 @@ enum class SavePhase {
 	Restoring,  // snap_load is asked for
 };
 
+// The settings an attempt's level is set up with: who plays which robot, whether the partner is driven, the
+// ghosts, the lead-in's length, the game's speed. A save state holds the level as they made it, so it only serves
+// attempts that have the same ones (changed since, the next attempt is set up afresh and takes a new save state).
+struct SetupChoices {
+	int role = 0, ghostStyle = 0;
+	bool partner = false, ghost = false, challenge = false;
+	float leadIn = 0, speed = 0;
+
+	bool operator==(const SetupChoices &o) const {
+		return role == o.role && ghostStyle == o.ghostStyle && partner == o.partner && ghost == o.ghost && challenge == o.challenge &&
+		       leadIn == o.leadIn && speed == o.speed;
+	}
+};
+
 struct SaveState {
 	SavePhase phase = SavePhase::Idle;
 	int dueIn = 0;
@@ -51,6 +65,7 @@ struct SaveState {
 	// The state held (being stored, while Saving)
 	int handover = -1;             // the handover its attempt had, -1: none held
 	bool watch = false;
+	SetupChoices choices;          // the settings its level was set up with (see SetupChoices)
 	int cursor = 0;                // the run tick it was taken at
 	bool startScreenOpen = false;  // the start board hadn't come and gone yet when it was taken
 	bool holdsDemo = false;        // a demo was being recorded when it was taken (see DropSnapshotAtFlags)
