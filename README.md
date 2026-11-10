@@ -168,7 +168,8 @@ level's state changed (SAR's records) and what the level's clock showed when the
   and where your last attempt got, and the level's own clock hasn't run past the part's start (in single player it
   always has after an attempt), players, objects and portals are simply put back.
 - **Restart and replay.** Otherwise the level restarts and the run is replayed quickly from the level's first tick
-  up to the part ("setting up the level..."). The real players stand in for the run's players, on the level's own
+  up to the part ("setting up the level..."), with the game's sound faded out until the lead-in (your volume
+  setting is not touched). The real players stand in for the run's players, on the level's own
   clock. They are put where the run's player was when each game frame began and the game's own movement carries
   them through it, so they ride the lift and touch every trigger in the same frame the run did, tricks included (a
   button pressed and released within one frame, a trigger skipped at speed). What the run's players carried is
@@ -181,8 +182,9 @@ level's state changed (SAR's records) and what the level's clock showed when the
 At the handover you get the run's exact position, aim, speed and portals, and whatever the run was carrying at
 that moment is put in your hands.
 
-**Challenge Mode.** Every run is practiced in Challenge Mode (the restart switches to it), whether or not it was
-made in it: the finish flags and the game's own timer are there, no saves are kept, and a death starts the level
+**Challenge Mode.** Every run is practiced in Challenge Mode, whether or not it was made in it. A level loaded
+from START (or with `prac_auto` on) comes up in it on its first load; one you loaded yourself is restarted into it
+by the first attempt. In it the finish flags and the game's own timer are there, no saves are kept, and a death starts the level
 again. The leaderboard the game opens a few seconds into the level (which pauses the game: it would stall the run
 playing itself, or land on an early handover) is kept from opening while practicing; the one at the flags comes up
 as it always does, with the attempt's time in its Final box (the game itself shows "-" there with cheats on), and
@@ -342,7 +344,7 @@ launcher\build.bat
 (`stop.ps1` ends it and removes its profile):
 
 - `regress.py --job <name> [--only sp|coop]`: the quick pass, about a minute per half. One single-player and one
-  co-op level: a run loads and starts by itself, retries come back (through a save state when ChocolateLoading is
+  co-op level: a run loads and starts by itself after one load of the level, retries come back (through a save state when ChocolateLoading is
   in), the game's settings are back as they were after each retry and after stopping, the frame rate in an attempt
   against standing in the level, and no script error or plugin warning in the console log.
 - `perfcheck.py`: the frame-rate measure on its own.

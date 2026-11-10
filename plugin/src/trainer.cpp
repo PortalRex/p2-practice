@@ -278,8 +278,18 @@ void SetSpeed(float scale) {
 	g.speedChanged = scale != 1;
 }
 
-// Takes the catch-up's black screen away again (a fade back in), where there is one
+// The game's sound off while the run is replayed quickly (several times the sounds, at several times the pitch),
+// and back with a short fade. This is the game's own sound fade: the person's volume setting is not touched.
+void Quiet(bool on) {
+	if (g.quiet == on) return;
+	g.quiet = on;
+	// soundfade <percent> <hold> <out> <in>, in seconds (the hold is cut short by the next call)
+	engine::Execute(on ? "soundfade 100 100000 0 0" : "soundfade 100 0 0 0.4");
+}
+
+// Takes the catch-up's black screen away again (a fade back in), where there is one, and its silence
 void Undim() {
+	Quiet(false);
 	if (!g.dimmed) return;
 	engine::Script("::PP.Dim(0)");
 	g.dimmed = false;
@@ -311,6 +321,7 @@ void ReleaseGameSettings() {
 		g.savesOff = false;
 	}
 	RestoreSpeed();
+	Quiet(false);
 	ReleaseThreads();
 }
 
@@ -441,6 +452,7 @@ void Approach() {
 		SetSpeed(8);
 		engine::Script("::PP.Dim(1)");  // (the fast-forward is better not watched: the lead-in fades in from black)
 		g.dimmed = true;
+		Quiet(true);
 		return;
 	}
 	BeginLeadIn();
@@ -821,6 +833,7 @@ void OnLevelInit(const char *mapName) {
 	engine::DropHeldClientCommands();  // (for the level that is gone)
 	g.boardHeldFrames = 0;
 	g.dimmed = false;  // (the game clears the screen fade with the level)
+	Quiet(false);
 	g.humanDead = false;
 	g.registeredModels.clear();
 	g.slots.clear();
@@ -834,6 +847,9 @@ void OnLevelInit(const char *mapName) {
 	// (a level that comes back much later was loaded by the person, not restarted by the game)
 	constexpr auto kRestartWithin = std::chrono::seconds(90);
 	bool soon = std::chrono::steady_clock::now() - g.levelWentAt < kRestartWithin;
+	// A level loaded to practice in comes up in the route's mode straight away. (The game picks the mode when the
+	// players spawn, which is still to come; the session a "map" command makes has just put Challenge Mode off.)
+	if (sameMap && g.autoPart >= 0) engine::Execute("sv_bonus_challenge %d", ChallengeMode() ? 1 : 0);
 	if (sameMap && (g.mode == Mode::Reloading || (g.resumeAfterLoad && soon))) {
 		if (g.resumeAfterLoad) engine::Print("The level restarted during the attempt: starting it again.\n");
 		g.mode = Mode::WaitForPlayers;
@@ -947,6 +963,7 @@ void OnFrame(bool simulating) {
 		g.flagsUp = ChallengeMode() && engine::EntityExists(kEndNode);
 		g.flagsGone = false;
 		g.dimmed = false;
+		Quiet(false);
 		if (g.closeScreensAfterRestore) CloseGameScreens();
 		g.closeScreensAfterRestore = false;
 	}

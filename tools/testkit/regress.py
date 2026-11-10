@@ -33,6 +33,7 @@ SETTINGS_IN_ATTEMPT = {'mat_queue_mode': AS_BEFORE, 'host_timescale': '1'}
 SETTINGS_STOPPED = {'mat_queue_mode': AS_BEFORE, 'host_timescale': '1', 'save_disable': '0'}
 
 # Console lines that mean something went wrong
+LEVEL_LOAD = r'---- Host_(?:NewGame|Changelevel) ----'
 LOST_SAVE_STATE = 'could not bring the save state back'
 TROUBLE = re.compile(r'AN ERROR HAS OCCURED|could not store the save state|could not bring the save state back|Script not found|bad edict|, BAD ', re.I)
 
@@ -134,6 +135,8 @@ class Pass:
         c.send('prac_auto 1', level['map'], wait=1)
         if not self.check(c.wait_for_mode(['run'], 150) == 'run', 'first attempt started by itself', str(c.state())):
             return False
+        loads = len(re.findall(LEVEL_LOAD, self.log_since(mark)))
+        self.check(loads == 1, 'the level loaded once for it', f'{loads} loads')
         if 'ss_map' in level['map']:
             joined = re.findall(r'\[clock\] attempt: .*: (joined|not joined)', self.log_since(mark))
             self.check(joined[:1] == ['joined'], "first attempt on the level's clock", str(joined))
@@ -148,7 +151,7 @@ class Pass:
             time.sleep(0.5)
             mode = c.wait_for_mode(['run'], 60)
             took = time.time() - asked
-            restarts = len(re.findall(r'Host_NewGame|Host_Changelevel', self.log_since(before)))
+            restarts = len(re.findall(LEVEL_LOAD, self.log_since(before)))
             self.check(mode == 'run', f'retry {attempt + 1} back in an attempt', f'mode {mode} after {took:.1f} s')
             if snapshots:
                 self.check(restarts == 0, f'retry {attempt + 1} through the save state', f'{restarts} level restart(s), {took:.1f} s')
@@ -177,7 +180,7 @@ class Pass:
         c.send('prac_retry', wait=0.8)
         mode = c.wait_for_mode(['run'], 60)
         log = self.log_since(before)
-        restarted = len(re.findall(r'Host_NewGame|Host_Changelevel', log)) > 0
+        restarted = len(re.findall(LEVEL_LOAD, log)) > 0
         self.check(mode == 'run' and restarted and LOST_SAVE_STATE in log, 'a lost save state falls back to a level restart',
                    f'mode {mode}, restarted {restarted}, said so {LOST_SAVE_STATE in log}')
 

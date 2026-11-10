@@ -132,6 +132,7 @@ struct Session {
 	bool flagsUp = false;            // the Challenge Mode finish flags stood when the attempt began (see WatchFlags)
 	bool flagsGone = false;          // a finish took them: the next attempt needs a fresh level
 	bool dimmed = false;             // the screen is black for a catch-up (::PP.Dim)
+	bool quiet = false;              // the game's sound is faded out for a catch-up (Quiet)
 	int doneTicks = 0;
 	int boardHeldFrames = 0;         // frames the finish board's opening has been held back (TellBoard)
 	int attempts = 0;
