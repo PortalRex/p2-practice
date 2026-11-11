@@ -243,8 +243,6 @@ bool MapMatches() {
 // they are too late for that (a start by hand long after the load, a retry without a save state), the attempt
 // runs off the clock as it always did in co-op, and the timed machinery is met at another point of its round.
 // A level restart (prac_set reset reload) or a save state brings it back in step.
-constexpr int kNoClock = INT_MIN;
-
 int LevelClock() {
 	const Route &driver = Driver();
 	if (driver.levelTickAtZero == p2demo::Demo::kNoServerTick) return kNoClock;
@@ -252,8 +250,8 @@ int LevelClock() {
 	return g.replaying ? driverTick - g.replay.timerStart + g.route.timerStart : driverTick;
 }
 
-// The least the run plays itself before the handover (a sixth of a second), however late the level's clock is
-constexpr int kShortestLeadTicks = 10;
+// (kShortestLeadTicks, trainer_internal.h: the least the run plays itself before the handover, however late the
+// level's clock is)
 
 // The first tick every player of the route exists
 int FirstCommonTick(const Route &route) {
@@ -360,6 +358,7 @@ void Stop(bool announce) {
 		return;
 	}
 	g.stopWhenRestored = false;
+	g.save.toBase = false;
 	ReleaseGameSettings();
 	// (the save state holds the level with the ghosts and texts that go now: a retry sets the attempt up afresh)
 	DropSnapshot();
@@ -547,7 +546,11 @@ void Start(int handover, bool watch) {
 	int clock = LevelClock();
 	// (not in co-op, where a restart takes long and both players with it: there a late attempt runs off the clock)
 	bool late = !g.route.coop && clock != kNoClock && clock > g.handover - kShortestLeadTicks;
-	if (g_set.reset == kResetReload || WrongLevelMode() || g.flagsGone || (g_set.reset == kResetAuto && (past || late))) {
+	bool restart = g_set.reset == kResetReload || WrongLevelMode();
+	// (a level that is past the attempt's start, or has lost its flags to a finish, goes back to its base save
+	// state when it has one: no restart, and with instant retries no door left open by what the run did later)
+	if (!restart && (past || late || g.flagsGone) && RestoreBase(leadStart)) return;
+	if (restart || g.flagsGone || (g_set.reset == kResetAuto && (past || late))) {
 		ReloadLevel();
 		return;
 	}
@@ -958,7 +961,7 @@ void OnFrame(bool simulating) {
 		if (!engine::SnapshotsRestoreDeviceState()) engine::ResetRenderState();
 		// The game is back at the snapshot's moment and the plugin's memory is not: what the plugin knows about
 		// the level is set back to what held then. (The Challenge Mode start board, the flags, the screen fade.)
-		if (g.save.startScreenOpen) g.startScreenClosed = false;
+		if (g.save.toBase ? g.save.baseStartScreenOpen : g.save.startScreenOpen) g.startScreenClosed = false;
 		g.pausedFrames = 0;
 		g.flagsUp = ChallengeMode() && engine::EntityExists(kEndNode);
 		g.flagsGone = false;
@@ -973,11 +976,13 @@ void OnFrame(bool simulating) {
 	if (g_scanEdicts) ScanEdicts(engine::TickCount(), restored);
 	if (g.stopWhenRestored && !g.save.Busy()) {
 		Stop(false);  // (the stop that waited for the save or the restore to be over)
+	} else if (restored && g.save.toBase) {
+		ContinueFromBase();
 	} else if (saveEvent == SaveEvent::RestoreFailed) {
 		// (the attempt was set up for a level that didn't come back: with the save state gone, this restarts it)
 		Start(g.handover, g.watch);
 	}
-	if (g.save.handover >= 0 && !g.save.Busy() && engine::RecordingDemo()) g.demoSinceSnapshot = true;
+	if ((g.save.handover >= 0 || g.save.baseCursor >= 0) && !g.save.Busy() && engine::RecordingDemo()) g.demoSinceSnapshot = true;
 	TickDemoRestart();
 	ReleaseStaleBoard();
 	if (g.retryAsked) {
@@ -1060,7 +1065,7 @@ Status CurrentStatus() {
 	s.mapLoaded = MapMatches();
 	s.attempts = g.attempts;
 	s.results = g.results;
-	static const char *const modes[] = {"idle", "reloading", "waiting", "setting up", "lead-in", "run", "watch", "done"};
+	static const char *const modes[] = {"idle", "reloading", "waiting", "setting up", "lead-in", "run", "watch", "done", "setting up"};
 	s.mode = modes[static_cast<int>(g.mode)];
 	s.active = g.mode != Mode::Idle;
 	s.watching = g.watch;
@@ -1080,8 +1085,8 @@ Status CurrentStatus() {
 		}
 	const float dt = r.tickInterval;
 	char text[64];
-	if (g.mode == Mode::LeadIn || g.mode == Mode::CatchUp) {
-		if (g.mode == Mode::CatchUp) s.note = "setting up the level";
+	if (g.mode == Mode::LeadIn || g.mode == Mode::CatchUp || g.mode == Mode::GoingBack) {
+		if (g.mode != Mode::LeadIn) s.note = "setting up the level";
 		else {
 			snprintf(text, sizeof(text), g.replaying ? "replay starts in %.1f" : "you take over in %.1f", (g.handover - g.cursor) * dt);
 			s.note = text;

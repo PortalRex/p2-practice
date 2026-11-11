@@ -12,6 +12,10 @@ namespace trainer {
 // same attempt returns to that instead of restarting the level and replaying the run up to the part. What is held
 // and what is under way is in g.save (SaveState, trainer_internal.h).
 constexpr const char *kSnapshotName = "p2practice";
+// A second one is kept beside it, the level's base state (SaveState, RestoreBase): each costs its size in memory
+// (some 300 MB), and going back to the one that wasn't stored or restored last copies all of it instead of only
+// what changed (a tenth of a second instead of a few milliseconds).
+constexpr const char *kBaseName = "p2practice_base";
 int g_snapshotDelayTicks = 3;  // lets the portals and objects just placed (queued inputs) take effect first (prac_debug snapdelay)
 
 // Whether ChocolateLoading is in the game and is a build the trainer can work with: one that says when a save or
@@ -66,17 +70,31 @@ void ReleaseThreads() {
 	if (g.savedThreadedParticles != 0) engine::Execute("%s %d", kParticlesCvar, g.savedThreadedParticles);
 }
 
-// Forgets the save state and has ChocolateLoading free it. (Not for the middle of a restore: see Stop.)
+static const char *AttemptName() {
+	return g.save.atBase ? kBaseName : kSnapshotName;
+}
+
+static void Free(const char *name) {
+	if (engine::CommandExists("snap_drop")) engine::Execute("snap_drop %s", name);
+}
+
+// Forgets the save states, the attempt's and the level's base, and has ChocolateLoading free them. (Not for the
+// middle of a restore: see Stop.)
 void DropSnapshot() {
-	if (g.save.handover < 0) return;
+	if (g.save.handover >= 0 && !g.save.atBase) Free(kSnapshotName);
+	if (g.save.baseCursor >= 0) Free(kBaseName);
 	g.save.handover = -1;
-	if (engine::CommandExists("snap_drop")) engine::Execute("snap_drop %s", kSnapshotName);
+	g.save.baseCursor = -1;
+	g.save.baseModels.clear();
+	// (one being stored right now is freed when it is there: TickSaveState, which has to know which it was)
+	if (g.save.phase != SavePhase::Saving) g.save.atBase = false;
 }
 
 // The level is gone, and whatever was held or under way with it
 void ForgetSaveState() {
-	DropSnapshot();
 	g.save.phase = SavePhase::Idle;
+	g.save.toBase = false;
+	DropSnapshot();
 }
 
 // Save states and demos. ChocolateLoading keeps every file open that a save state holds, so that a restore can go
@@ -142,6 +160,15 @@ static SetupChoices CurrentChoices() {
 	return c;
 }
 
+// Whether the level's own clock is where the run's is (see LevelClock): in single player, where the level's lifts
+// and timers matter to every attempt, only such a level can be a base. While the run plays itself the trainer's
+// tick is one behind the level's clock, which has already counted the tick being played.
+static bool InStepWithLevel() {
+	constexpr int kClockAhead = 1;
+	int clock = LevelClock();
+	return g.route.coop || clock == kNoClock || clock - g.cursor <= kClockAhead;
+}
+
 // A lead-in begins: its snapshot is taken a few ticks in
 void ScheduleSnapshot() {
 	if (g.save.Busy()) return;
@@ -174,7 +201,13 @@ void TakeSnapshotIfDue() {
 		g.save.dueIn = 1;  // (a tick later, when the game has run the commands that switch them off)
 		return;
 	}
-	// (the one held until now is replaced: ChocolateLoading keeps one snapshot per name)
+	// A level the run hasn't been further in than this moment is as the run had it here: its first save state is
+	// the base, which later attempts further back in the run start from. (Kept under its own name; the attempt's
+	// own, when one is held, is of no use beside it.)
+	bool base = g.save.baseCursor < 0 && g.worldReached <= g.cursor && InStepWithLevel();
+	if (base && g.save.handover >= 0 && !g.save.atBase) Free(kSnapshotName);
+	g.save.atBase = base;
+	// (the attempt's own held until now is replaced: ChocolateLoading keeps one snapshot per name)
 	g.save.handover = g.handover;
 	g.save.watch = g.watch;
 	g.save.choices = CurrentChoices();
@@ -188,7 +221,7 @@ void TakeSnapshotIfDue() {
 	StopDemoForSnapshot();
 	g.save.holdsDemo = engine::RecordingDemo();
 	g.demoSinceSnapshot = false;
-	engine::Execute("snap_save %s", kSnapshotName);
+	engine::Execute("snap_save %s", AttemptName());
 	BeginOperation(SavePhase::Saving);
 }
 
@@ -216,9 +249,46 @@ bool RestoreSnapshot(int handover, bool watch) {
 	}
 	engine::FlushScript();
 	StopDemoForRestore();
-	engine::Execute("snap_load %s", kSnapshotName);
+	engine::Execute("snap_load %s", AttemptName());
 	BeginOperation(SavePhase::Restoring);
+	g.save.toBase = false;
 	return true;
+}
+
+// Brings the level back to its base save state for an attempt whose lead-in starts at `leadStart`, when the base
+// is from no later than that (or from so little later that the run did nothing to the level in between: the base
+// of an attempt at the run's very start is a few ticks into it). True when it is on its way: ContinueFromBase sets the attempt up once it is there
+// (the run is played quickly from the base to the lead-in, and the attempt gets a save state of its own). This is
+// what makes an attempt further back instant and right at once: without it the level either keeps what the run
+// did later (a door stands open) or has to be restarted.
+bool RestoreBase(int leadStart) {
+	if (g.save.phase != SavePhase::Idle || g.save.baseCursor < 0) return false;
+	if (g.save.baseCursor > leadStart && WorldEventsBetween(DriverTick(leadStart), DriverTick(g.save.baseCursor - 1))) return false;
+	// In single player the level's own clock goes back with the level, and the attempt has to be able to join it
+	// there (Approach, LevelClock): so close to the handover that it couldn't, the level's lifts and timers would
+	// be out of step with the run, where a restart puts them in step.
+	if (!g.route.coop && g.save.baseClock != kNoClock && g.save.baseClock > g.handover - kShortestLeadTicks) return false;
+	if (!SnapshotsUsable() || g.slots.empty()) return false;
+	// (whatever the settings were when it was taken: the attempt is set up afresh in it, robots, partner and ghosts)
+	if (g_logArrivals) engine::Print("[clock] going back to the base save state (run tick %d, level clock %d) for the attempt at %d\n", g.save.baseCursor, g.save.baseClock, g.handover);
+	PinThreads();
+	g.mode = Mode::GoingBack;
+	engine::FlushScript();
+	StopDemoForRestore();
+	engine::Execute("snap_load %s", kBaseName);
+	BeginOperation(SavePhase::Restoring);
+	g.save.toBase = true;
+	return true;
+}
+
+// The level is back at its base state: what the plugin knows about the level is set back to that moment too, and
+// the attempt asked for is set up from there.
+void ContinueFromBase() {
+	g.save.toBase = false;
+	g.worldReached = g.save.baseCursor - 1;  // (the run's ticks before the base's moment are in it)
+	g.registeredModels = g.save.baseModels;
+	// (the attempt's own save state, if it isn't the base itself, stays good until the next lead-in replaces it)
+	if (g.mode == Mode::GoingBack) Approach();
 }
 
 // Every frame, before anything else: sees the save or the restore asked for come to its end. The first frame
@@ -237,24 +307,35 @@ SaveEvent TickSaveState() {
 	if (saving) {
 		if (failed) {
 			g.save.handover = -1;
+			g.save.atBase = false;
 			engine::Warn("ChocolateLoading could not store the save state: the next retry restarts the level.\n");
 			return SaveEvent::SaveFailed;
 		}
 		if (g.save.handover < 0) {
 			// (dropped while it was being stored: at the flags, see DropSnapshotAtFlags)
-			if (engine::CommandExists("snap_drop")) engine::Execute("snap_drop %s", kSnapshotName);
+			Free(AttemptName());
+			g.save.atBase = false;
 			return SaveEvent::Saved;
 		}
 		g.save.cursor = g.cursor;
 		g.save.startScreenOpen = !g.startScreenClosed;
+		if (g.save.atBase) {
+			g.save.baseCursor = g.save.cursor;
+			g.save.baseClock = LevelClock();
+			if (g_logArrivals) engine::Print("[clock] base save state stored: run tick %d, level clock %d\n", g.save.baseCursor, g.save.baseClock);
+			g.save.baseStartScreenOpen = g.save.startScreenOpen;
+			g.save.baseHoldsDemo = g.save.holdsDemo;
+			g.save.baseModels = g.registeredModels;
+		}
 		return SaveEvent::Saved;
 	}
 	if (failed) {
+		g.save.toBase = false;
 		DropSnapshot();
 		engine::Warn("ChocolateLoading could not bring the save state back: restarting the level instead.\n");
 		return SaveEvent::RestoreFailed;
 	}
-	g.cursor = g.save.cursor;
+	g.cursor = g.save.toBase ? g.save.baseCursor : g.save.cursor;
 	return SaveEvent::Restored;
 }
 

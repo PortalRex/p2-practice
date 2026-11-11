@@ -1,0 +1,98 @@
+From 6808d7851ad99567320c0c9680da0efbec682d9d Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 18:48:51 -0600
+Subject: [PATCH] pinset: an object only another snapshot refers to is not
+ destroyed while its memory is away (crash in DestroyMP3StreamDecoder when a
+ snapshot was replaced after a restore of an older one)
+
+---
+ src/pinset.h | 30 ++++++++++++++++++++++++------
+ 1 file changed, 24 insertions(+), 6 deletions(-)
+
+diff --git a/src/pinset.h b/src/pinset.h
+index 2ea16ff..b98d26e 100644
+--- a/src/pinset.h
++++ b/src/pinset.h
+@@ -5,6 +5,13 @@
+ // refers to, the destruction is deferred; an object that no snapshot refers to and that the current
+ // timeline does not have is really destroyed. A restore makes the restored snapshot's objects alive
+ // again and discards the others (Discard before the memory is restored, Revive after).
++//
++// With more than one snapshot, an object that only another snapshot refers to stays in the set through a
++// restore, but the memory it lives in does not: that goes back to the restored timeline, which never had
++// the object. Such an object is "away" until its own snapshot is restored. It cannot be destroyed while
++// away (the game's destroy function would run on memory that holds something else: a crash in
++// DestroyMP3StreamDecoder when a snapshot was replaced after a restore of an older one), so when its last
++// snapshot goes first, it is forgotten instead: what it held outside the game's memory is leaked.
+ #pragma once
+ #include <windows.h>
+ #include "slotmask.h"
+@@ -19,7 +26,7 @@ public:
+         EnterCriticalSection(&cs_);
+         int i = find(p);   // an address reused after a destruction we did not see: a new object
+         if (i < 0 && n_ < N) i = n_++;
+-        if (i >= 0) e_[i] = Ent{ p, 0, true };
++        if (i >= 0) e_[i] = Ent{ p, 0, true, false };
+         else overflow_ = true;
+         LeaveCriticalSection(&cs_);
+     }
+@@ -49,10 +56,15 @@ public:
+     // Before restoring `slot`: the objects the restored timeline will not have are no longer alive; those
+     // no snapshot refers to are destroyed (their owners, being discarded, are still intact).
+     template <class Destroy> int Discard(int slot, Destroy destroy) {
+-        return remove_where([slot](Ent& x) {
++        int n = remove_where([slot](Ent& x) {
+             if (!(x.mask & SlotBit(slot))) x.alive = false;
+             return !x.alive && !x.mask;
+         }, destroy);
++        // (what stays without being the restored snapshot's is another snapshot's alone: away from now on)
++        EnterCriticalSection(&cs_);
++        for (int i = 0; i < n_; i++) if (!(e_[i].mask & SlotBit(slot))) e_[i].away = true;
++        LeaveCriticalSection(&cs_);
++        return n;
+     }
+ 
+     // After restoring `slot`: its objects are alive again.
+@@ -60,7 +72,10 @@ public:
+         int revived = 0;
+         EnterCriticalSection(&cs_);
+         for (int i = 0; i < n_; i++)
+-            if ((e_[i].mask & SlotBit(slot)) && !e_[i].alive) { e_[i].alive = true; revived++; }
++            if (e_[i].mask & SlotBit(slot)) {
++                e_[i].away = false;
++                if (!e_[i].alive) { e_[i].alive = true; revived++; }
++            }
+         LeaveCriticalSection(&cs_);
+         return revived;
+     }
+@@ -74,7 +89,7 @@ public:
+     }
+ 
+ private:
+-    struct Ent { void* p; SlotMask mask; bool alive; };
++    struct Ent { void* p; SlotMask mask; bool alive; bool away; };
+     Ent  e_[N];
+     int  n_ = 0;
+     bool overflow_ = false;
+@@ -86,13 +101,16 @@ private:
+     }
+ 
+     // Removes the entries for which pred (which may update them) returns true, then destroys them
+-    // outside the lock.
++    // outside the lock (all but those away, which are only forgotten).
+     template <class Pred, class Destroy> int remove_where(Pred pred, Destroy destroy) {
+         void* doomed[N];
+         int n = 0;
+         EnterCriticalSection(&cs_);
+         for (int i = 0; i < n_;)
+-            if (pred(e_[i])) { doomed[n++] = e_[i].p; e_[i] = e_[--n_]; }
++            if (pred(e_[i])) {
++                if (!e_[i].away) doomed[n++] = e_[i].p;
++                e_[i] = e_[--n_];
++            }
+             else i++;
+         LeaveCriticalSection(&cs_);
+         for (int i = 0; i < n; i++) destroy(doomed[i]);
+-- 
+2.43.0.windows.1
+

@@ -177,7 +177,9 @@ level's state changed (SAR's records) and what the level's clock showed when the
   left to the game's physics, put back on its path only if it strays. Every button, door and laser ends up as the
   run had it.
 - **Save state.** With [save states](#save-states) on, neither is needed: the whole game goes back to a moment
-  into the lead-in.
+  into the lead-in. The first save state taken in a level is kept as its base: an attempt that starts
+  before where the level has got to (a door the run opened later) goes back to the base and replays the run
+  quickly from there, instead of restarting the level or, with Instant, leaving the door open.
 
 At the handover you get the run's exact position, aim, speed and portals, and whatever the run was carrying at
 that moment is put in your hands.

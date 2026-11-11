@@ -131,7 +131,8 @@ void Finish(bool atFlags) {
 // for real and renamed as usual; a retry after the finish restarts the level. (Called from every frame, paused or
 // not, in every mode: the board pauses the game, and a run watched to its end or replayed reaches the flags too.)
 void DropSnapshotAtFlags() {
-	if (g.save.handover < 0 || !g.save.holdsDemo || !g.flagsUp || engine::EntityExists(kEndNode)) return;
+	bool holdsDemo = (g.save.handover >= 0 && g.save.holdsDemo) || (g.save.baseCursor >= 0 && g.save.baseHoldsDemo);
+	if (!holdsDemo || !g.flagsUp || engine::EntityExists(kEndNode)) return;
 	DropSnapshot();
 	engine::Print("At the flags: the save state is dropped so the demo can be closed (the next attempt restarts the level).\n");
 }

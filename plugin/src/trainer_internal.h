@@ -3,6 +3,7 @@
 #pragma once
 
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <map>
 #include <set>
@@ -28,6 +29,7 @@ enum class Mode {
 	Run,             // the players are in control
 	Watch,           // the run plays itself to the end
 	Done,            // finished: the result stays up for a moment
+	GoingBack,       // the level's base save state is on its way back: the attempt is set up in it when it is there
 };
 
 // The save state for retries (a ChocolateLoading snapshot of the level a moment into a lead-in) and the one
@@ -69,6 +71,17 @@ struct SaveState {
 	int cursor = 0;                // the run tick it was taken at
 	bool startScreenOpen = false;  // the start board hadn't come and gone yet when it was taken
 	bool holdsDemo = false;        // a demo was being recorded when it was taken (see DropSnapshotAtFlags)
+	bool atBase = false;           // it is the base state itself (the attempt whose lead-in the base was taken in)
+
+	// The base state: the first one stored in a level that the run hadn't been further in yet, kept beside the
+	// attempt's own. An attempt that starts before where the level has got to since (a door the run opened later
+	// stands open) has the level brought back to the base and set up from there: see RestoreBase.
+	int baseCursor = -1;           // the run tick it was taken at, -1: none held
+	int baseClock = 0;             // the level's own clock at that moment (LevelClock)
+	bool baseStartScreenOpen = false;
+	bool baseHoldsDemo = false;
+	std::set<std::string> baseModels;  // the ghost models registered with the game by then
+	bool toBase = false;           // the restore under way is one to the base state
 
 	bool Busy() const { return phase == SavePhase::Saving || phase == SavePhase::Restoring; }
 };
@@ -262,6 +275,11 @@ bool MapMatches();
 bool BusyRestoring();
 void Stop(bool announce);
 void Start(int handover, bool watch);
+void Approach();
+bool WorldEventsBetween(int after, int upTo);
+constexpr int kNoClock = INT_MIN;          // LevelClock: the run's demo doesn't say what the level's clock showed
+constexpr int kShortestLeadTicks = 10;     // the least the run plays itself before the handover (a sixth of a second)
+int LevelClock();
 void StartPart(int part, bool watch);
 bool ChallengeMode();
 void CloseGameScreens();
@@ -303,6 +321,8 @@ void ScheduleSnapshot();
 void CancelDueSnapshot();
 void TakeSnapshotIfDue();
 bool RestoreSnapshot(int handover, bool watch);
+bool RestoreBase(int leadStart);
+void ContinueFromBase();
 enum class SaveEvent { None, Saved, SaveFailed, Restored, RestoreFailed };
 SaveEvent TickSaveState();
 

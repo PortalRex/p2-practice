@@ -449,7 +449,7 @@ void CmdDebug(const sdk::CCommand &args) {
 		engine::PrintRawState();
 		return;
 	}
-	static const char *const modes[] = {"idle", "reloading", "waiting for players", "catching up", "lead-in", "run", "watch", "done"};
+	static const char *const modes[] = {"idle", "reloading", "waiting for players", "catching up", "lead-in", "run", "watch", "done", "going back"};
 	engine::Print("map %s, tick %d, mode %s, cursor %d, handover %d, world reached %d\n", engine::MapName(), engine::TickCount(),
 	              modes[static_cast<int>(g.mode)], g.cursor, g.handover, g.worldReached);
 	for (const LivePlayer &p : LivePlayers())
