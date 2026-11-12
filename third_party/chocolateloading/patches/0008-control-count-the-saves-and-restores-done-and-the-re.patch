@@ -1,22 +1,22 @@
-From b5b4879e4fd8d64f55dba1585a0c1842405ed358 Mon Sep 17 00:00:00 2001
+From acb7e70c2fea52bdd814637acc0ba92e3237fdf4 Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 08:01:47 -0600
-Subject: [PATCH 10/10] control: count the saves and restores done and the
+Subject: [PATCH 08/10] control: count the saves and restores done and the
  requests failed; export ChocoGetSnapshotStatus so a plugin can wait for the
  operation it asked for
 
 ---
  AGENTS.md       |  2 ++
  src/control.cpp | 10 ++++++++--
- src/control.h   |  6 ++++++
+ src/control.h   |  5 +++++
  src/plugin.cpp  | 20 ++++++++++++++++++++
- 4 files changed, 36 insertions(+), 2 deletions(-)
+ 4 files changed, 35 insertions(+), 2 deletions(-)
 
 diff --git a/AGENTS.md b/AGENTS.md
-index cf6c413..d643cdc 100644
+index 39ad931..ec8f0e9 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -303,6 +303,8 @@ the memory it brought back is the locked state of that moment. `snap_opt render_
+@@ -312,6 +312,8 @@ the memory it brought back is the locked state of that moment. `snap_opt render_
  behaviour (a snapshot taken that way can only be restored that way). Tested with -vulkan: 60-80 restores
  in a row in sp_a2_laser_stairs and mp_coop_laser_2 (the maps that crashed) and level changes after them.
  
@@ -26,7 +26,7 @@ index cf6c413..d643cdc 100644
  - Shorter snap_load latency: a request waits 4 frames for the workers to drain unless the threading
    cvars are already forced - now longer than the restore itself (~9 ms). Keeping them forced while a
 diff --git a/src/control.cpp b/src/control.cpp
-index f91b5c5..f352d9f 100644
+index 46b3c37..975d791 100644
 --- a/src/control.cpp
 +++ b/src/control.cpp
 @@ -22,6 +22,7 @@ double   g_request_time = 0;
@@ -35,9 +35,9 @@ index f91b5c5..f352d9f 100644
  char     g_domain[1024] = "";
 +Counts   g_done = {};
  
- // ---- stress test (snap_test / autotest) -------------------------------------------------------
- int      g_test_cycles = 0;
-@@ -104,6 +105,9 @@ void run_pending() {
+ // ---- map start save (snap_save_start) ---------------------------------------------------------
+ bool     g_start_armed = false;
+@@ -110,6 +111,9 @@ void run_pending() {
          if (ok) sarlink::RecordDemoCommand("snap_load", name);   // the demo is back at the save now
      }
      sarlink::UpdateHud();
@@ -47,7 +47,7 @@ index f91b5c5..f352d9f 100644
      if (!ok) util::ConWarn("[snap] %s of '%s' failed: %s", op == OP_SAVE ? "save" : "restore", name, err);
      else if (op == OP_LOAD) util::Con("[snap] snap_load: %.0f ms from the command to the restored state (%u frames)", (util::Now() - g_request_time) * 1000.0, g_frame - g_request_frame);
  }
-@@ -111,8 +115,8 @@ void run_pending() {
+@@ -117,8 +121,8 @@ void run_pending() {
  // ---- console commands ---------------------------------------------------------------------------
  const char* name_arg(const CCommand& a) { return a.ArgC() >= 2 ? a.Arg(1) : snapshot::DEFAULT_NAME; }
  
@@ -55,10 +55,10 @@ index f91b5c5..f352d9f 100644
 -void cmd_load(const CCommand& a) { Request(OP_LOAD, name_arg(a)); }
 +void cmd_save(const CCommand& a) { if (!Request(OP_SAVE, name_arg(a))) g_done.failed++; }
 +void cmd_load(const CCommand& a) { if (!Request(OP_LOAD, name_arg(a))) g_done.failed++; }
+ void cmd_save_start(const CCommand& a) { ArmStartSave(name_arg(a)); }
  void cmd_list(const CCommand&) { snapshot::PrintList(); }
  void cmd_info(const CCommand&) { snapshot::PrintInfo(); }
- 
-@@ -223,6 +227,7 @@ bool Request(Op op, const char* name) {
+@@ -253,6 +257,7 @@ void OnGameFrame(bool simulating) {
  }
  
  bool Busy() { return g_pending != OP_NONE; }
@@ -66,7 +66,7 @@ index f91b5c5..f352d9f 100644
  uint32_t Frame() { return g_frame; }
  
  void OnFrameStart() {
-@@ -267,6 +272,7 @@ void OnLevelInit(const char* map) {
+@@ -318,6 +323,7 @@ void OnLevelInit(const char* map) {
  }
  
  void OnLevelShutdown() {
@@ -75,14 +75,13 @@ index f91b5c5..f352d9f 100644
      g_test_cycles = 0;
      snapshot::OnLevelShutdown();
 diff --git a/src/control.h b/src/control.h
-index ba62596..47372e1 100644
+index 9f4cc52..d7b637b 100644
 --- a/src/control.h
 +++ b/src/control.h
-@@ -19,6 +19,12 @@ void RegisterCommands();
- // snapshot when there are already snapshot::MAX_SNAPSHOTS.
- bool Request(Op op, const char* name);
- bool Busy();                  // an operation is queued
-+
+@@ -26,6 +26,11 @@ bool Busy();                  // an operation is queued
+ // "[snap] map start save of '<name>' missed: ..." when it could not be taken before the first tick.
+ bool ArmStartSave(const char* name);
+ void OnGameFrame(bool simulating);   // server plugin GameFrame callback
 +// What became of the requests so far, for a plugin that drives snapshots and waits for each (the export
 +// ChocoGetSnapshotStatus): every request ends up counted once, as a save done, a restore done, or as failed
 +// (refused, gone wrong, or dropped because the level ended first).
@@ -92,7 +91,7 @@ index ba62596..47372e1 100644
  uint32_t Frame();             // FRAME_STARTs seen so far
  
 diff --git a/src/plugin.cpp b/src/plugin.cpp
-index a2bcc6e..b9d69be 100644
+index 137be78..abaf512 100644
 --- a/src/plugin.cpp
 +++ b/src/plugin.cpp
 @@ -294,6 +294,26 @@ extern "C" __declspec(dllexport) int ChocoRestoresDeviceState() {

@@ -1,7 +1,7 @@
-From 998de6dda68e6761f0b949c47746ddc648130e4c Mon Sep 17 00:00:00 2001
+From 740860b48282bd9d0bed0ad73a69601d9970e5de Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Sun, 8 Nov 2026 20:37:17 -0600
-Subject: [PATCH 06/10] control: no 4-frame wait when the threading cvars have
+Subject: [PATCH 04/10] control: no 4-frame wait when the threading cvars have
  been 0 for a while; frame count in the snap_load line
 
 ---
@@ -9,7 +9,7 @@ Subject: [PATCH 06/10] control: no 4-frame wait when the threading cvars have
  1 file changed, 26 insertions(+), 3 deletions(-)
 
 diff --git a/src/control.cpp b/src/control.cpp
-index d7713a0..16f77b5 100644
+index ba13077..c522730 100644
 --- a/src/control.cpp
 +++ b/src/control.cpp
 @@ -19,6 +19,7 @@ char     g_pending_name[snapshot::MAX_NAME] = "";
@@ -20,7 +20,7 @@ index d7713a0..16f77b5 100644
  int      g_levelinits = 0;
  char     g_domain[1024] = "";
  
-@@ -59,6 +60,25 @@ void force_threading_off(bool on) {
+@@ -65,6 +66,25 @@ void force_threading_off(bool on) {
      g_forced = on;
  }
  
@@ -46,7 +46,7 @@ index d7713a0..16f77b5 100644
  void set_name(char* dst, const char* name) {
      strncpy(dst, name, snapshot::MAX_NAME - 1);
      dst[snapshot::MAX_NAME - 1] = 0;
-@@ -79,7 +99,7 @@ void run_pending() {
+@@ -85,7 +105,7 @@ void run_pending() {
      }
      sarlink::UpdateHud();
      if (!ok) util::ConWarn("[snap] %s of '%s' failed: %s", op == OP_SAVE ? "save" : "restore", name, err);
@@ -55,7 +55,7 @@ index d7713a0..16f77b5 100644
  }
  
  // ---- console commands ---------------------------------------------------------------------------
-@@ -184,12 +204,13 @@ bool Request(Op op, const char* name) {
+@@ -192,12 +212,13 @@ bool Request(Op op, const char* name) {
          util::ConWarn("[snap] %d snapshots already exist: drop one first (snap_drop <name>)", snapshot::MAX_SNAPSHOTS);
          return false;
      }
@@ -71,7 +71,7 @@ index d7713a0..16f77b5 100644
      return true;
  }
  
-@@ -198,6 +219,8 @@ uint32_t Frame() { return g_frame; }
+@@ -228,6 +249,8 @@ uint32_t Frame() { return g_frame; }
  
  void OnFrameStart() {
      g_frame++;

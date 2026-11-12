@@ -1,0 +1,59 @@
+From e03c5db95f4870e6b5f1c6610e232ef8da96716e Mon Sep 17 00:00:00 2001
+From: Blenderiste09 <heerra.florian@gmail.com>
+Date: Thu, 12 Nov 2026 17:00:38 +0100
+Subject: [PATCH 10/10] copypool: wait for the workers to start before the
+ first save uses them
+
+The pool is created by the first save, right before it suspends every
+other thread. A worker still running its DLL thread attach (loader lock,
+tier0_s) then waits forever on a lock held by a suspended thread, and
+Run() spins waiting for it: the game froze in Run during snap_save
+(seen with several search instances started together). Start() now waits
+up to 5 s for every worker to reach its loop, and uses none if some are
+late.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/copypool.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/copypool.cpp b/src/copypool.cpp
+index 6b5e370..44a315c 100644
+--- a/src/copypool.cpp
++++ b/src/copypool.cpp
+@@ -17,6 +17,7 @@ void*         g_ctx = nullptr;
+ int           g_parts = 0;
+ volatile LONG g_next = 0;
+ volatile LONG g_idle = 0;         // workers done with the current job
++volatile LONG g_started = 0;      // workers that got to their loop
+ 
+ void run_parts() {
+     for (LONG i; (i = InterlockedIncrement(&g_next) - 1) < g_parts;) g_fn(g_ctx, (int)i);
+@@ -24,6 +25,7 @@ void run_parts() {
+ 
+ DWORD WINAPI worker(void* arg) {
+     HANDLE go = (HANDLE)arg;
++    InterlockedIncrement(&g_started);
+     for (;;) {
+         WaitForSingleObject(go, INFINITE);
+         run_parts();
+@@ -47,6 +49,16 @@ bool Start(int workers) {
+         CloseHandle(t);
+         g_workers++;
+     }
++    // A new thread first runs every DLL's thread attach (loader lock, tier0's own lock...). The first save
++    // creates the pool right before it suspends every other thread: a worker still in its attach would
++    // wait forever for a lock held by a suspended thread, and Run() would spin waiting for it (seen: the
++    // game frozen in Run, two workers blocked in LdrInitializeThunk / tier0_s). Wait for them to start.
++    for (int ms = 0; g_started < g_workers && ms < 5000; ms++) Sleep(1);
++    if (g_started < g_workers) {
++        // which ones are late is unknown: hand jobs to none (everything runs on the calling thread)
++        util::Log("copypool: only %d of %d copy workers started, not using them", (int)g_started, g_workers);
++        g_workers = 0;
++    }
+     util::Log("copypool: %d copy workers", g_workers);
+     return g_workers == workers;
+ }
+-- 
+2.43.0.windows.1
+

@@ -1,7 +1,7 @@
-From 14dfb019c999651fe2267a40f9b6f6bce021a6a6 Mon Sep 17 00:00:00 2001
+From 44fea8072be8352e52bce134d322c3f49e7bcb42 Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Sun, 8 Nov 2026 20:37:17 -0600
-Subject: [PATCH 05/10] cvars outside the snapshot keep a valid value string
+Subject: [PATCH 03/10] cvars outside the snapshot keep a valid value string
  across a restore (SAR's sar_record_prefix pointed at a freed block: mangled
  demo names, crashes)
 

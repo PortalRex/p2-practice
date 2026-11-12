@@ -5,9 +5,9 @@ Redistributed with P2 Practice with the author's permission.
 P2 Practice uses it for save states (the launcher's SAVE STATES switch): a retry puts the whole level back as it
 was a moment into the part, in about 10 ms.
 
-This build is ChocolateLoading at commit 9220fe1 (2026-10-20) with fixes and additions of P2 Practice's. fixes.patch has
-all of them together; patches\ has them as separate commits (git am). NOTE_FOR_BLENDERISTE09.md explains the fixes
-for the author.
+This build is ChocolateLoading at commit 5a47744 (2026-11-09) with fixes and additions of P2 Practice's. fixes.patch has
+all of them together; patches\ has them as separate commits (git am). Changes 1 and 2 below have since been taken
+into ChocolateLoading itself, so they are no longer in the patches; 12 is the author's own fix, not yet in a release.
 
 1. 16-byte alignment. The heap that holds the game's memory handed out blocks aligned to 8 bytes; tier0's own
    heap aligns to 16, and the game's SSE code relies on it. On gel maps the paint-contact code then faulted
@@ -69,6 +69,17 @@ for the author.
    rendering stays on (9). P2 Practice compares the counts with what they were when it sent snap_save or
    snap_load, so it knows the moment its operation is done or has failed instead of waiting a number of frames,
    and it offers save states only with a ChocolateLoading that has this export.
+
+11. Snapshots that share an object. Sound decoders and video objects made after a save are destroyed when a
+   restore takes their memory back. With two snapshots (P2 Practice keeps one of the level's start and one of the
+   attempt's), an object only the newer one referred to was destroyed a second time when that snapshot was
+   replaced after a restore of the older one, by then through memory that had been rewound: a crash in the MP3
+   decoder. Such an object is now forgotten instead.
+
+12. Copy workers. The first save creates the threads that copy pages and then suspends every other thread; a
+   worker still starting up could be left waiting on a lock held by a suspended thread, and the game froze in
+   that save. The first save now waits for the workers to be running (the author's fix, from the branch
+   fix/copypool-worker-start).
 
 Files: chocoload.exe (starts Portal 2 with the DLL loaded before the engine) and chocolateloading.dll. The
 launcher copies both into the Portal 2 folder when save states are on.

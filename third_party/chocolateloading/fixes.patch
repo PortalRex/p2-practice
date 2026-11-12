@@ -1,5 +1,5 @@
 diff --git a/AGENTS.md b/AGENTS.md
-index 03e38d0..d643cdc 100644
+index 9830a6b..ec8f0e9 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -82,7 +82,7 @@ imports only KERNEL32: tier0/vstdlib/engine/client are resolved at runtime.
@@ -11,7 +11,7 @@ index 03e38d0..d643cdc 100644
     (show/set the captured modules).
  - Log file: `<Portal 2>\chocolateloading.log` (always written, even without `-condebug`).
  
-@@ -149,8 +149,9 @@ initialisation, `memhook::InstallEarly` patches the `CStdMemAlloc` vtable (found
+@@ -150,8 +150,9 @@ initialisation, `memhook::InstallEarly` patches the `CStdMemAlloc` vtable (found
     log lists them as `vatrack:   <owner> <base> reserved/committed`.
  
  **Save / restore.** Requested from the console, they run at the next safe `FRAME_START` (`control.cpp`):
@@ -23,7 +23,7 @@ index 03e38d0..d643cdc 100644
  is suspended, then memory is copied. The arena is reserved with MEM_WRITE_WATCH, so a restore copies back
  only the pages written since the snapshot; blocks allocated after the snapshot ("zombies") are freed,
  the free lists are rebuilt, `CEngine`'s real-time frame accumulators keep their current value, and held
-@@ -290,6 +291,20 @@ x2, 100 restores, quit), sp_a2_turret_intro (reload x2), sp_a2_bts3 (changelevel
+@@ -299,6 +300,20 @@ x2, 100 restores, quit), sp_a2_turret_intro (reload x2), sp_a2_bts3 (changelevel
  drop, and demos: an in-map session records `snap_save` / `snap_load`, ends with dem_stop and SAR's
  signature, and plays back with `playdemo`. Not verified: co-op.
  
@@ -45,10 +45,10 @@ index 03e38d0..d643cdc 100644
  - Shorter snap_load latency: a request waits 4 frames for the workers to drain unless the threading
    cvars are already forced - now longer than the restore itself (~9 ms). Keeping them forced while a
 diff --git a/README.md b/README.md
-index d4b1ba8..6094c55 100644
+index c83c47b..696eca6 100644
 --- a/README.md
 +++ b/README.md
-@@ -40,6 +40,7 @@ In a map (not in the main menu, not during a loading screen):
+@@ -41,6 +41,7 @@ In a map (not in the main menu, not during a loading screen):
  | `snap_list`           | the snapshots, their map and age                                         |
  | `snap_info`           | statistics (sizes, number of restores, ...)                              |
  | `snap_opt cross_map 1`| keep the snapshots when you go to another map (`0`, the default: drop them) |
@@ -57,19 +57,10 @@ index d4b1ba8..6094c55 100644
  Without a name, `snap_save`, `snap_load` and `snap_drop` use the snapshot `quick`. Names are letters,
  digits, `_`, `-` and `.` (up to 31, case-insensitive), e.g. `snap_save intro4_segmented`; up to 64
 diff --git a/src/arena.cpp b/src/arena.cpp
-index e72b6d3..5f95880 100644
+index c33226d..00dfac1 100644
 --- a/src/arena.cpp
 +++ b/src/arena.cpp
-@@ -1,13 +1,15 @@
- #define _CRT_SECURE_NO_WARNINGS
- // Snapshot-aware TLSF heap. See arena.h for the snapshot model.
- //
--// Block layout (all sizes are multiples of 8, header included):
-+// Block layout (all sizes are multiples of 16, header included; every header sits 8 bytes before a 16-byte
-+// boundary, so every payload is 16-byte aligned):
- //   +0 prev_size  size of the previous physical block, valid only when F_PREVFREE is set
- //   +4 sizef      size | flags
- //   +8 payload    (free blocks: next/prev free-list links)
+@@ -9,6 +9,7 @@
  // The heap ends with a 0-sized "sentinel" header at ctl->top.
  #include "arena.h"
  #include <windows.h>
@@ -77,18 +68,7 @@ index e72b6d3..5f95880 100644
  #include <string.h>
  #include <stdio.h>
  
-@@ -18,7 +20,9 @@ uintptr_t g_lo = 1, g_hi = 1;   // [g_lo, g_hi) = heap span used by Contains()
- namespace {
- 
- enum : uint32_t { F_FREE = 1, F_PREVFREE = 2, F_FROZEN = 4, F_MASK = 7 };
--const uint32_t ALIGN = 8, HDR = 8, MIN_BLOCK = 16;
-+// Blocks are multiples of 16 and every header sits 8 bytes before a 16-byte boundary, so every payload is
-+// 16-byte aligned, as tier0's own heap returns it (the game's SSE code, the paint contacts among it, relies on it).
-+const uint32_t ALIGN = 16, HDR = 8, MIN_BLOCK = 16;
- const uint32_t SL_LOG = 4, SL_COUNT = 1u << SL_LOG;
- const uint32_t FL_SHIFT = SL_LOG + 3;        // first FL class starts at 128 bytes
- const uint32_t SMALL = 1u << FL_SHIFT;
-@@ -61,6 +65,11 @@ template <class T> struct VArray {
+@@ -64,6 +65,11 @@ template <class T> struct VArray {
  };
  
  SRWLOCK      g_lock = SRWLOCK_INIT;
@@ -100,7 +80,7 @@ index e72b6d3..5f95880 100644
  uintptr_t    g_base = 0, g_reserve_end = 0, g_commit_end = 0;
  uintptr_t    g_heap_start = 0;
  Control*     g_ctl = nullptr;
-@@ -74,6 +83,32 @@ VArray<Range>  g_zombies;               // scratch for CollectZombies
+@@ -77,6 +83,32 @@ VArray<Range>  g_zombies;               // scratch for CollectZombies
  VArray<Range>  g_usable;                // scratch: post-snapshot usable ranges
  OldFreeFn    g_old_free = nullptr;
  
@@ -133,25 +113,7 @@ index e72b6d3..5f95880 100644
  inline uint32_t bsize(const Hdr* h) { return h->sizef & ~F_MASK; }
  inline Hdr*     next_phys(Hdr* h) { return (Hdr*)((char*)h + bsize(h)); }
  inline Hdr*     prev_phys(Hdr* h) { return (Hdr*)((char*)h - h->prev_size); }
-@@ -152,7 +187,7 @@ bool grow(uint32_t need) {
-     uintptr_t delta = ((uintptr_t)need + GROW_MIN + 0xFFFF) & ~(uintptr_t)0xFFFF;
-     uintptr_t new_top = old_top + delta;
-     if (new_top + HDR > g_reserve_end) {
--        delta = ((g_reserve_end - HDR - old_top) & ~(uintptr_t)7);
-+        delta = ((g_reserve_end - HDR - old_top) & ~(uintptr_t)(ALIGN - 1));
-         if (delta < need) return false;
-         new_top = old_top + delta;
-     }
-@@ -277,7 +312,7 @@ bool Init(size_t reserve_bytes) {
-     g_ctl = (Control*)g_base;
-     memset(g_ctl, 0, sizeof(Control));
-     g_ctl->magic = MAGIC;
--    g_heap_start = (g_base + sizeof(Control) + 63) & ~(uintptr_t)63;
-+    g_heap_start = ((g_base + sizeof(Control) + 63) & ~(uintptr_t)63) + HDR;   // (the first payload on a 16-byte boundary)
-     // initial sentinel only; the first allocation grows the heap
-     Hdr* s = (Hdr*)g_heap_start;
-     s->prev_size = 0;
-@@ -291,17 +326,17 @@ bool Init(size_t reserve_bytes) {
+@@ -294,17 +326,17 @@ bool Init(size_t reserve_bytes) {
  uintptr_t Base() { return g_base; }
  
  void* Alloc(size_t size) {
@@ -173,7 +135,7 @@ index e72b6d3..5f95880 100644
  }
  
  size_t UsableSize(const void* p) {
-@@ -315,7 +350,7 @@ void* Realloc(void* p, size_t n) {
+@@ -318,7 +350,7 @@ void* Realloc(void* p, size_t n) {
      if (n <= cur) return p;
      if (n > 0x7FFF0000u) return nullptr;
      uint32_t need = need_for(n);
@@ -182,7 +144,7 @@ index e72b6d3..5f95880 100644
      if (!(b->sizef & F_FROZEN)) {
          Hdr* nx = next_phys(b);
          if ((nx->sizef & F_FREE) && bsize(b) + bsize(nx) >= need) {
-@@ -335,7 +370,7 @@ void* Realloc(void* p, size_t n) {
+@@ -338,7 +370,7 @@ void* Realloc(void* p, size_t n) {
                  b->sizef = total | keep;
                  ((Hdr*)((char*)b + total))->sizef &= ~F_PREVFREE;
              }
@@ -191,7 +153,7 @@ index e72b6d3..5f95880 100644
              return p;
          }
      }
-@@ -344,12 +379,12 @@ void* Realloc(void* p, size_t n) {
+@@ -347,12 +379,12 @@ void* Realloc(void* p, size_t n) {
          memcpy(q, p, cur);
          free_locked(p);
      }
@@ -207,7 +169,7 @@ index e72b6d3..5f95880 100644
  bool SnapshotActive() { return g_snapshot; }
  
  static void walk_stats(Stats* st) {
-@@ -373,15 +408,15 @@ static void walk_stats(Stats* st) {
+@@ -376,15 +408,15 @@ static void walk_stats(Stats* st) {
  
  Stats GetStats() {
      Stats st;
@@ -226,17 +188,7 @@ index e72b6d3..5f95880 100644
      Hdr* h = (Hdr*)g_heap_start;
      Hdr* top = (Hdr*)(uintptr_t)g_ctl->top;
      bool prev_free = false;
-@@ -392,6 +427,9 @@ bool Check(char* err, size_t errlen) {
-         if (s < MIN_BLOCK || (uintptr_t)h + s > (uintptr_t)top) {
-             snprintf(err, errlen, "bad block size %u at %p", s, h); ok = false; break;
-         }
-+        if ((s & (ALIGN - 1)) || (((uintptr_t)h + HDR) & (ALIGN - 1))) {
-+            snprintf(err, errlen, "misaligned block (size %u) at %p", s, h); ok = false; break;
-+        }
-         if (((h->sizef & F_PREVFREE) != 0) != prev_free) {
-             snprintf(err, errlen, "PREVFREE mismatch at %p", h); ok = false; break;
-         }
-@@ -426,7 +464,7 @@ bool Check(char* err, size_t errlen) {
+@@ -432,7 +464,7 @@ bool Check(char* err, size_t errlen) {
              }
          if (ok && free_lists != free_walk) { snprintf(err, errlen, "free count %u vs lists %u", (unsigned)free_walk, (unsigned)free_lists); ok = false; }
      }
@@ -245,7 +197,7 @@ index e72b6d3..5f95880 100644
      if (ok && errlen) err[0] = 0;
      return ok;
  }
-@@ -603,21 +641,22 @@ bool FinishRestore(size_t kept, char* err, size_t errlen) {
+@@ -609,21 +641,22 @@ bool FinishRestore(size_t kept, char* err, size_t errlen) {
  void HeapSpan(uintptr_t* lo, uintptr_t* hi) { *lo = g_heap_start; *hi = g_ctl->top; }
  
  void DeferOldFree(void* p) {
@@ -289,76 +241,8 @@ index 4ac22d5..b5a7796 100644
  // internal fast-path data
  extern uintptr_t g_lo, g_hi;
  inline bool Contains(const void* p) { return (uintptr_t)p - g_lo < g_hi - g_lo; }
-diff --git a/src/callsite.cpp b/src/callsite.cpp
-index 316de82..2dd6681 100644
---- a/src/callsite.cpp
-+++ b/src/callsite.cpp
-@@ -9,7 +9,7 @@ namespace callsite {
- 
- namespace {
- 
--enum Cls { C_PASS = 1, C_SELF, C_GAME, C_OTHER };
-+enum Cls { C_PASS = 1, C_SELF, C_GAME, C_OTHER, C_HOOK };
- 
- // Cache of classified modules (append-only; an entry becomes visible once `ready` is set).
- struct ModEnt { uintptr_t base; int cls; char name[24]; volatile LONG ready; };
-@@ -53,6 +53,12 @@ bool is_passthrough(const char* n) {
-            !strcmp(n, "acgenral.dll") || !strcmp(n, "aclayers.dll") || !strcmp(n, "acspecfc.dll");
- }
- 
-+bool is_api_hooker(const char* n) {
-+    // Steam's overlay detours kernel32/kernelbase functions, VirtualAlloc among them, so while it is
-+    // enabled it stands between the game and kernelbase on every reservation (the hunk included).
-+    return !strcmp(n, "gameoverlayrenderer.dll");
-+}
-+
- int classify(uintptr_t addr, const char** name) {
-     *name = "";
-     MEMORY_BASIC_INFORMATION mbi;
-@@ -65,7 +71,7 @@ int classify(uintptr_t addr, const char** name) {
-         if (g_mc[i].ready && g_mc[i].base == base) { *name = g_mc[i].name; return g_mc[i].cls; }
-     char nm[64];
-     export_name(base, nm, sizeof(nm));
--    int cls = !nm[0] ? C_OTHER : is_passthrough(nm) ? C_PASS : in_modlist(nm) ? C_GAME : C_OTHER;
-+    int cls = !nm[0] ? C_OTHER : is_passthrough(nm) ? C_PASS : is_api_hooker(nm) ? C_HOOK : in_modlist(nm) ? C_GAME : C_OTHER;
-     LONG idx = InterlockedIncrement(&g_mc_count) - 1;
-     if (idx < 256) {
-         g_mc[idx].base = base;
-@@ -107,12 +113,16 @@ __declspec(noinline) bool DirectGameCaller(char* owner, size_t olen) {
-     void* frames[24];
-     USHORT n = g_backtrace(0, 24, frames, nullptr);
-     bool leading = true;
-+    int prev = 0;
-     for (USHORT i = 0; i < n; i++) {
-         const char* nm;
-         int c = classify((uintptr_t)frames[i], &nm);
-         if (c == C_SELF) { if (leading) continue; return false; }   // our own call
-         leading = false;
--        if (c == C_PASS) continue;
-+        if (c == C_PASS) { prev = c; continue; }
-+        // A detour frame is skipped only when it called the API layer directly (it is forwarding the
-+        // caller's call). Two in a row is the hooker's own code calling through its own detour.
-+        if (c == C_HOOK) { if (prev != C_PASS) return false; prev = c; continue; }
-         if (c != C_GAME) return false;   // ntdll (heap growth), the driver, Steam, ...
-         if (owner && olen) { strncpy(owner, nm, olen - 1); owner[olen - 1] = 0; }
-         return true;
-diff --git a/src/callsite.h b/src/callsite.h
-index 7ee1d1f..49ece75 100644
---- a/src/callsite.h
-+++ b/src/callsite.h
-@@ -4,7 +4,9 @@
- // heap growth in ntdll, the GPU driver, Steam, the overlay, our own code... Only the calls made by the
- // game's modules concern a snapshot. Walking the call stack outward from the hook, our own frames and
- // the thin API layers (kernelbase/kernel32 and the compatibility shims that wrap them) are skipped, and
--// the first other frame decides: it must lie in one of the listed game modules.
-+// the first other frame decides: it must lie in one of the listed game modules. The Steam overlay's
-+// detours are skipped too, but only a frame that called kernelbase/kernel32 directly (one forwarding
-+// the game's call); the overlay's own calls are still rejected.
- //
- // Classification is lock-free (VirtualQuery + the module's PE export name, cached), so it is safe in
- // hooks that run while other threads are suspended.
 diff --git a/src/control.cpp b/src/control.cpp
-index d7713a0..f352d9f 100644
+index ba13077..975d791 100644
 --- a/src/control.cpp
 +++ b/src/control.cpp
 @@ -19,8 +19,10 @@ char     g_pending_name[snapshot::MAX_NAME] = "";
@@ -370,9 +254,9 @@ index d7713a0..f352d9f 100644
  char     g_domain[1024] = "";
 +Counts   g_done = {};
  
- // ---- stress test (snap_test / autotest) -------------------------------------------------------
- int      g_test_cycles = 0;
-@@ -35,15 +37,21 @@ char     g_test_name[snapshot::MAX_NAME] = "";
+ // ---- map start save (snap_save_start) ---------------------------------------------------------
+ bool     g_start_armed = false;
+@@ -41,15 +43,21 @@ char     g_test_name[snapshot::MAX_NAME] = "";
  // requested (the engine notices on the next frames and stops queueing work to those threads) and
  // restored to the user's values once the operation, or the stress test, is over. The value fields are
  // written directly: no change callback runs, the engine reads them every frame.
@@ -395,7 +279,7 @@ index d7713a0..f352d9f 100644
          ConVar* v = gameapi::FindVar(kThreadCvars[i]);
          if (!v) continue;
          if (on) {
-@@ -59,6 +67,25 @@ void force_threading_off(bool on) {
+@@ -65,6 +73,25 @@ void force_threading_off(bool on) {
      g_forced = on;
  }
  
@@ -421,7 +305,7 @@ index d7713a0..f352d9f 100644
  void set_name(char* dst, const char* name) {
      strncpy(dst, name, snapshot::MAX_NAME - 1);
      dst[snapshot::MAX_NAME - 1] = 0;
-@@ -78,15 +105,18 @@ void run_pending() {
+@@ -84,15 +111,18 @@ void run_pending() {
          if (ok) sarlink::RecordDemoCommand("snap_load", name);   // the demo is back at the save now
      }
      sarlink::UpdateHud();
@@ -440,10 +324,10 @@ index d7713a0..f352d9f 100644
 -void cmd_load(const CCommand& a) { Request(OP_LOAD, name_arg(a)); }
 +void cmd_save(const CCommand& a) { if (!Request(OP_SAVE, name_arg(a))) g_done.failed++; }
 +void cmd_load(const CCommand& a) { if (!Request(OP_LOAD, name_arg(a))) g_done.failed++; }
+ void cmd_save_start(const CCommand& a) { ArmStartSave(name_arg(a)); }
  void cmd_list(const CCommand&) { snapshot::PrintList(); }
  void cmd_info(const CCommand&) { snapshot::PrintInfo(); }
- 
-@@ -120,6 +150,8 @@ void cmd_opt(const CCommand& a) {
+@@ -127,6 +157,8 @@ void cmd_opt(const CCommand& a) {
          else if (!_stricmp(n, "zombies")) o.zombie_policy = v ? snapshot::ZOMBIES_KEEP : snapshot::ZOMBIES_FREE;
          else if (!_stricmp(n, "clear_input")) o.clear_input = v;
          else if (!_stricmp(n, "verify")) o.verify_heap = v;
@@ -452,7 +336,7 @@ index d7713a0..f352d9f 100644
          else if (!_stricmp(n, "cross_map")) {
              o.cross_map = v;
              if (int dropped = snapshot::DropOtherMaps()) {
-@@ -129,8 +161,8 @@ void cmd_opt(const CCommand& a) {
+@@ -136,8 +168,8 @@ void cmd_opt(const CCommand& a) {
          }
          else util::ConWarn("[snap] unknown option '%s'", n);
      }
@@ -463,7 +347,7 @@ index d7713a0..f352d9f 100644
  }
  
  void cmd_domain(const CCommand& a) {
-@@ -164,7 +196,7 @@ void RegisterCommands() {
+@@ -172,7 +204,7 @@ void RegisterCommands() {
      gameapi::AddCommand("snap_list", "List the RAM snapshots", cmd_list);
      gameapi::AddCommand("snap_info", "Snapshot / arena statistics", cmd_info);
      gameapi::AddCommand("snap_check", "Check the arena heap consistency", cmd_check);
@@ -472,7 +356,7 @@ index d7713a0..f352d9f 100644
      gameapi::AddCommand("snap_domain", "Show or set the list of modules whose memory is snapshotted", cmd_domain);
      gameapi::AddCommand("snap_test", "snap_test [cycles] [frames]: restore the current snapshot repeatedly", cmd_test);
  }
-@@ -184,20 +216,24 @@ bool Request(Op op, const char* name) {
+@@ -192,12 +224,13 @@ bool Request(Op op, const char* name) {
          util::ConWarn("[snap] %d snapshots already exist: drop one first (snap_drop <name>)", snapshot::MAX_SNAPSHOTS);
          return false;
      }
@@ -488,6 +372,9 @@ index d7713a0..f352d9f 100644
      return true;
  }
  
+@@ -224,10 +257,13 @@ void OnGameFrame(bool simulating) {
+ }
+ 
  bool Busy() { return g_pending != OP_NONE; }
 +const Counts& Done() { return g_done; }
  uint32_t Frame() { return g_frame; }
@@ -499,7 +386,7 @@ index d7713a0..f352d9f 100644
      if (g_test_cycles > 0 && !snapshot::Exists(g_test_name)) {
          util::ConWarn("[snap] test: snapshot '%s' dropped, test stopped", g_test_name);
          g_test_cycles = 0;
-@@ -236,6 +272,7 @@ void OnLevelInit(const char* map) {
+@@ -287,6 +323,7 @@ void OnLevelInit(const char* map) {
  }
  
  void OnLevelShutdown() {
@@ -508,14 +395,13 @@ index d7713a0..f352d9f 100644
      g_test_cycles = 0;
      snapshot::OnLevelShutdown();
 diff --git a/src/control.h b/src/control.h
-index ba62596..47372e1 100644
+index 9f4cc52..d7b637b 100644
 --- a/src/control.h
 +++ b/src/control.h
-@@ -19,6 +19,12 @@ void RegisterCommands();
- // snapshot when there are already snapshot::MAX_SNAPSHOTS.
- bool Request(Op op, const char* name);
- bool Busy();                  // an operation is queued
-+
+@@ -26,6 +26,11 @@ bool Busy();                  // an operation is queued
+ // "[snap] map start save of '<name>' missed: ..." when it could not be taken before the first tick.
+ bool ArmStartSave(const char* name);
+ void OnGameFrame(bool simulating);   // server plugin GameFrame callback
 +// What became of the requests so far, for a plugin that drives snapshots and waits for each (the export
 +// ChocoGetSnapshotStatus): every request ends up counted once, as a save done, a restore done, or as failed
 +// (refused, gone wrong, or dropped because the level ended first).
@@ -524,6 +410,43 @@ index ba62596..47372e1 100644
  void OnFrameStart();          // drive the queue; call once per FRAME_START
  uint32_t Frame();             // FRAME_STARTs seen so far
  
+diff --git a/src/copypool.cpp b/src/copypool.cpp
+index 6b5e370..44a315c 100644
+--- a/src/copypool.cpp
++++ b/src/copypool.cpp
+@@ -17,6 +17,7 @@ void*         g_ctx = nullptr;
+ int           g_parts = 0;
+ volatile LONG g_next = 0;
+ volatile LONG g_idle = 0;         // workers done with the current job
++volatile LONG g_started = 0;      // workers that got to their loop
+ 
+ void run_parts() {
+     for (LONG i; (i = InterlockedIncrement(&g_next) - 1) < g_parts;) g_fn(g_ctx, (int)i);
+@@ -24,6 +25,7 @@ void run_parts() {
+ 
+ DWORD WINAPI worker(void* arg) {
+     HANDLE go = (HANDLE)arg;
++    InterlockedIncrement(&g_started);
+     for (;;) {
+         WaitForSingleObject(go, INFINITE);
+         run_parts();
+@@ -47,6 +49,16 @@ bool Start(int workers) {
+         CloseHandle(t);
+         g_workers++;
+     }
++    // A new thread first runs every DLL's thread attach (loader lock, tier0's own lock...). The first save
++    // creates the pool right before it suspends every other thread: a worker still in its attach would
++    // wait forever for a lock held by a suspended thread, and Run() would spin waiting for it (seen: the
++    // game frozen in Run, two workers blocked in LdrInitializeThunk / tier0_s). Wait for them to start.
++    for (int ms = 0; g_started < g_workers && ms < 5000; ms++) Sleep(1);
++    if (g_started < g_workers) {
++        // which ones are late is unknown: hand jobs to none (everything runs on the calling thread)
++        util::Log("copypool: only %d of %d copy workers started, not using them", (int)g_started, g_workers);
++        g_workers = 0;
++    }
+     util::Log("copypool: %d copy workers", g_workers);
+     return g_workers == workers;
+ }
 diff --git a/src/d3dguard.cpp b/src/d3dguard.cpp
 index 47401b8..6e16464 100644
 --- a/src/d3dguard.cpp
@@ -939,7 +862,7 @@ index 2ea16ff..b98d26e 100644
          LeaveCriticalSection(&cs_);
          for (int i = 0; i < n; i++) destroy(doomed[i]);
 diff --git a/src/plugin.cpp b/src/plugin.cpp
-index 4c55a0a..b9d69be 100644
+index d094dec..abaf512 100644
 --- a/src/plugin.cpp
 +++ b/src/plugin.cpp
 @@ -288,6 +288,32 @@ public:
@@ -1293,26 +1216,6 @@ index 11ff9d6..7d9bff0 100644
  
  // Names: letters, digits, '_', '-' and '.', up to MAX_NAME - 1 characters; case-insensitive.
  bool ValidName(const char* name);
-diff --git a/tests/arena_test.cpp b/tests/arena_test.cpp
-index aa20b42..9401c82 100644
---- a/tests/arena_test.cpp
-+++ b/tests/arena_test.cpp
-@@ -53,6 +53,7 @@ static void random_ops(int n, std::vector<Obj>* outside, bool allow_outside) {
-             Obj o; o.size = rand_size(); o.seed = rnd();
-             o.p = (unsigned char*)arena::Alloc(o.size);
-             if (!o.p) { printf("alloc failed\n"); exit(1); }
-+            if ((uintptr_t)o.p & 15) { printf("alloc not 16-byte aligned: %p\n", o.p); exit(1); }
-             fill(o);
-             if (allow_outside && outside && (rnd() % 20) == 0) outside->push_back(o);
-             else state_push(o);
-@@ -69,6 +70,7 @@ static void random_ops(int n, std::vector<Obj>* outside, bool allow_outside) {
-             uint32_t ns = o.size + rnd() % 3000;
-             unsigned char* np = (unsigned char*)arena::Realloc(o.p, ns);
-             if (!np) { printf("realloc failed\n"); exit(1); }
-+            if ((uintptr_t)np & 15) { printf("realloc not 16-byte aligned: %p\n", np); exit(1); }
-             o.p = np;
-             for (uint32_t j = o.size; j < ns; j++) np[j] = (unsigned char)(o.seed + j * 31);
-             o.size = ns;
 diff --git a/tools/chocoload.cpp b/tools/chocoload.cpp
 index cd72ec5..8a3f453 100644
 --- a/tools/chocoload.cpp

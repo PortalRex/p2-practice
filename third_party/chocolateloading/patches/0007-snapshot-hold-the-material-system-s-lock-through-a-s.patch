@@ -1,7 +1,7 @@
-From 5fee168a4c2b58ba24137884f1656db6835a5b60 Mon Sep 17 00:00:00 2001
+From 526953fb462f7f671855e9db65c259a49ee3518f Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 08:01:20 -0600
-Subject: [PATCH 09/10] snapshot: hold the material system's lock through a
+Subject: [PATCH 07/10] snapshot: hold the material system's lock through a
  save and a restore, so queued rendering stays on (no render thread stop and
  start around every operation); snap_opt render_lock
 
@@ -14,7 +14,7 @@ Subject: [PATCH 09/10] snapshot: hold the material system's lock through a
  5 files changed, 103 insertions(+), 9 deletions(-)
 
 diff --git a/AGENTS.md b/AGENTS.md
-index 03e38d0..cf6c413 100644
+index 9830a6b..39ad931 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -82,7 +82,7 @@ imports only KERNEL32: tier0/vstdlib/engine/client are resolved at runtime.
@@ -26,7 +26,7 @@ index 03e38d0..cf6c413 100644
     (show/set the captured modules).
  - Log file: `<Portal 2>\chocolateloading.log` (always written, even without `-condebug`).
  
-@@ -149,8 +149,9 @@ initialisation, `memhook::InstallEarly` patches the `CStdMemAlloc` vtable (found
+@@ -150,8 +150,9 @@ initialisation, `memhook::InstallEarly` patches the `CStdMemAlloc` vtable (found
     log lists them as `vatrack:   <owner> <base> reserved/committed`.
  
  **Save / restore.** Requested from the console, they run at the next safe `FRAME_START` (`control.cpp`):
@@ -38,7 +38,7 @@ index 03e38d0..cf6c413 100644
  is suspended, then memory is copied. The arena is reserved with MEM_WRITE_WATCH, so a restore copies back
  only the pages written since the snapshot; blocks allocated after the snapshot ("zombies") are freed,
  the free lists are rebuilt, `CEngine`'s real-time frame accumulators keep their current value, and held
-@@ -290,6 +291,18 @@ x2, 100 restores, quit), sp_a2_turret_intro (reload x2), sp_a2_bts3 (changelevel
+@@ -299,6 +300,18 @@ x2, 100 restores, quit), sp_a2_turret_intro (reload x2), sp_a2_bts3 (changelevel
  drop, and demos: an in-map session records `snap_save` / `snap_load`, ends with dem_stop and SAR's
  signature, and plays back with `playdemo`. Not verified: co-op.
  
@@ -58,10 +58,10 @@ index 03e38d0..cf6c413 100644
  - Shorter snap_load latency: a request waits 4 frames for the workers to drain unless the threading
    cvars are already forced - now longer than the restore itself (~9 ms). Keeping them forced while a
 diff --git a/src/control.cpp b/src/control.cpp
-index b7c0174..f91b5c5 100644
+index 85f5817..46b3c37 100644
 --- a/src/control.cpp
 +++ b/src/control.cpp
-@@ -36,15 +36,21 @@ char     g_test_name[snapshot::MAX_NAME] = "";
+@@ -42,15 +42,21 @@ char     g_test_name[snapshot::MAX_NAME] = "";
  // requested (the engine notices on the next frames and stops queueing work to those threads) and
  // restored to the user's values once the operation, or the stress test, is over. The value fields are
  // written directly: no change callback runs, the engine reads them every frame.
@@ -84,7 +84,7 @@ index b7c0174..f91b5c5 100644
          ConVar* v = gameapi::FindVar(kThreadCvars[i]);
          if (!v) continue;
          if (on) {
-@@ -72,7 +78,7 @@ bool thread_cvars_zero() {
+@@ -78,7 +84,7 @@ bool thread_cvars_zero() {
          g_thread_vars_found = g_thread_vars[0] != nullptr;   // (not before the console is up)
          if (!g_thread_vars_found) return false;
      }
@@ -93,7 +93,7 @@ index b7c0174..f91b5c5 100644
          if (g_thread_vars[i] && g_thread_vars[i]->m_nValue != 0) return false;
      return true;
  }
-@@ -141,6 +147,7 @@ void cmd_opt(const CCommand& a) {
+@@ -148,6 +154,7 @@ void cmd_opt(const CCommand& a) {
          else if (!_stricmp(n, "clear_input")) o.clear_input = v;
          else if (!_stricmp(n, "verify")) o.verify_heap = v;
          else if (!_stricmp(n, "device_state")) o.device_state = v;
@@ -101,7 +101,7 @@ index b7c0174..f91b5c5 100644
          else if (!_stricmp(n, "cross_map")) {
              o.cross_map = v;
              if (int dropped = snapshot::DropOtherMaps()) {
-@@ -150,8 +157,8 @@ void cmd_opt(const CCommand& a) {
+@@ -157,8 +164,8 @@ void cmd_opt(const CCommand& a) {
          }
          else util::ConWarn("[snap] unknown option '%s'", n);
      }
@@ -112,7 +112,7 @@ index b7c0174..f91b5c5 100644
  }
  
  void cmd_domain(const CCommand& a) {
-@@ -185,7 +192,7 @@ void RegisterCommands() {
+@@ -193,7 +200,7 @@ void RegisterCommands() {
      gameapi::AddCommand("snap_list", "List the RAM snapshots", cmd_list);
      gameapi::AddCommand("snap_info", "Snapshot / arena statistics", cmd_info);
      gameapi::AddCommand("snap_check", "Check the arena heap consistency", cmd_check);

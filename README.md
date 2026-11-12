@@ -249,7 +249,8 @@ What to know:
 ### The bundled build
 
 ChocolateLoading is Blenderiste09's, shipped with the release with their permission. The build shipped is the
-stock one with ten changes (`third_party/chocolateloading/fixes.patch`; one by one in
+stock one (commit 5a47744) with twelve changes, the first two of which are now part of ChocolateLoading itself
+(`third_party/chocolateloading/fixes.patch`; one by one in
 `third_party/chocolateloading/patches/`; explained at length in `third_party/chocolateloading/README.txt`):
 
 | # | Change | What it fixed |
@@ -264,6 +265,8 @@ stock one with ten changes (`third_party/chocolateloading/fixes.patch`; one by o
 | 8 | The device's state is saved with a snapshot and applied on a restore | flat yellow walls and missing shadows for seconds after a retry |
 | 9 | An operation runs inside the material system's lock; queued rendering is never switched | a stutter per retry, and crashes on the render thread after restores |
 | 10 | An export tells a plugin how many saves and restores are done and how many failed | the plugin knows the moment its operation finished instead of waiting a number of frames |
+| 11 | A sound or video object that only another snapshot refers to is not destroyed twice | a crash when a save state was replaced after going back to an older one |
+| 12 | The first save waits for its copy threads to be running (the author's own fix) | a freeze in the first save |
 
 ## What a demo gives
 

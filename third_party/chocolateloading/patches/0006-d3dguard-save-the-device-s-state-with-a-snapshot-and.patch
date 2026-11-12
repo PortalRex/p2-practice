@@ -1,7 +1,7 @@
-From 98f9f5a8f45b568aafe43c0a0f0c536f76a8023e Mon Sep 17 00:00:00 2001
+From 5ff8f7320497babe0bdb02a737f03bb911e71e5f Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Mon, 9 Nov 2026 20:38:38 -0600
-Subject: [PATCH 08/10] d3dguard: save the device's state with a snapshot and
+Subject: [PATCH 06/10] d3dguard: save the device's state with a snapshot and
  set it back at a restore (the shader API's memory of it went back, the device
  did not: wrong lighting for seconds after a restore)
 
@@ -14,10 +14,10 @@ Subject: [PATCH 08/10] d3dguard: save the device's state with a snapshot and
  5 files changed, 54 insertions(+), 5 deletions(-)
 
 diff --git a/README.md b/README.md
-index d4b1ba8..6094c55 100644
+index c83c47b..696eca6 100644
 --- a/README.md
 +++ b/README.md
-@@ -40,6 +40,7 @@ In a map (not in the main menu, not during a loading screen):
+@@ -41,6 +41,7 @@ In a map (not in the main menu, not during a loading screen):
  | `snap_list`           | the snapshots, their map and age                                         |
  | `snap_info`           | statistics (sizes, number of restores, ...)                              |
  | `snap_opt cross_map 1`| keep the snapshots when you go to another map (`0`, the default: drop them) |
@@ -26,10 +26,10 @@ index d4b1ba8..6094c55 100644
  Without a name, `snap_save`, `snap_load` and `snap_drop` use the snapshot `quick`. Names are letters,
  digits, `_`, `-` and `.` (up to 31, case-insensitive), e.g. `snap_save intro4_segmented`; up to 64
 diff --git a/src/control.cpp b/src/control.cpp
-index 16f77b5..b7c0174 100644
+index c522730..85f5817 100644
 --- a/src/control.cpp
 +++ b/src/control.cpp
-@@ -140,6 +140,7 @@ void cmd_opt(const CCommand& a) {
+@@ -147,6 +147,7 @@ void cmd_opt(const CCommand& a) {
          else if (!_stricmp(n, "zombies")) o.zombie_policy = v ? snapshot::ZOMBIES_KEEP : snapshot::ZOMBIES_FREE;
          else if (!_stricmp(n, "clear_input")) o.clear_input = v;
          else if (!_stricmp(n, "verify")) o.verify_heap = v;
@@ -37,7 +37,7 @@ index 16f77b5..b7c0174 100644
          else if (!_stricmp(n, "cross_map")) {
              o.cross_map = v;
              if (int dropped = snapshot::DropOtherMaps()) {
-@@ -149,8 +150,8 @@ void cmd_opt(const CCommand& a) {
+@@ -156,8 +157,8 @@ void cmd_opt(const CCommand& a) {
          }
          else util::ConWarn("[snap] unknown option '%s'", n);
      }
@@ -48,7 +48,7 @@ index 16f77b5..b7c0174 100644
  }
  
  void cmd_domain(const CCommand& a) {
-@@ -184,7 +185,7 @@ void RegisterCommands() {
+@@ -192,7 +193,7 @@ void RegisterCommands() {
      gameapi::AddCommand("snap_list", "List the RAM snapshots", cmd_list);
      gameapi::AddCommand("snap_info", "Snapshot / arena statistics", cmd_info);
      gameapi::AddCommand("snap_check", "Check the arena heap consistency", cmd_check);
@@ -173,7 +173,7 @@ index 5cc91f3..6e16464 100644
      if (so.v) VirtualFree(so.v, 0, MEM_RELEASE);
      so = SlotObjs{};   // not intact
 diff --git a/src/plugin.cpp b/src/plugin.cpp
-index 4c55a0a..a2bcc6e 100644
+index d094dec..137be78 100644
 --- a/src/plugin.cpp
 +++ b/src/plugin.cpp
 @@ -288,6 +288,12 @@ public:

@@ -1,7 +1,7 @@
-From fb5fecc24ef51513ba033a36eac410b79c050911 Mon Sep 17 00:00:00 2001
+From 39215ceb5f41ec789528ae53dc69f94ef1808fb6 Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Mon, 9 Nov 2026 19:08:35 -0600
-Subject: [PATCH 07/10] d3dguard: track objects the engine creates through
+Subject: [PATCH 05/10] d3dguard: track objects the engine creates through
  another module's device hook (p2boost wraps CreateTexture: textures were left
  out of the pin and freed under the restored state)
 

@@ -1,7 +1,7 @@
-From fa8b6ec07fed0b648c06fedcd2b4a3bf708ab507 Mon Sep 17 00:00:00 2001
+From 91976194cb4c512f4eda8b3743df43358e5c7347 Mon Sep 17 00:00:00 2001
 From: P2 Practice <kagxfreestyle@gmail.com>
 Date: Sat, 7 Nov 2026 22:50:24 -0600
-Subject: [PATCH 03/10] chocoload: run as Portal 2's Steam launch options
+Subject: [PATCH 01/10] chocoload: run as Portal 2's Steam launch options
  (%command%)
 
 Steam puts the game's own path first: it is skipped. The console window is hidden, and chocoload waits for the game, so Steam counts the game as running.

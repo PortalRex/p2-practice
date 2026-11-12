@@ -1,9 +1,9 @@
-From 6808d7851ad99567320c0c9680da0efbec682d9d Mon Sep 17 00:00:00 2001
+From ea1782b85d758dbdc9c473cdb6453e20701ffe58 Mon Sep 17 00:00:00 2001
 From: PortalRex <35444194+PortalRex@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 18:48:51 -0600
-Subject: [PATCH] pinset: an object only another snapshot refers to is not
- destroyed while its memory is away (crash in DestroyMP3StreamDecoder when a
- snapshot was replaced after a restore of an older one)
+Subject: [PATCH 09/10] pinset: an object only another snapshot refers to is
+ not destroyed while its memory is away (crash in DestroyMP3StreamDecoder when
+ a snapshot was replaced after a restore of an older one)
 
 ---
  src/pinset.h | 30 ++++++++++++++++++++++++------

@@ -176,7 +176,8 @@ class Pass:
         """A save state that is gone when the retry asks for it: the retry restarts the level instead."""
         c = self.console
         before = self.log_size()
-        c.send('snap_drop p2practice', wait=0.5)
+        for name in ('p2practice', 'p2practice_base'):  # (the attempt's and the level's base: either may hold it)
+            c.send('snap_drop ' + name, wait=0.3)
         c.send('prac_retry', wait=0.8)
         mode = c.wait_for_mode(['run'], 60)
         log = self.log_since(before)
