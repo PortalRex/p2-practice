@@ -141,6 +141,7 @@ void SaveSettings(const std::string &path = SettingsPath()) {
 	else out << "prac_set ghostcolor team\n";
 	out << Format("prac_set ghostopacity %d\n", s.ghostOpacity) << Format("prac_set hud %d\n", s.hud ? 1 : 0)
 	    << Format("prac_set speedometer %d\n", s.speedometer ? 1 : 0) << Format("prac_set strafe %d\n", s.strafe ? 1 : 0)
+	    << Format("prac_set use %d\n", s.use ? 1 : 0)
 	    << Format("prac_set path %d\n", s.path ? 1 : 0)
 	    << Format("prac_set loop %d\n", s.loop ? 1 : 0) << Format("prac_set autoreset %g\n", s.autoReset) << Format("prac_set speed %g\n", s.speed)
 	    << Format("prac_set reset %s\n", resets[std::clamp(s.reset, 0, 2)]) << Format("prac_set challenge %d\n", s.challenge ? 1 : 0)
@@ -1167,6 +1168,9 @@ void SettingsPage(Rect area, const trainer::Status &s) {
 	bool strafe = set.strafe;
 	if (ui::Toggle("Bhop trainer: gain, strafe sync, hop timing", strafe)) Set(Format("prac_set strafe %d", strafe ? 1 : 0));
 	ui::Hint("Any time you jump: speed gained, air time gaining speed, key against mouse sync, strafes, ticks lost on the ground");
+	bool useTrainer = set.use;
+	if (ui::Toggle("Use trainer: how far off a missed use was", useTrainer)) Set(Format("prac_set use %d", useTrainer ? 1 : 0));
+	ui::Hint("When the use key uses nothing: units out of reach, degrees off, and ticks early or late");
 	if (ui::Toggle("Route line and portal shots in the level", path)) Set(Format("prac_set path %d", path ? 1 : 0));
 	ui::Hint("The record's path drawn in the level, with where its portals were shot");
 	ui::Caption("MENU KEY");

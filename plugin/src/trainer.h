@@ -40,6 +40,7 @@ struct Settings {
 	bool path = true;        // draw the route and its portal shots in the world (seen by the host)
 	bool speedometer = true; // show the person's speed next to the record's
 	bool strafe = false;     // the bhop trainer: speed gained per jump, how much of the air time gained, hop timing
+	bool use = false;        // the use trainer: how far off a press of the use key that used nothing was
 	bool loop = false;       // start again by itself after the finish
 	float autoReset = 0;     // retry by itself when this many seconds behind (0 = never)
 	float speed = 1;         // game speed while practicing

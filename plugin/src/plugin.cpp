@@ -8,6 +8,7 @@
 #include "sdk.h"
 #include "trainer.h"
 #include "ui/menu.h"
+#include "use.h"
 #include "version.h"
 
 namespace {
@@ -52,13 +53,17 @@ public:
 		if (!loaded_) return;
 		trainer::OnLevelInit(mapName);
 		bhop::Reset();
+		use::Reset();
 	}
 	void ServerActivate(sdk::Edict *, int, int) override {}
 	void GameFrame(bool simulating) override {
 		if (!loaded_) return;
 		perf::Scope timed(perf::kGameFrame);
 		trainer::OnFrame(simulating);
-		if (simulating) bhop::Tick();
+		if (simulating) {
+			bhop::Tick();
+			use::Tick();
+		}
 	}
 	void LevelShutdown() override {
 		if (loaded_) trainer::OnLevelShutdown();

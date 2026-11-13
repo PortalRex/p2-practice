@@ -28,6 +28,7 @@ add_library(p2practice SHARED
 	src/trainer_hud.cpp
 	src/trainer_path.cpp
 	src/trainer_snapshot.cpp
+	src/use.cpp
 	src/ui/boards.cpp
 	src/ui/gfx.cpp
 	src/ui/hud.cpp

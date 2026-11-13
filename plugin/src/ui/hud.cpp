@@ -7,8 +7,10 @@
 #include <string>
 
 #include "bhop.h"
+#include "engine.h"
 #include "trainer.h"
 #include "ui/widgets.h"
+#include "use.h"
 
 namespace hud {
 namespace {
@@ -97,11 +99,51 @@ void DrawBhop() {
 	}
 }
 
+// The use trainer, under the crosshair for a few seconds after a press of the use key that used nothing: what it
+// was nearest to using, how far out of reach or off the aim that was, and how early or late the press came
+void DrawUse() {
+	const use::Miss &m = use::Last();
+	float age = (engine::TickCount() - m.tick) * engine::TickInterval();
+	if (!m.shown || age < 0 || age > use::kShownSeconds) return;
+	const Color white(255, 255, 255), grey(185, 190, 200);
+	char text[96];
+	std::string what;
+	Color color = ui::theme::kOrange;
+	if (m.caughtAfter) {
+		snprintf(text, sizeof(text), "picked up %d tick%s after the press", m.caughtAfter, m.caughtAfter == 1 ? "" : "s");
+		what = text;
+		color = ui::theme::kGreen;
+	} else {
+		if (m.locked > 0) {
+			snprintf(text, sizeof(text), "use is off for %.1f s more", m.locked);
+			what = text;
+		} else if (m.reachShort > 0) {
+			snprintf(text, sizeof(text), m.reachShort < 10 ? "%.1f units out of reach" : "%.0f units out of reach", m.reachShort);
+			what = text;
+		} else if (m.aimOff > 0) {
+			snprintf(text, sizeof(text), m.aimOff < 10 ? "%.1f degrees off" : "%.0f degrees off", m.aimOff);
+			what = text;
+		} else if (m.blocked) {
+			what = "something in the way";
+		}
+		int ticks = m.ticksEarly ? m.ticksEarly : m.ticksLate;
+		if (ticks) {
+			snprintf(text, sizeof(text), "%s%d tick%s %s", what.empty() ? "" : "  \xC2\xB7  ", ticks, ticks == 1 ? "" : "s", m.ticksEarly ? "early" : "late");
+			what += text;
+		}
+	}
+	if (what.empty()) return;
+	int y = gfx::ScreenHeight() * 3 / 5;
+	Centered(y, Font::Small, grey, m.caughtAfter ? "USE" : m.thing.empty() ? "USE MISSED" : "USE MISSED  \xC2\xB7  " + m.thing);
+	Centered(y + gfx::FontHeight(Font::Small), Font::Title, color, what);
+}
+
 }  // namespace
 
 void Draw() {
 	const trainer::Settings &settings = trainer::CurrentSettings();
 	if (settings.strafe && gfx::InGame()) DrawBhop();
+	if (settings.use && gfx::InGame()) DrawUse();
 	if (!settings.hud) return;
 	trainer::Status s = trainer::CurrentStatus();
 	if (!s.loaded || (!s.active && s.flash.empty())) return;

@@ -4,9 +4,10 @@
 // console commands and VScript wherever they reach, which keeps the trainer working across game updates as long
 // as those names exist and out of the way of SAR, p2boost and other plugins. The exceptions, each described where
 // it is declared below: one hooked function-table slot (HoldClientCommands), the hiding flags taken off two cvars
-// (Init), and a handful of fields written straight into entities (SetGodMode,
-// SetMovementSpeed, SetChallengeSeconds, SetEyeHeight, SetPoseParameters). The in-game menu and HUD hook the
-// game's drawing and input besides: ui/gfx.cpp says how.
+// (Init), a handful of fields written straight into entities (SetGodMode,
+// SetMovementSpeed, SetChallengeSeconds, SetEyeHeight, SetPoseParameters), and one function of the game's called
+// directly (FindUseTarget, with a few fields found in the player's save description). The in-game menu and HUD hook
+// the game's drawing and input besides: ui/gfx.cpp says how.
 #pragma once
 
 #include <string>
@@ -127,6 +128,42 @@ bool SetEyeHeight(int entIndex, float height);
 // The entity indices of the two portals a player's portal gun shoots (-1 where it has none). False when the
 // player holds no portal gun.
 bool GetPlayerPortals(int playerEntIndex, int &primary, int &secondary);
+
+// ---- the use key ----
+// What the game last did with a player's use key, read from the player (fields of its save description, found
+// by name). False when this game version doesn't have them.
+struct UseKey {
+	bool pressed = false;    // the key went down in the player's last command
+	// The game time of the last press that found nothing to use: the game then keeps looking for an object to
+	// pick up for sv_use_trace_duration. Negative once the press, or that look, has found something.
+	float startTime = 0;
+	float lockedUntil = 0;   // the game time until which the key picks nothing up (for 1 s after it picked an object up)
+	float now = 0;           // the game time
+};
+bool GetUseKey(int entIndex, UseKey &out);
+
+// What the game's own search finds for a player's use key (the function the key itself runs, so with its reach,
+// what is in the way and portals): the entity's index, 0 for nothing, kUseTargetUnnamed for an entity without an
+// index, -1 when the search can't be found in this game version. With `view`, what it would find if the player
+// stood `moved` away from where they stand and looked along those angles: the player is put there for the length
+// of the search only. The player's fields are left as they were.
+constexpr int kUseTargetUnnamed = 1 << 16;
+struct UseView {
+	Vec3 moved;
+	float pitch = 0, yaw = 0;
+};
+int FindUseTarget(int entIndex, const UseView *view = nullptr);
+
+// An entity's class and where it is: its origin, angles and the box around it in its own axes. False for an index
+// nothing holds.
+struct EntityBox {
+	const char *className = "";
+	Vec3 origin;
+	float pitch = 0, yaw = 0, roll = 0;
+	Vec3 mins, maxs;
+};
+bool GetEntityBox(int entIndex, EntityBox &out);
+int EntityLimit();  // entity indices are below this
 
 // ---- the trainer's own props ----
 // A model blends its walk between directions (and its aim between angles) by pose parameters, numbers from 0 to

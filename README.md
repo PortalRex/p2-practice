@@ -38,6 +38,7 @@ SAR and p2boost, on DirectX 9 and with `-vulkan`.
 | **The route in the level** | A ribbon along the run's path ahead of you, in your portal colour, with a mark and an aim line for every portal shot. It is part of the level: walls hide it. |
 | **Save states** | With the bundled ChocolateLoading, a retry puts the whole level back in about 10 ms instead of restarting it. |
 | **A bhop trainer** | Speed gained per jump, how much of the air time gained speed, hop timing. |
+| **A use trainer** | When the use key uses nothing: how many units out of reach or degrees off it was, and how many ticks early or late. |
 | **An in-game menu** | Insert: your demos, the leaderboards, how to practice and every setting, without leaving the game. |
 
 **Nothing you do in practice can reach a leaderboard.** Practice moves players, objects and portals, so it turns
@@ -144,6 +145,7 @@ Useful binds: `bind f5 prac_retry`, `bind f6 prac_next`, `bind f7 prac_prev`, `b
 | `hud` | the clock, the gap to the record and the flashes |
 | `speedometer` | your speed next to the record's, bottom left |
 | `strafe` | the bhop trainer |
+| `use` | the use trainer: after a press of the use key that used nothing, what it was nearest to using (cube, button, ...), how many units closer or degrees further round the press had to be, and how many ticks early or late it came. Asked of the game's own use search, so reach, line of sight and portals count as they do for the key. An object the game still picks up by itself (it goes on looking for half a second after a press) shows as picked up. Single player and the host in co-op. |
 | `path` | the route and its portal shots drawn in the level |
 | `partner` | co-op alone: the bot that plays the other robot |
 | `loop` | start again by itself after the finish |
@@ -336,6 +338,7 @@ launcher\build.bat
 | `core/` | reads demos (no dependencies; ported from the demo viewer's parser and checked against it) |
 | `plugin/src/route.cpp` | builds the route from demos |
 | `plugin/src/trainer*.cpp` | the practice session, one file per job: `trainer.cpp` (the session and its attempts), `_drive` (players and the bot on the run's path), `_ghosts`, `_hud`, `_path` (the route line), `_finish`, `_snapshot` (save states), `_commands` (`prac_`) |
+| `plugin/src/bhop.cpp`, `use.cpp` | the bhop trainer and the use trainer |
 | `plugin/src/engine.cpp` | everything that touches the game, apart from drawing |
 | `plugin/src/ui/` | the menu, the HUD and `gfx.cpp`, which draws and reads input |
 | `plugin/src/helper_nut.h` | the plugin's VScript half |

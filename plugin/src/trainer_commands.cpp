@@ -1,5 +1,6 @@
 // The console commands (prac_*).
 #include "trainer_internal.h"
+#include "use.h"
 
 #include <algorithm>
 #include <cmath>
@@ -270,6 +271,7 @@ void PrintSettings() {
 	engine::Print("  hud %d           the clock, the gap to the record and the flashes on screen\n", g_set.hud);
 	engine::Print("  speedometer %d   your speed next to the record's, at the bottom left\n", g_set.speedometer);
 	engine::Print("  strafe %d        bhop trainer: speed gained per jump, air time spent gaining, hop timing\n", g_set.strafe);
+	engine::Print("  use %d           use trainer: how far off, and how early or late, a use key press that used nothing was\n", g_set.use);
 	engine::Print("  path %d          draw the route and portal shots in the level (host only)\n", g_set.path);
 	engine::Print("  partner %d       alone in co-op: a bot plays the other robot's half\n", g_set.partner);
 	engine::Print("  loop %d          start again by itself after the finish\n", g_set.loop);
@@ -297,6 +299,7 @@ void CmdSet(const sdk::CCommand &args) {
 	else if (name == "hud") g_set.hud = on;
 	else if (name == "speedometer") g_set.speedometer = on;
 	else if (name == "strafe") g_set.strafe = on;
+	else if (name == "use") g_set.use = on;
 	else if (name == "path") {
 		g_set.path = on;
 		// (in an attempt the line comes or goes at once)
@@ -420,6 +423,14 @@ void CmdDebug(const sdk::CCommand &args) {
 		g_lastBadEdict = -1;
 		for (size_t a = 0; a < g.ghosts.size(); a++) engine::Print("ghost %d: entity %d\n", static_cast<int>(a), g.ghosts[a].entIndex);
 		ScanEdicts(engine::TickCount(), false);
+		return;
+	}
+	if (args.ArgC() >= 5 && !strcmp(args.Arg(1), "useat")) {
+		use::PrintProbe(static_cast<float>(atof(args.Arg(2))), static_cast<float>(atof(args.Arg(3))), static_cast<float>(atof(args.Arg(4))));
+		return;
+	}
+	if (args.ArgC() >= 2 && !strcmp(args.Arg(1), "use")) {
+		use::PrintState();
 		return;
 	}
 	if (args.ArgC() >= 2 && !strcmp(args.Arg(1), "perf")) {

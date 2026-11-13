@@ -3,7 +3,9 @@
 
 #include <windows.h>
 
+#include <cmath>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -970,6 +972,228 @@ bool GetPlayer(int entIndex, PlayerState &out) {
 		const char *id = CallVirtual<const char *>(info, sdk::slot::GetNetworkIDString);
 		out.bot = id && !strcmp(id, "BOT");
 	}
+	return true;
+}
+
+// ---- the use key ----
+namespace {
+
+// A class's save description (the game's datamap_t and typedescription_t, as far as a field's name and offset):
+// every field the game saves, by name, base classes linked. Used only to find where a few fields live that the
+// game doesn't network.
+struct DataField {
+	int type;
+	const char *name;
+	int offset;
+	char rest[0x3C - 12];
+};
+struct DataMap {
+	DataField *fields;
+	int count;
+	const char *className;
+	DataMap *base;
+};
+
+// An entity's save description. The entity's GetDataDescMap is "mov eax, <map>; ret" in every class: anything
+// else there is not the function expected, and nothing is called.
+const DataMap *DataMapOf(const void *entity) {
+	constexpr int kGetDataDescMap = 11;
+	const auto *code = static_cast<const unsigned char *>((*static_cast<void **const *>(entity))[kGetDataDescMap]);
+	if (IsBadReadPtr(code, 6) || code[0] != 0xB8 || code[5] != 0xC3) return nullptr;
+	const DataMap *map;
+	memcpy(&map, code + 1, sizeof(map));
+	return IsBadReadPtr(map, sizeof(DataMap)) ? nullptr : map;
+}
+
+int FindDataField(const void *entity, const char *name) {
+	int depth = 0;
+	for (const DataMap *map = DataMapOf(entity); map && depth < 16; map = map->base, depth++) {
+		if (map->count < 0 || map->count > 4096 || (map->count && IsBadReadPtr(map->fields, sizeof(DataField) * map->count))) return -1;
+		for (int i = 0; i < map->count; i++)
+			if (map->fields[i].name && !strcmp(map->fields[i].name, name)) return map->fields[i].offset;
+	}
+	return -1;
+}
+
+struct UseOffsets {
+	bool looked = false;
+	int buttonsPressed = -1, startTime = -1, cooldownTime = -1, lockOutTime = -1;
+	int grabPortal = -1;  // m_hPortalThroughWhichGrabOccured, which the game's search writes
+	int absOrigin = -1;   // m_vecAbsOrigin: where the player is in the world
+	// The angles the player looks along (v_angle of the player's state, which the game doesn't network or save:
+	// it is the field after that state's networked "deadflag", as in the public SDK's playerstate.h). Used only
+	// while it reads the same as the networked eye angles.
+	int viewAngles = -1;
+} g_use;
+
+void FindUseOffsets(const void *player) {
+	if (g_use.looked) return;
+	g_use.looked = true;
+	g_use.buttonsPressed = FindDataField(player, "m_afButtonPressed");
+	g_use.startTime = FindDataField(player, "m_flUseKeyStartTime");
+	g_use.cooldownTime = FindDataField(player, "m_flUseKeyCooldownTime");
+	g_use.lockOutTime = FindDataField(player, "m_flAutoGrabLockOutTime");
+	g_use.grabPortal = FindDataField(player, "m_hPortalThroughWhichGrabOccured");
+	g_use.absOrigin = FindDataField(player, "m_vecAbsOrigin");
+	if (sdk::ServerClass *cls = FindServerClass(g_serverGame, "CPortal_Player")) {
+		int deadFlag = FindPropOffset(cls->table, "deadflag");
+		if (deadFlag >= 0) g_use.viewAngles = deadFlag + 4;
+	}
+}
+
+// The game's search for something to use (CPortal_Player's, which the use key runs: one argument, where it
+// puts the portal it reached through). It has no name to look up, but it is the one function of server.dll
+// that reads the cvar sv_player_use_cone_size straight from its static object: that read is looked for, and
+// the function is the one it sits in (its first bytes are those of a function that aligns its stack).
+using FindUseEntityFn = void *(__thiscall *)(void *player, void **throughPortal);
+FindUseEntityFn g_findUseEntity = nullptr;
+bool g_lookedForFindUseEntity = false;
+
+// Where `bytes` first sits in a loaded module's sections of one kind (code, or everything else), or null
+const unsigned char *FindInModule(HMODULE module, bool code, const void *bytes, size_t count, const unsigned char **sectionStart = nullptr) {
+	const auto *base = reinterpret_cast<const unsigned char *>(module);
+	const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
+	const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+	const IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+	const unsigned char first = *static_cast<const unsigned char *>(bytes);
+	for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+		if (((section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) != code || (section[i].Characteristics & IMAGE_SCN_MEM_DISCARDABLE)) continue;
+		const unsigned char *start = base + section[i].VirtualAddress;
+		size_t size = section[i].Misc.VirtualSize;
+		for (size_t at = 0; at + count <= size; at++) {
+			if (start[at] != first || memcmp(start + at, bytes, count)) continue;
+			if (sectionStart) *sectionStart = start;
+			return start + at;
+		}
+	}
+	return nullptr;
+}
+
+FindUseEntityFn LocateFindUseEntity() {
+	HMODULE server = GetModuleHandleA("server.dll");
+	if (!server) return nullptr;
+	// server.dll's own object of the cvar (the game has one in client.dll too, and the cvar system hands out
+	// whichever was registered first): the object whose name pointer is server.dll's copy of the name
+	static const char kName[] = "sv_player_use_cone_size";
+	const unsigned char *name = FindInModule(server, false, kName, sizeof(kName));
+	const unsigned char *namePointer = name ? FindInModule(server, false, &name, sizeof(name)) : nullptr;
+	if (!namePointer) return nullptr;
+	const auto *cone = reinterpret_cast<const sdk::ConVar *>(namePointer - offsetof(sdk::ConVar, name));
+	if (IsBadReadPtr(cone, sizeof(sdk::ConVar)) || !cone->parent) return nullptr;
+	const unsigned char *text = nullptr;
+	// "mov eax, [the cvar's parent pointer]", once in the whole of the code
+	unsigned char read[5] = {0xA1};
+	sdk::ConVar *const *parent = &cone->parent;
+	memcpy(read + 1, &parent, 4);
+	const unsigned char *found = FindInModule(server, true, read, sizeof(read), &text);
+	if (!found || !text) return nullptr;
+	// push ebx; mov ebx, esp; sub esp, 8; and esp, -16
+	static const unsigned char kStart[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0};
+	constexpr ptrdiff_t kLongest = 0x1000;  // (the read is 0x6A4 into the function in the game this was written for)
+	for (const unsigned char *at = found - (reinterpret_cast<uintptr_t>(found) & 15); at >= text && found - at < kLongest; at -= 16)
+		if (!memcmp(at, kStart, sizeof(kStart)) && (at == text || at[-1] == 0xCC || at[-1] == 0xC3))
+			return reinterpret_cast<FindUseEntityFn>(const_cast<unsigned char *>(at));
+	return nullptr;
+}
+
+struct BoxOffsets {
+	bool looked = false;
+	int origin = -1, angles = -1, mins = -1, maxs = -1;
+} g_box;
+
+}  // namespace
+
+bool GetUseKey(int entIndex, UseKey &out) {
+	if (!g_globals || !g_globals->edicts || entIndex < 1 || entIndex > g_globals->maxClients) return false;
+	const sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse()) return false;
+	const char *player = static_cast<const char *>(edict.unknown);
+	FindUseOffsets(player);
+	if (g_use.buttonsPressed < 0 || g_use.startTime < 0 || g_use.cooldownTime < 0 || g_use.lockOutTime < 0) return false;
+	int pressed = 0;
+	memcpy(&pressed, player + g_use.buttonsPressed, sizeof(pressed));
+	out.pressed = (pressed & p2demo::IN_USE) != 0;
+	memcpy(&out.startTime, player + g_use.startTime, sizeof(float));
+	// (two clocks: one the game sets ahead to switch the key off, and the time the key last picked an object up,
+	// after which it picks nothing up for a second: an object let go of at once can't be caught again)
+	constexpr float kLockOut = 1.0f;
+	float cooldown = 0, lockOut = 0;
+	memcpy(&cooldown, player + g_use.cooldownTime, sizeof(float));
+	memcpy(&lockOut, player + g_use.lockOutTime, sizeof(float));
+	out.lockedUntil = cooldown > lockOut + kLockOut ? cooldown : lockOut + kLockOut;
+	out.now = g_globals->curtime;
+	return true;
+}
+
+int FindUseTarget(int entIndex, const UseView *view) {
+	if (!g_globals || !g_globals->edicts || entIndex < 1 || entIndex > g_globals->maxClients) return -1;
+	const sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse()) return -1;
+	char *player = static_cast<char *>(edict.unknown);
+	FindUseOffsets(player);
+	if (!g_lookedForFindUseEntity) {
+		g_lookedForFindUseEntity = true;
+		g_findUseEntity = LocateFindUseEntity();
+		Debug("use search: %p, grab portal field %d\n", g_findUseEntity, g_use.grabPortal);
+	}
+	if (!g_findUseEntity || g_use.grabPortal < 0 || (view && (g_use.absOrigin < 0 || g_use.viewAngles < 0))) return -1;
+	// (the search notes the portal it looked through in the player; the use key's own code clears that again)
+	unsigned grabPortal;
+	memcpy(&grabPortal, player + g_use.grabPortal, sizeof(grabPortal));
+	Vec3 origin;
+	float angles[2], eyeAngles[2];
+	if (view) {
+		memcpy(&origin, player + g_use.absOrigin, sizeof(origin));
+		memcpy(angles, player + g_use.viewAngles, sizeof(angles));
+		memcpy(&eyeAngles[0], player + g_player.eyePitch, sizeof(float));
+		memcpy(&eyeAngles[1], player + g_player.eyeYaw, sizeof(float));
+		auto apart = [](float a, float b) { return std::fabs(std::remainder(a - b, 360.0f)) > 0.5f; };
+		if (apart(angles[0], eyeAngles[0]) || apart(angles[1], eyeAngles[1])) return -1;  // (not the field it was taken for)
+		Vec3 there = {origin.x + view->moved.x, origin.y + view->moved.y, origin.z + view->moved.z};
+		float look[2] = {view->pitch, view->yaw};
+		memcpy(player + g_use.absOrigin, &there, sizeof(there));
+		memcpy(player + g_use.viewAngles, look, sizeof(look));
+	}
+	void *throughPortal = nullptr;
+	const void *found = g_findUseEntity(player, &throughPortal);
+	if (view) {
+		memcpy(player + g_use.absOrigin, &origin, sizeof(origin));
+		memcpy(player + g_use.viewAngles, angles, sizeof(angles));
+	}
+	memcpy(player + g_use.grabPortal, &grabPortal, sizeof(grabPortal));
+	if (!found) return 0;
+	for (int i = 1; i < EntityLimit(); i++)
+		if (g_globals->edicts[i].unknown == found && g_globals->edicts[i].InUse()) return i;
+	return kUseTargetUnnamed;
+}
+
+int EntityLimit() { return g_globals ? (g_globals->maxEntities < kMaxEdicts ? g_globals->maxEntities : kMaxEdicts) : 0; }
+
+bool GetEntityBox(int entIndex, EntityBox &out) {
+	if (!g_globals || !g_globals->edicts || entIndex < 1 || entIndex >= EntityLimit()) return false;
+	if (!g_box.looked) {
+		g_box.looked = true;
+		if (sdk::ServerClass *cls = FindServerClass(g_serverGame, "CBaseEntity")) {
+			g_box.origin = FindPropOffset(cls->table, "m_vecOrigin");
+			g_box.angles = FindPropOffset(cls->table, "m_angRotation");
+			g_box.mins = FindPropOffset(cls->table, "m_vecMins");
+			g_box.maxs = FindPropOffset(cls->table, "m_vecMaxs");
+		}
+	}
+	if (g_box.origin < 0 || g_box.angles < 0 || g_box.mins < 0 || g_box.maxs < 0) return false;
+	const sdk::Edict &edict = g_globals->edicts[entIndex];
+	if (!edict.InUse() || !edict.networkable) return false;
+	const char *entity = static_cast<const char *>(edict.unknown);
+	const char *name = CallVirtual<const char *>(edict.networkable, kGetClassName);
+	out.className = name ? name : "";
+	float angles[3];
+	memcpy(&out.origin, entity + g_box.origin, sizeof(Vec3));
+	memcpy(angles, entity + g_box.angles, sizeof(angles));
+	out.pitch = angles[0];
+	out.yaw = angles[1];
+	out.roll = angles[2];
+	memcpy(&out.mins, entity + g_box.mins, sizeof(Vec3));
+	memcpy(&out.maxs, entity + g_box.maxs, sizeof(Vec3));
 	return true;
 }
 
