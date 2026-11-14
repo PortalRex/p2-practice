@@ -21,6 +21,9 @@ namespace P2Practice {
 		public DemoFile Demo;     // the only demo, or the host's of a co-op pair
 		public DemoFile Partner;  // the client's demo of the same run, or null
 		public string MapName, Players, Mode, Files, SearchText;
+		public bool Challenge;   // a Challenge Mode run
+		public bool Finished;    // ... that reached the flags (SAR recorded it)
+		public bool Unfinished;  // ... that is known not to have reached them
 
 		public bool Ok { get { return Demo.Scan.Ok; } }
 		public string Map { get { return Demo.Scan.Map; } }
@@ -42,6 +45,12 @@ namespace P2Practice {
 				MapName = Maps.Name(s.Map);
 				Players = s.Player + (partner != null ? "  +  " + partner.Scan.Player : "");
 				Mode = !s.Coop ? "SP" : partner != null ? "Co-op" : s.Host ? "Co-op (blue)" : "Co-op (orange)";
+				// (either demo of a pair can say it: one of the two may be without SAR's data)
+				var p = partner != null ? partner.Scan : null;
+				Finished = s.Finished || (p != null && p.Finished);
+				Challenge = s.Challenge || (p != null && p.Challenge);
+				Unfinished = Challenge && !Finished && (s.FinishKnown || (p != null && p.FinishKnown));
+				if (Challenge) Mode += Unfinished ? ", CM, no finish" : Finished ? ", CM" : ", CM, no SAR";
 			}
 			SearchText = (MapName + "\n" + s.Map + "\n" + Players + "\n" + Mode + "\n" + Files).ToLowerInvariant();
 		}
@@ -275,7 +284,7 @@ namespace P2Practice {
 
 		// ---- the cache: one line per demo, tab-separated, so reopening the launcher asks the helper nothing ----
 
-		const string CacheHeader = "P2PracticeCache 1";
+		const string CacheHeader = "P2PracticeCache 2";
 
 		static Dictionary<string, DemoFile> LoadCache() {
 			var d = new Dictionary<string, DemoFile>();
@@ -285,7 +294,7 @@ namespace P2Practice {
 				if (lines.Length == 0 || lines[0] != CacheHeader + "\t" + RouteCli.Stamp) return d;
 				for (int i = 1; i < lines.Length; i++) {
 					var p = lines[i].Split('\t');
-					if (p.Length < 13) continue;
+					if (p.Length < 16) continue;
 					var f = new DemoFile { Path = Unescape(p[0]), Scan = new ScanResult() };
 					f.Name = Path.GetFileNameWithoutExtension(f.Path);
 					var s = f.Scan;
@@ -300,6 +309,9 @@ namespace P2Practice {
 					s.TimeText = Unescape(p[10]);
 					s.HasTime = p[11] == "1";
 					s.Error = p[12].Length > 0 ? Unescape(p[12]) : null;
+					s.Challenge = p[13] == "1";
+					s.FinishKnown = p[14] == "1";
+					s.Finished = p[15] == "1";
 					d[f.Path.ToLowerInvariant()] = f;
 				}
 			} catch (IOException) { } catch (UnauthorizedAccessException) { } catch (ArgumentException) { }
@@ -329,7 +341,8 @@ namespace P2Practice {
 				  .Append(s.Ok ? '1' : '0').Append('\t').Append(Escape(s.Map)).Append('\t').Append(s.Coop ? '1' : '0').Append('\t')
 				  .Append(Escape(s.Player)).Append('\t').Append(s.Host ? '1' : '0').Append('\t')
 				  .Append(s.Ticks.ToString(CultureInfo.InvariantCulture)).Append('\t').Append(s.Time.ToString("R", CultureInfo.InvariantCulture)).Append('\t')
-				  .Append(Escape(s.TimeText)).Append('\t').Append(s.HasTime ? '1' : '0').Append('\t').Append(Escape(s.Error ?? "")).Append('\n');
+				  .Append(Escape(s.TimeText)).Append('\t').Append(s.HasTime ? '1' : '0').Append('\t').Append(Escape(s.Error ?? "")).Append('\t')
+				  .Append(s.Challenge ? '1' : '0').Append('\t').Append(s.FinishKnown ? '1' : '0').Append('\t').Append(s.Finished ? '1' : '0').Append('\n');
 			}
 			try {
 				Directory.CreateDirectory(App.Home);

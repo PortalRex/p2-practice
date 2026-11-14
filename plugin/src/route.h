@@ -180,6 +180,18 @@ bool Load(const std::vector<std::string> &paths, Route &out, std::string &error)
 // A few lines for the console: map, players, time, segments.
 std::string Describe(const Route &route);
 
+// What kind of run a demo holds, for the lists of runs: made in Challenge Mode or not, and whether it got to the
+// finish flags. Only SAR records the flags being touched, so a demo without SAR's data doesn't say (finishKnown).
+struct DemoKind {
+	bool challenge = false;
+	bool finishKnown = false;
+	bool finished = false;
+};
+DemoKind KindOf(const p2demo::Demo &demo);
+// Reads a demo for a list of runs, as quickly as that allows: its header and SAR's data and, only where those
+// don't say which mode it was made in, the players up to where they show it. (No paths, portals or objects.)
+bool ReadForList(const char *path, p2demo::Demo &demo, std::string &error);
+
 const char *TeamName(int team);       // "Blue", "Orange", or "Player"
 std::string FormatTime(float seconds);  // 6.46, 1:02.35
 std::string FormatHundredths(int hundredths);

@@ -24,7 +24,7 @@ namespace fs = std::filesystem;
 namespace library {
 namespace {
 
-constexpr const char *kCacheHeader = "P2PracticeLibrary 1";
+constexpr const char *kCacheHeader = "P2PracticeLibrary 2";
 
 // What the background reader hands over: the demos, and the runs made of them (pointing into `demos`)
 struct Shelf {
@@ -111,7 +111,7 @@ std::map<std::string, Demo> LoadCache() {
 			if (tab == std::string::npos) break;
 			start = tab + 1;
 		}
-		if (f.size() < 12) continue;
+		if (f.size() < 15) continue;
 		Demo d;
 		d.path = f[0];
 		d.size = _atoi64(f[1].c_str());
@@ -124,7 +124,10 @@ std::map<std::string, Demo> LoadCache() {
 		d.hasTime = f[8] == "1";
 		d.ticks = atoi(f[9].c_str());
 		d.seconds = static_cast<float>(atof(f[10].c_str()));
-		d.error = f[11];
+		d.challenge = f[11] == "1";
+		d.finishKnown = f[12] == "1";
+		d.finished = f[13] == "1";
+		d.error = f[14];
 		d.name = Utf8(fs::path(Wide(d.path)).stem().wstring());
 		cache[Lower(d.path)] = d;
 	}
@@ -146,17 +149,15 @@ void SaveCache(const std::vector<Demo> &demos) {
 		for (const Demo &d : demos)
 			out << d.path << '\t' << d.size << '\t' << d.modified << '\t' << (d.ok ? 1 : 0) << '\t' << clean(d.map) << '\t' << clean(d.player) << '\t'
 			    << (d.coop ? 1 : 0) << '\t' << (d.host ? 1 : 0) << '\t' << (d.hasTime ? 1 : 0) << '\t' << d.ticks << '\t' << d.seconds << '\t'
-			    << clean(d.error) << "\n";
+			    << (d.challenge ? 1 : 0) << '\t' << (d.finishKnown ? 1 : 0) << '\t' << (d.finished ? 1 : 0) << '\t' << clean(d.error) << "\n";
 	}
 	MoveFileExW(Wide(temp).c_str(), Wide(CacheFile()).c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
 void Read(Demo &d) {
 	p2demo::Demo demo;
-	p2demo::ParseOptions options;
-	options.entities = false;  // the header and SAR's data are enough, and far quicker to read
 	std::string error;
-	if (!p2demo::ParseFile(d.path.c_str(), demo, error, options)) {
+	if (!route::ReadForList(d.path.c_str(), demo, error)) {
 		d.ok = false;
 		d.error = error;
 		return;
@@ -173,6 +174,10 @@ void Read(Demo &d) {
 	d.player = demo.header.client;
 	d.coop = d.map.compare(0, 8, "mp_coop_") == 0;
 	d.host = demo.header.server.compare(0, 9, "localhost") == 0;
+	route::DemoKind kind = route::KindOf(demo);
+	d.challenge = kind.challenge;
+	d.finishKnown = kind.finishKnown;
+	d.finished = kind.finished;
 }
 
 // How much two demos look like the two halves of one run: the same folder, names that start the same and end
@@ -198,6 +203,7 @@ int Likeness(const Demo &a, const Demo &b) {
 
 Run MakeRun(const Demo *demo, const Demo *partner) {
 	Run r;
+	std::string kind;  // (for the search)
 	r.demo = demo;
 	r.partner = partner;
 	r.files = demo->name + ".dem" + (partner ? "  +  " + partner->name + ".dem" : "");
@@ -210,8 +216,13 @@ Run MakeRun(const Demo *demo, const Demo *partner) {
 		r.players = demo->player + (partner ? "  +  " + partner->player : "");
 		r.mode = !demo->coop ? "SP" : partner ? "Co-op" : demo->host ? "Co-op (blue)" : "Co-op (orange)";
 		r.timeText = demo->hasTime ? route::FormatTime(demo->seconds) : demo->seconds > 0 ? "~" + route::FormatTime(demo->seconds) : "";
+		// (either demo of a pair can say it: one of the two may be without SAR's data)
+		r.finished = demo->finished || (partner && partner->finished);
+		r.challenge = demo->challenge || (partner && partner->challenge);
+		r.unfinished = r.challenge && !r.finished && (demo->finishKnown || (partner && partner->finishKnown));
+		if (r.challenge) kind = r.unfinished ? "cm challenge mode no finish" : r.finished ? "cm challenge mode finished" : "cm challenge mode";
 	}
-	r.search = Lower(r.chamber + "\n" + (demo->ok ? demo->map : "") + "\n" + r.players + "\n" + r.mode + "\n" + r.files);
+	r.search = Lower(r.chamber + "\n" + (demo->ok ? demo->map : "") + "\n" + r.players + "\n" + r.mode + "\n" + kind + "\n" + r.files);
 	return r;
 }
 

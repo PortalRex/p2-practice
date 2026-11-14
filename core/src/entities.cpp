@@ -356,6 +356,7 @@ public:
 		replaced_.resize(kMaxEntities);
 		entityBaselines_[0].resize(kMaxEntities);
 		entityBaselines_[1].resize(kMaxEntities);
+		modeOnly_ = options.modeOnly;
 	}
 
 	void run(const std::vector<NetRecord> &records) {
@@ -372,6 +373,7 @@ public:
 				// ones build on it); a few more are read for the warnings.
 				if (errors_.size() >= kMaxFailedFrames) return;
 			}
+			if (modeOnly_ && modeKnown_) return;
 		}
 	}
 
@@ -751,6 +753,9 @@ private:
 		key.team = ToInt(NumberAt(s, f.team));
 		key.heldEntity = HandleIndex(NumberAt(s, f.heldObject, -1));
 		if (f.challenge >= 0 && ToInt(NumberAt(s, f.challenge)) != 0) track.challenge = true;
+		// (a player is in its mode from the moment it spawns: one that has been there this long without it is not)
+		constexpr size_t kKeysOutOfChallenge = 120;
+		if (track.challenge || track.playerKeys.size() >= kKeysOutOfChallenge) modeKnown_ = true;
 		key.hasVelocity = f.velocity[0] >= 0 && f.velocity[1] >= 0 && f.velocity[2] >= 0;
 		if (key.hasVelocity) {
 			key.velocity.x = ToFloat(NumberAt(s, f.velocity[0]));
@@ -829,6 +834,8 @@ private:
 	size_t keyCount_ = 0;
 	int tick_ = 0;
 	int serverTickAtZero_ = Demo::kNoServerTick;
+	bool modeOnly_ = false;   // ParseOptions::modeOnly
+	bool modeKnown_ = false;  // a player has been seen in Challenge Mode, or long enough out of it
 };
 
 // Each client's player_info_t in "userinfo" (its slot is one less than its

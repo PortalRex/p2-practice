@@ -925,6 +925,12 @@ namespace P2Practice {
 					if (blue) { Ui.Fill(g, Theme.Blue, new RectangleF(x, y, pip, pip)); x += pip + P(3); }
 					if (orange) Ui.Fill(g, Theme.Orange, new RectangleF(x, y, pip, pip));
 				}
+				if (run.Challenge) {
+					// Challenge Mode: plain when the run got to the flags; otherwise that it didn't, or that the demo can't say
+					float tag = mode.X + Ui.Width(word, L.Body) + (run.Coop ? P(30) : P(8));
+					Ui.Text(g, run.Unfinished ? "CM, no finish" : run.Finished ? "CM" : "CM, no SAR", L.Body, run.Unfinished && !selected ? Theme.Orange : soft,
+					        new RectangleF(tag, mode.Y, Math.Max(0, mode.Right - tag), mode.Height));
+				}
 			}
 		}
 	}

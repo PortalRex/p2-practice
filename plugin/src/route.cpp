@@ -693,6 +693,28 @@ int Route::ShownHundredths(int ticks) const {
 
 std::string Route::Show(int ticks) const { return FormatHundredths(ShownHundredths(ticks)); }
 
+DemoKind KindOf(const p2demo::Demo &demo) {
+	DemoKind kind;
+	kind.finished = !demo.sarFlags.empty();
+	kind.finishKnown = demo.hasSarData;
+	// (the players say which mode they are in; flags touched say so too, for a demo whose players couldn't be read)
+	kind.challenge = kind.finished;
+	for (const auto &player : demo.players) kind.challenge = kind.challenge || player.challenge;
+	return kind;
+}
+
+bool ReadForList(const char *path, p2demo::Demo &demo, std::string &error) {
+	p2demo::ParseOptions options;
+	options.entities = false;
+	if (!p2demo::ParseFile(path, demo, error, options)) return false;
+	if (!demo.sarFlags.empty()) return true;  // (flags touched: a Challenge Mode run)
+	// (the network data costs several times the rest of the read: only for the demos that need it)
+	options.entities = true;
+	options.movers = false;
+	options.modeOnly = true;
+	return p2demo::ParseFile(path, demo, error, options);
+}
+
 std::string FormatTime(float seconds) {
 	char text[32];
 	bool negative = seconds < 0;

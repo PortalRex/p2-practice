@@ -136,6 +136,10 @@ Shows the loaded run: its time, chamber and parts, and a bar of the run with the
 
 - Lists every demo in your folders, searched recursively. To begin with that is the game's `demos` folder.
 - Co-op pairs are shown as one run.
+- Challenge Mode runs are marked in the MODE column: `CM` when the run reached the flags, `CM · no finish` when it
+  didn't, and `CM · no SAR` when the demo has no SAR data to say.
+- Click a column's name to sort (CHAMBER, TIME, FILE). Clicking **MODE** steps through every run, Challenge Mode
+  runs, Challenge Mode runs that reached the flags, and the other runs.
 - Demos are read in the background and cached in `portal2/p2practice/library.cache`.
 - Type to search. **FOLDERS** adds a folder (paste its path with Ctrl+V) or removes one.
 - Double-click a run, or press **LOAD THIS RUN**.
@@ -453,6 +457,17 @@ With another wrapper already in the launch options, chain them:
 ```
 "...\P2Multi.exe" "...\chocoload.exe" %command% ...
 ```
+
+### Using them
+
+Once they are on, a retry goes through the save state. A retry is any of:
+
+- `prac_retry` (bind it: `bind f5 prac_retry`), or RETRY in the menu,
+- the game's own `restart_level`, the pause menu's Restart Level, and Replay Map on the finish board. While
+  practicing, these retry the attempt instead of restarting the level.
+
+The game's `reload` and loading a save are not retries. The menu's status line says "save states ready" when
+ChocolateLoading is running and the right build.
 
 ### What to know
 

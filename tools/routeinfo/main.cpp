@@ -50,9 +50,8 @@ const char *TeamKey(int team) {
 int Scan(const char *path) {
 	p2demo::Demo demo;
 	std::string error;
-	p2demo::ParseOptions options;
-	options.entities = false;  // the header and SAR's data are enough here, and far quicker to read
-	if (!p2demo::ParseFile(path, demo, error, options)) return Fail(error);
+	if (!route::ReadForList(path, demo, error)) return Fail(error);
+	route::DemoKind kind = route::KindOf(demo);
 
 	int ticks = 0;
 	for (const auto &result : demo.sarSpeedruns)
@@ -62,9 +61,11 @@ int Scan(const char *path) {
 	float seconds = ticks * demo.intervalPerTick;
 	bool coop = demo.header.map.compare(0, 8, "mp_coop_") == 0;
 	bool host = demo.header.server.compare(0, 9, "localhost") == 0;
-	printf("{\"ok\":true,\"map\":%s,\"coop\":%s,\"player\":%s,\"host\":%s,\"ticks\":%d,\"time\":%.4f,\"timeText\":%s,\"hasTime\":%s}\n",
+	printf("{\"ok\":true,\"map\":%s,\"coop\":%s,\"player\":%s,\"host\":%s,\"ticks\":%d,\"time\":%.4f,\"timeText\":%s,\"hasTime\":%s,"
+	       "\"challenge\":%s,\"finishKnown\":%s,\"finished\":%s}\n",
 	       Json(demo.header.map).c_str(), coop ? "true" : "false", Json(demo.header.client).c_str(), host ? "true" : "false", ticks, seconds,
-	       Json(route::FormatTime(seconds)).c_str(), hasTime ? "true" : "false");
+	       Json(route::FormatTime(seconds)).c_str(), hasTime ? "true" : "false", kind.challenge ? "true" : "false",
+	       kind.finishKnown ? "true" : "false", kind.finished ? "true" : "false");
 	return 0;
 }
 

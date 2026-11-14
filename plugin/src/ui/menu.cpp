@@ -64,6 +64,7 @@ struct State {
 	std::string search, searchShown = "\x01";
 	bool runsThisMap = false;  // only the runs of the level that is up
 	int runsSort = 0;          // 0 by chamber (the game's order), 1 fastest first, 2 newest first
+	int runsKind = 0;          // 0 every run, 1 Challenge Mode, 2 Challenge Mode that reached the flags, 3 the others
 	int libraryVersion = -1;
 	std::vector<int> shown;  // indices of the runs matching the search
 	int runsScroll = 0;
@@ -729,7 +730,7 @@ void RunsPage(Rect area) {
 	}
 
 	// the runs matching the search, the map and the order (worked out again only when one of them or the runs change)
-	std::string shownKey = g.search + '\x01' + (g.runsThisMap ? level : "") + '\x01' + std::to_string(g.runsSort);
+	std::string shownKey = g.search + '\x01' + (g.runsThisMap ? level : "") + '\x01' + std::to_string(g.runsSort) + '\x01' + std::to_string(g.runsKind);
 	if (g.searchShown != shownKey || g.libraryVersion != library::Version()) {
 		g.searchShown = shownKey;
 		g.libraryVersion = library::Version();
@@ -737,6 +738,9 @@ void RunsPage(Rect area) {
 		std::string needle = Lower(g.search);
 		for (size_t i = 0; i < runs.size(); i++) {
 			if (g.runsThisMap && runs[i].demo->map != level) continue;
+			if (g.runsKind == 1 && !runs[i].challenge) continue;
+			if (g.runsKind == 2 && !runs[i].finished) continue;
+			if (g.runsKind == 3 && (runs[i].challenge || !runs[i].demo->ok)) continue;
 			if (needle.empty() || runs[i].search.find(needle) != std::string::npos) g.shown.push_back(static_cast<int>(i));
 		}
 		if (g.runsSort == 1)
@@ -749,23 +753,30 @@ void RunsPage(Rect area) {
 			std::stable_sort(g.shown.begin(), g.shown.end(), [&](int a, int b) { return runs[a].demo->modified > runs[b].demo->modified; });
 	}
 
-	// columns (CHAMBER, TIME and FILE sort the list: chamber order, fastest, newest)
+	// columns (CHAMBER, TIME and FILE sort the list: chamber order, fastest, newest; MODE picks which runs are listed)
 	Rect head = ui::Take(Px(26));
 	int w = head.w - Px(12);
-	int cx[] = {head.x + Px(12), head.x + w * 30 / 100, head.x + w * 41 / 100, head.x + w * 70 / 100, head.x + w * 82 / 100};
+	int cx[] = {head.x + Px(12), head.x + w * 30 / 100, head.x + w * 41 / 100, head.x + w * 64 / 100, head.x + w * 82 / 100};
 	const char *names[] = {"CHAMBER", "TIME", "PLAYERS", "MODE", "FILE"};
 	const int sortOf[] = {0, 1, -1, -1, 2};
 	for (int c = 0; c < 5; c++) {
 		Rect cell{cx[c] - Px(4), head.y, (c + 1 < 5 ? cx[c + 1] : head.x + head.w) - cx[c], head.h};
-		bool sorts = sortOf[c] >= 0, on = sorts && g.runsSort == sortOf[c];
-		bool hover = sorts && ui::Hovered(cell);
-		std::string name = std::string(names[c]) + (on && c == 1 ? "  (fastest)" : on && c == 4 ? "  (newest)" : "");
+		bool filters = c == 3;
+		bool sorts = sortOf[c] >= 0, on = (sorts && g.runsSort == sortOf[c]) || (filters && g.runsKind != 0);
+		bool hover = (sorts || filters) && ui::Hovered(cell);
+		static const char *const kinds[] = {"", "  (CM)", "  (CM, finished)", "  (not CM)"};
+		std::string name = std::string(names[c]) + (filters ? kinds[g.runsKind] : on && c == 1 ? "  (fastest)" : on && c == 4 ? "  (newest)" : "");
 		int tw = gfx::Text(cx[c], head.y + Px(4), Font::Small, on ? theme::kText : hover ? theme::kDim : theme::kFaint, name.c_str());
 		if (on) gfx::FillRect(cx[c], head.y + head.h - Px(3), tw, Px(2), theme::kBlue);
 		if (sorts) {
 			ui::Spot(std::string("sort:") + names[c], cell);
 			ui::HintFor(cell, c == 0 ? "Sort by chamber, in the game's order" : c == 1 ? "Sort by time, fastest first" : "Sort by date, newest first");
 			if (ui::Clicked(cell)) g.runsSort = sortOf[c];
+		}
+		if (filters) {
+			ui::Spot("filter:MODE", cell);
+			ui::HintFor(cell, "Click to list: every run, Challenge Mode runs, Challenge Mode runs that reached the flags, the other runs");
+			if (ui::Clicked(cell)) g.runsKind = (g.runsKind + 1) % 4;
 		}
 	}
 	Rect listArea = ui::Area();
@@ -791,6 +802,12 @@ void RunsPage(Rect area) {
 			if (orange) gfx::FillRect(cx[3] + Px(14), sy, sq, sq, theme::kOrange);
 		} else
 			ui::TextIn(cx[3], ty, cx[4] - cx[3] - Px(10), Font::Normal, theme::kDim, run.demo->ok ? "SP" : "");
+		if (run.challenge) {
+			// Challenge Mode: plain when the run got to the flags; otherwise that it didn't, or that the demo can't say
+			int tagX = cx[3] + Px(34);
+			ui::TextIn(tagX, row.y + (row.h - gfx::FontHeight(Font::Small)) / 2, cx[4] - tagX - Px(10), Font::Small, run.unfinished ? theme::kOrange : theme::kDim,
+			           run.unfinished ? "CM \xC2\xB7 no finish" : run.finished ? "CM" : "CM \xC2\xB7 no SAR");
+		}
 		ui::TextIn(cx[4], ty, row.x + row.w - cx[4] - Px(6), Font::Small, theme::kDim, run.files);
 		if (clicked) {
 			bool twice = g.lastClicked == run.demo->path && GetTickCount() - g.lastClick < 400;
@@ -1355,6 +1372,9 @@ const std::vector<Step> &UiScript() {
 		{'m', "sort:TIME", 20}, {'k'}, {'w', "", 10},
 		{'m', "THIS MAP", 20}, {'k'}, {'w', "", 15}, {'c', "jpeg ui_runs 90"}, {'w', "", 10},
 		{'k'}, {'m', "sort:CHAMBER", 15}, {'k'}, {'w', "", 5},
+		{'m', "filter:MODE", 15}, {'k'}, {'w', "", 10}, {'c', "jpeg ui_runs_cm 90"}, {'w', "", 10},
+		{'k'}, {'w', "", 10}, {'c', "jpeg ui_runs_cm_finished 90"}, {'w', "", 10},
+		{'k'}, {'w', "", 10}, {'c', "jpeg ui_runs_not_cm 90"}, {'w', "", 10}, {'k'}, {'w', "", 5},
 		{'c', "prac_menu boards"}, {'w', "", 240}, {'c', "jpeg ui_boards 90"}, {'w', "", 10},
 		{'m', "chamberfilter", 20}, {'k'}, {'t', "fling", 4}, {'w', "", 15}, {'c', "jpeg ui_boards_filter 90"}, {'w', "", 10},
 		{'c', "prac_menu settings"}, {'w', "", 20},

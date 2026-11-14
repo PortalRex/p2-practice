@@ -282,7 +282,7 @@ void PrintSettings() {
 	if (g_set.ghostColorSet) engine::Print("  ghostcolor %d %d %d  the ghosts' colour (red green blue), or team for their robots' colours\n", g_set.ghostColor[0], g_set.ghostColor[1], g_set.ghostColor[2]);
 	else engine::Print("  ghostcolor team   the ghosts' colour: their robots' colours, or three numbers 0-255 (red green blue)\n");
 	engine::Print("  ghostopacity %d  how solid the ghosts are drawn, in percent\n", g_set.ghostOpacity);
-	engine::Print("  snapshots %d     retry instantly through ChocolateLoading's snapshots when it is running (experimental)\n", g_set.snapshots);
+	engine::Print("  snapshots %d     retry (prac_retry) through a save state instead of restarting the level; needs the ChocolateLoading that comes with P2 Practice\n", g_set.snapshots);
 }
 
 void CmdSet(const sdk::CCommand &args) {

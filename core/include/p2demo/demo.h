@@ -220,6 +220,9 @@ struct Demo {
 struct ParseOptions {
 	bool entities = true;  // decode the network data (players, portals, movers, shots)
 	bool movers = true;    // keep MoverTracks (off: players and portals only)
+	// Stop decoding the network data once it says which mode the players are in (PlayerTrack::challenge): for
+	// lists of demos, which ask nothing else of it. The tracks then end there.
+	bool modeOnly = false;
 };
 
 // Never throws and never reads outside [data, data + size).  On failure

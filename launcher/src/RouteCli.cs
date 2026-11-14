@@ -25,6 +25,9 @@ namespace P2Practice {
 		public double Time;       // seconds: the run's when HasTime, else the demo's length
 		public string TimeText = "";
 		public bool HasTime;      // the demo carries a SAR run time
+		public bool Challenge;    // made in Challenge Mode
+		public bool FinishKnown;  // the demo says whether the finish flags were reached (SAR's data)
+		public bool Finished;     // ... and they were
 	}
 
 	class RoutePlayer {
@@ -89,6 +92,9 @@ namespace P2Practice {
 			r.Time = Num(j, "time");
 			r.HasTime = Bool(j, "hasTime");
 			r.TimeText = Str(j, "timeText");
+			r.Challenge = Bool(j, "challenge");
+			r.FinishKnown = Bool(j, "finishKnown");
+			r.Finished = Bool(j, "finished");
 			if (r.TimeText.Length == 0) r.TimeText = FormatTime(r.Time);
 			if (r.Map.Length == 0) { r.Ok = false; r.Error = "the demo names no map"; }
 			return r;

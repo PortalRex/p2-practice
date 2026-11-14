@@ -15,6 +15,8 @@ struct Demo {
 	bool ok = false;
 	std::string map, player, error;
 	bool coop = false, host = false, hasTime = false;
+	bool challenge = false;                       // made in Challenge Mode
+	bool finishKnown = false, finished = false;   // got to the finish flags (known only with SAR's data in the demo)
 	int ticks = 0;
 	float seconds = 0;
 };
@@ -24,6 +26,9 @@ struct Run {
 	const Demo *partner = nullptr;  // the client's demo of the same run
 	std::string chamber, players, mode, files, timeText, search;  // shown (search: lower case, everything)
 	int order = 0;                  // the chamber's place in the game
+	bool challenge = false;         // a Challenge Mode run
+	bool finished = false;          // ... that reached the flags (SAR recorded it)
+	bool unfinished = false;        // ... that is known not to have reached them
 };
 
 // The data folder (<game>/p2practice) and the folders searched for demos
