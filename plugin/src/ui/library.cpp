@@ -65,33 +65,38 @@ std::string Lower(std::string text) {
 }
 
 std::string g_dataFolder;  // (worked out on the game's thread: the reader never asks the game anything)
+std::string g_downloadFolder;  // (the same: the boards' downloads, always read)
 std::string FoldersFile() { return g_dataFolder + "\\folders.txt"; }
+constexpr const char *kFoldersHeader = "P2PracticeFolders 2";  // the file's first line
+void SaveFolders();
 std::string CacheFile() { return g_dataFolder + "\\library.cache"; }
 
 void LoadFolders() {
 	if (g_foldersLoaded) return;
 	g_foldersLoaded = true;
 	g_dataFolder = DataFolder();
+	g_downloadFolder = DownloadFolder();
+	// Only the folders the player added are read (and the plugin's own downloads): nothing of theirs by default.
+	// A list from before that rule has the game's demos folder in it, put there by the plugin: it goes, once.
 	std::ifstream in(Wide(FoldersFile()));
 	std::string line;
-	bool any = false;
+	bool current = false, first = true;
+	std::string oldDefault = Lower(engine::GameDirectory() + "\\demos");
 	while (std::getline(in, line)) {
 		if (!line.empty() && line.back() == '\r') line.pop_back();
-		if (!line.empty()) g_folders.push_back(line);
-		any = true;
+		if (first && line == kFoldersHeader) current = true;
+		else if (!line.empty() && (current || Lower(line) != oldDefault)) g_folders.push_back(line);
+		first = false;
 	}
-	if (any) return;
-	// first time: the game's demos folder (with the boards' downloads under it)
-	std::string demos = engine::GameDirectory() + "\\demos";
-	std::error_code ec;
-	fs::create_directories(Wide(DownloadFolder()), ec);
-	g_folders.push_back(demos);
+	in.close();
+	if (!current && !first) SaveFolders();
 }
 
 void SaveFolders() {
 	std::error_code ec;
 	fs::create_directories(Wide(g_dataFolder), ec);
 	std::ofstream out(Wide(FoldersFile()), std::ios::trunc);
+	out << kFoldersHeader << "\n";
 	for (const std::string &folder : g_folders) out << folder << "\n";
 }
 
@@ -372,7 +377,9 @@ void Start(std::vector<std::string> added = {}) {
 	g_busy = true;
 	g_stop = false;
 	g_started = true;
-	g_reader = std::thread([folders = g_folders, added = std::move(added)] {
+	std::vector<std::string> folders = g_folders;
+	folders.push_back(g_downloadFolder);  // (a demo found twice is listed once)
+	g_reader = std::thread([folders = std::move(folders), added = std::move(added)] {
 		ReadAll(folders, added);
 		g_busy = false;
 	});

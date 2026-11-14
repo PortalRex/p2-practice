@@ -782,6 +782,9 @@ void RunsPage(Rect area) {
 	Rect listArea = ui::Area();
 	listArea.h -= Px(52);
 	int rowH = Px(34);
+	if (runs.empty() && !library::Busy() && library::Folders().empty())
+		ui::TextIn(listArea.x + Px(12), listArea.y + Px(10), listArea.w - Px(24), Font::Small, theme::kDim,
+		           "No demo folders yet: press FOLDERS and add the folder your demos are in. Runs you fetch in BOARDS show up here too.");
 	ui::List list = ui::BeginList(listArea, rowH, static_cast<int>(g.shown.size()), g.runsScroll);
 	for (int i = list.first; i < list.last; i++) {
 		const library::Run &run = runs[g.shown[i]];

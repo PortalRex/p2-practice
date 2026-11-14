@@ -31,7 +31,8 @@ struct Run {
 	bool unfinished = false;        // ... that is known not to have reached them
 };
 
-// The data folder (<game>/p2practice) and the folders searched for demos
+// The data folder (<game>/p2practice) and the folders searched for demos: the ones the player added, none to begin
+// with. (The boards' downloads are read too, without being listed.)
 std::string DataFolder();
 std::string DownloadFolder();   // where the boards' demos go: <game>/demos/p2practice/boards
 const std::vector<std::string> &Folders();

@@ -101,6 +101,7 @@ namespace P2Practice {
 
 		public static Settings Load() {
 			var s = new Settings();
+			bool ownFolders = false; // the saved list holds only what the player added (and the launcher's own folder)
 			try {
 				foreach (var raw in File.ReadAllLines(FilePath, Encoding.UTF8)) {
 					var line = raw.Trim();
@@ -112,6 +113,7 @@ namespace P2Practice {
 					switch (k) {
 						case "game": s.GameDir = v; s.GameChosen = v.Length > 0; break;
 						case "folders": s.FoldersSaved = true; break;
+						case "foldersown": ownFolders = true; break;
 						case "folder": if (v.Length > 0 && !s.HasFolder(v)) s.Folders.Add(v); break;
 						case "width": if (num) s.Width = n; break;
 						case "height": if (num) s.Height = n; break;
@@ -128,17 +130,18 @@ namespace P2Practice {
 
 			if (App.GameOverride != null) { s.GameDir = App.GameOverride; s.GameChosen = false; }
 			else if (!GameLocator.IsGameDir(s.GameDir)) { s.GameDir = GameLocator.Find(); s.GameChosen = false; }
+			// A list from before "only the player's folders" has the game's demos folder in it, put there by the
+			// launcher: it goes, once.
+			if (s.FoldersSaved && !ownFolders && GameLocator.IsGameDir(s.GameDir))
+				s.Folders.RemoveAll(f => SamePath(f, Path.Combine(s.GameDir, "portal2", "demos")));
 			if (!s.FoldersSaved) s.AddDefaultFolders();
 			foreach (var set in App.Sets) s.Options.Set(set.Key.ToLowerInvariant(), set.Value);
 			return s;
 		}
 
-		// the game's own demos folder if there is one, and a "demos" folder next to the exe (to drop demos into)
+		// Only the launcher's own "demos" folder next to the exe (to drop demos into; the boards' downloads go under
+		// it). No folder of the player's is read unless they add it.
 		public void AddDefaultFolders() {
-			if (GameLocator.IsGameDir(GameDir)) {
-				var d = Path.Combine(GameDir, "portal2", "demos");
-				if (Directory.Exists(d) && !HasFolder(d)) Folders.Add(d);
-			}
 			var own = Path.Combine(App.ExeDir, "demos");
 			if (!HasFolder(own)) Folders.Add(own);
 		}
@@ -159,6 +162,7 @@ namespace P2Practice {
 			lines.Add("[launcher]");
 			lines.Add("game=" + (GameChosen ? GameDir : "")); // empty: look it up through Steam each time
 			lines.Add("folders=" + Folders.Count);
+			lines.Add("foldersown=1");
 			foreach (var f in Folders) lines.Add("folder=" + f);
 			lines.Add("theme=" + Theme);
 			lines.Add("width=" + Width);

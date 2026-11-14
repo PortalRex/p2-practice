@@ -134,7 +134,8 @@ Shows the loaded run: its time, chamber and parts, and a bar of the run with the
 
 ### RUNS
 
-- Lists every demo in your folders, searched recursively. To begin with that is the game's `demos` folder.
+- Lists every demo in the folders you add, searched recursively. No folder is read until you add one: press
+  **FOLDERS**. Runs fetched in BOARDS are listed too.
 - Co-op pairs are shown as one run.
 - Challenge Mode runs are marked in the MODE column: `CM` when the run reached the flags, `CM · no finish` when it
   didn't, and `CM · no SAR` when the demo has no SAR data to say.
