@@ -1,15 +1,46 @@
+<div align="center">
+
+<img src="docs/images/banner.jpg" alt="P2 Practice: practice against any demo" width="100%">
+
 # P2 Practice
 
 **Practice a Portal 2 speedrun against a demo, inside the real game.**
 
+[![Release](https://img.shields.io/github/v/release/PortalRex/p2-practice?label=release&color=2ea0ff)](https://github.com/PortalRex/p2-practice/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/PortalRex/p2-practice/total?color=ff8c1a)](https://github.com/PortalRex/p2-practice/releases)
+![Game](https://img.shields.io/badge/game-Portal%202-2ea0ff)
+![Platform](https://img.shields.io/badge/platform-Windows-ff8c1a)
+
+[**Download**](https://github.com/PortalRex/p2-practice/releases/latest) ·
+[Quick start](#quick-start) ·
+[Features](#features) ·
+[Menu](#the-in-game-menu) ·
+[Commands](#console-commands) ·
+[Save states](#save-states)
+
+</div>
+
+---
+
 Give it a run (a `.dem`, or both players' demos of a co-op run) and it puts you on that run's route:
 
-- the recorded players run beside you as **ghosts**,
-- a **clock** shows how far ahead or behind you are,
-- you can **start from any part** of the run, with the run's exact position, aim, speed and portals.
+- 👻 the recorded players run beside you as **ghosts**,
+- ⏱️ a **clock** shows how far ahead or behind you are,
+- 🎯 you can **start from any part** of the run, with the run's exact position, aim, speed and portals.
 
 It is a standalone server plugin (`p2practice.dll`) with an optional launcher (`P2Practice.exe`). It works beside
 SAR and p2boost, on DirectX 9 and with `-vulkan`.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/race.jpg" alt="Racing the record: clock, gap, route line and the partner's ghost"></td>
+    <td width="50%"><img src="docs/images/menu-practice.jpg" alt="The in-game menu's PRACTICE page"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Racing the record: the clock and gap, the route in the level, the partner's ghost</sub></td>
+    <td align="center"><sub>The in-game menu: pick a part and start</sub></td>
+  </tr>
+</table>
 
 > [!IMPORTANT]
 > **Nothing you do in practice can reach a leaderboard.** Practice moves players, objects and portals, so it turns
@@ -45,18 +76,23 @@ SAR and p2boost, on DirectX 9 and with `-vulkan`.
 
 | Feature | What it does |
 | --- | --- |
-| **Ghosts** | The recorded players run the route beside you, animated the way the game animates a player. Wireframes in their portal colours, or solid robots in a colour and opacity you choose. |
-| **Live clock** | How far ahead of or behind the run you are, a split for every part, and your speed next to the record's. At the Challenge Mode flags you get the time your run would have had. |
-| **Parts** | The run is cut into parts at its portal shots, portal trips and doors. Start from any part, or from any second: the run plays itself up to that moment (you ride along), then hands you the player. |
-| **Co-op alone** | Pick ATLAS or P-body. The other robot is a real second player driven through its half of the run from the demo: it moves, places its portals and presses its buttons on time, and you can stand on it. |
-| **Co-op together** | With a real partner, each of you gets your own ghost and clock. Only the host needs the plugin; the partner sees the ghosts and text too, and can type the `prac_` commands. |
-| **Ride along** | Watch the whole run from the runner's eyes, inside the level, at any speed. |
-| **Replay and compare** | Play another run in the level against the loaded one, or print a part-by-part table of where it gains and loses. |
-| **Route in the level** | A ribbon along the run's path ahead of you, in your portal colour, with a mark and an aim line for every portal shot. It is part of the level: walls hide it. |
-| **Save states** | With the bundled ChocolateLoading, a retry puts the whole level back in about 10 ms instead of restarting it. |
-| **Bhop trainer** | Speed gained per jump, how much of the air time gained speed, hop timing. |
-| **Use trainer** | When the use key uses nothing: how many units out of reach or degrees off it was, and how many ticks early or late. |
-| **In-game menu** | Press Insert: your demos, the leaderboards, how to practice and every setting, without leaving the game. |
+| 👻 **Ghosts** | The recorded players run the route beside you, animated the way the game animates a player. Wireframes in their portal colours, or solid robots in a colour and opacity you choose. |
+| ⏱️ **Live clock** | How far ahead of or behind the run you are, a split for every part, and your speed next to the record's. At the Challenge Mode flags you get the time your run would have had. |
+| 🧩 **Parts** | The run is cut into parts at its portal shots, portal trips and doors. Start from any part, or from any second: the run plays itself up to that moment (you ride along), then hands you the player. |
+| 🤖 **Co-op alone** | Pick ATLAS or P-body. The other robot is a real second player driven through its half of the run from the demo: it moves, places its portals and presses its buttons on time, and you can stand on it. |
+| 🤝 **Co-op together** | With a real partner, each of you gets your own ghost and clock. Only the host needs the plugin; the partner sees the ghosts and text too, and can type the `prac_` commands. |
+| 🎥 **Ride along** | Watch the whole run from the runner's eyes, inside the level, at any speed. |
+| 📊 **Replay and compare** | Play another run in the level against the loaded one, or print a part-by-part table of where it gains and loses. |
+| 🛤️ **Route in the level** | A ribbon along the run's path ahead of you, in your portal colour, with a mark and an aim line for every portal shot. It is part of the level: walls hide it. |
+| ⚡ **Save states** | With the bundled ChocolateLoading, a retry puts the whole level back in about 10 ms instead of restarting it. |
+| 🐇 **Bhop trainer** | Speed gained per jump, how much of the air time gained speed, hop timing. |
+| ✋ **Use trainer** | When the use key uses nothing: how many units out of reach or degrees off it was, and how many ticks early or late. |
+| 📋 **In-game menu** | Press Insert: your demos, the leaderboards, how to practice and every setting, without leaving the game. |
+
+<p align="center">
+  <img src="docs/images/coop-split.jpg" alt="Co-op alone in split screen: you on one side, the driven partner on the other" width="80%"><br>
+  <sub>Co-op alone: you play one robot, the other is driven through its half of the run</sub>
+</p>
 
 ## Quick start
 
@@ -109,6 +145,27 @@ Shows the loaded run: its time, chamber and parts, and a bar of the run with the
 The Challenge Mode leaderboards at [board.portal2.sr](https://board.portal2.sr), by chapter. Pick a chamber, then
 double-click a run (or press **GET DEMO**): its demo or demos are downloaded into `portal2/demos/p2practice/boards`
 and loaded.
+
+### Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/menu-runs.jpg" alt="The RUNS page"></td>
+    <td width="50%"><img src="docs/images/menu-boards.jpg" alt="The BOARDS page"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>RUNS</sub></td>
+    <td align="center"><sub>BOARDS</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/menu-practice.jpg" alt="The PRACTICE page"></td>
+    <td width="50%"><img src="docs/images/menu-settings.jpg" alt="The SETTINGS page"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>PRACTICE</sub></td>
+    <td align="center"><sub>SETTINGS</sub></td>
+  </tr>
+</table>
 
 ### Good to know
 
@@ -600,3 +657,9 @@ Tests run against a hidden, muted copy of the game that `tools/testkit/launch.ps
 - [SAR](https://github.com/p2sr/SourceAutoRecord): the data in demos that the routes are built from.
 - [Photon](https://github.com/aIIison/photon): the way the menu hooks the game's drawing.
 - [board.portal2.sr](https://board.portal2.sr): the leaderboards and their demos.
+
+---
+
+<div align="center">
+<sub>Made for the Portal 2 speedrunning community.</sub>
+</div>
