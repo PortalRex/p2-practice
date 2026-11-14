@@ -281,12 +281,33 @@ void Publish(std::vector<Demo> demos) {
 	g_version++;
 }
 
-void ReadAll(std::vector<std::string> folders) {
+// The demos to show: every .dem under `folders`; or, with `added` given, the demos the last look through the
+// folders found (the cache) and those files, without looking through the folders again.
+void ReadAll(std::vector<std::string> folders, std::vector<std::string> added) {
 	// (lowest priority: this runs while the player plays)
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
 	std::map<std::string, Demo> cache = LoadCache();
 	std::vector<Demo> found;
 	std::set<std::string> seen;
+	if (!added.empty()) {
+		folders.clear();
+		for (const auto &entry : cache) {
+			found.push_back(entry.second);
+			seen.insert(entry.first);
+		}
+		for (const std::string &file : added) {
+			fs::path path(Wide(file));
+			path.make_preferred();
+			std::error_code ec;
+			Demo d;
+			d.path = Utf8(path.wstring());
+			if (!fs::is_regular_file(path, ec) || !seen.insert(Lower(d.path)).second) continue;
+			d.name = Utf8(path.stem().wstring());
+			d.size = static_cast<int64_t>(fs::file_size(path, ec));
+			d.modified = static_cast<int64_t>(fs::last_write_time(path, ec).time_since_epoch().count());
+			found.push_back(d);
+		}
+	}
 	for (const std::string &folder : folders) {
 		std::error_code ec;
 		fs::recursive_directory_iterator it(Wide(folder), fs::directory_options::skip_permission_denied, ec), end;
@@ -344,15 +365,15 @@ void ReadAll(std::vector<std::string> folders) {
 	SaveCache(all);
 }
 
-void Start() {
+void Start(std::vector<std::string> added = {}) {
 	LoadFolders();
 	if (g_busy) return;
 	if (g_reader.joinable()) g_reader.join();
 	g_busy = true;
 	g_stop = false;
 	g_started = true;
-	g_reader = std::thread([folders = g_folders] {
-		ReadAll(folders);
+	g_reader = std::thread([folders = g_folders, added = std::move(added)] {
+		ReadAll(folders, added);
 		g_busy = false;
 	});
 }
@@ -396,6 +417,12 @@ void Refresh() {
 	if (g_reader.joinable()) g_reader.join();
 	g_busy = false;
 	Start();
+}
+
+void AddFiles(const std::vector<std::string> &files) {
+	// (a look through the folders that hasn't happened yet, or is still going, finds the files itself)
+	if (!g_started || g_busy || files.empty()) return;
+	Start(files);
 }
 
 void Shutdown() {

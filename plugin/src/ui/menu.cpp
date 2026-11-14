@@ -858,7 +858,7 @@ void FinishDownload() {
 		std::string arguments;
 		for (const std::string &f : boards::DownloadedFiles()) arguments += (arguments.empty() ? "\"" : " \"") + f + "\"";
 		g.downloaded.clear();  // (the board shown marks it "saved" from now on)
-		library::Refresh();
+		library::AddFiles(boards::DownloadedFiles());
 		LoadRun(arguments, g.downloadName);
 	} else {
 		std::string failed = "Download failed: " + boards::DownloadError();

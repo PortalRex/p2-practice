@@ -328,10 +328,28 @@ void ReleaseGameSettings() {
 // Challenge Mode), and both views would show until the trainer noticed: so during an attempt the cvar is held at 1,
 // and the game's "ss_force_primary_fullscreen 0" does nothing. While a level loads it is not held, only put back
 // at the next frame: SAR starts its co-op timer when the game sets it to 0 there.
+//
+// SAR draws its own crosshair and quick HUD (sar_crosshair_mode, sar_quickhud_mode, sar_crosshair_P1) at the middle
+// of the half it works out from ss_verticalsplit, whole screen or not: a quarter of the way across, with the views
+// side by side. Only with ss_pipsplit at 2 (the second view as a small picture) does it take the first view for
+// the whole screen, and the game, with the whole screen forced, draws no such picture: so that cvar is at 2 for as
+// long as the screen is held, and back at the person's value after.
+float g_pipSplitBefore = -1;  // ss_pipsplit as the person had it, while it is held at 2 (-1: not held)
+
 void KeepWholeScreen(bool held) {
 	constexpr const char *kCvar = "ss_force_primary_fullscreen";
-	if (g.botPartner && held) engine::HoldCvarAtLeast(kCvar, 1);
-	else engine::ReleaseCvar(kCvar);
+	constexpr const char *kPip = "ss_pipsplit";
+	if (g.botPartner && held) {
+		engine::HoldCvarAtLeast(kCvar, 1);
+		if (g_pipSplitBefore < 0) {
+			g_pipSplitBefore = engine::CvarFloat(kPip, 1);
+			engine::Execute("%s 2", kPip);
+		}
+	} else {
+		engine::ReleaseCvar(kCvar);
+		if (g_pipSplitBefore >= 0) engine::Execute("%s %g", kPip, g_pipSplitBefore);
+		g_pipSplitBefore = -1;
+	}
 	if (g.botPartner && engine::CvarFloat(kCvar, 1) == 0) engine::Execute("%s 1", kCvar);
 }
 
@@ -820,6 +838,8 @@ void Shutdown() {
 	}
 	ForgetSaveState();  // (no waiting for a save state on its way: the game gets its settings back now)
 	Stop(false);
+	g.botPartner = false;
+	KeepWholeScreen(false);  // (the game's own split-screen settings are back)
 	g = Session{};
 }
 

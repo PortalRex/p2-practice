@@ -40,6 +40,8 @@ void RemoveFolder(size_t index);
 
 // Reads the folders again (in the background). Started by the first call to Runs too.
 void Refresh();
+// Adds demos that just arrived (a download) to the runs, without looking through the folders again.
+void AddFiles(const std::vector<std::string> &files);
 void Shutdown();
 
 // The runs as read so far; `version` changes whenever they do
