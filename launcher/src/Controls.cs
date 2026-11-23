@@ -836,7 +836,8 @@ namespace P2Practice {
 	// row inverted like a lit sign with a marker in the portal colour.
 	class DemoList : RowList {
 		public static readonly string[] Titles = { "MAP", "TIME", "PLAYERS", "MODE", "FILE" };
-		const int MapWidth = 150, TimeWidth = 66, PlayersWidth = 200, ModeWidth = 94, FileWidth = 160; // at 100%, in a roomy window
+		const int MapWidth = 140, TimeWidth = 66, PlayersWidth = 180, ModeWidth = 168, FileWidth = 140; // at 100%, in a roomy window
+		const int MinFileWidth = 56;
 		readonly int[] widths = new int[5];
 		public Func<int, Run> Source;
 		public int SortColumn;
@@ -851,11 +852,13 @@ namespace P2Practice {
 
 		protected override void OnResize(EventArgs e) { Share(); base.OnResize(e); }
 
-		// The columns share the width: Map and Players give way in a narrow window and grow a little in a wide
-		// one; File takes what is left.
+		// The columns share the width: Time and Mode keep theirs; File takes what is left. In a narrow window File
+		// gives way first (down to MinFileWidth), then Map and Players; in a wide one Map and Players grow a little.
 		void Share() {
 			int width = RowsWidth;
-			double f = Math.Max(0.5, Math.Min(1.25, (width - P(TimeWidth + ModeWidth)) / (double)P(MapWidth + PlayersWidth + FileWidth)));
+			int flexible = width - P(TimeWidth + ModeWidth);
+			double f = flexible / (double)P(MapWidth + PlayersWidth + FileWidth);
+			f = f >= 1 ? Math.Min(1.25, f) : Math.Max(0.5, Math.Min(1.0, (flexible - P(MinFileWidth)) / (double)P(MapWidth + PlayersWidth)));
 			widths[0] = (int)(P(MapWidth) * f);
 			widths[1] = P(TimeWidth);
 			widths[2] = (int)(P(PlayersWidth) * f);
@@ -928,7 +931,7 @@ namespace P2Practice {
 				if (run.Challenge) {
 					// Challenge Mode: plain when the run got to the flags; otherwise that it didn't, or that the demo can't say
 					float tag = mode.X + Ui.Width(word, L.Body) + (run.Coop ? P(30) : P(8));
-					Ui.Text(g, run.Unfinished ? "CM, no finish" : run.Finished ? "CM" : "CM, no SAR", L.Body, run.Unfinished && !selected ? Theme.Orange : soft,
+					Ui.Text(g, run.Unfinished ? "CM · no finish" : run.Finished ? "CM" : "CM · no SAR", L.Body, run.Unfinished && !selected ? Theme.Orange : soft,
 					        new RectangleF(tag, mode.Y, Math.Max(0, mode.Right - tag), mode.Height));
 				}
 			}

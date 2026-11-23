@@ -20,7 +20,10 @@ Copy-Item (Join-Path $repo 'build\x86\tools\routeinfo\Release\p2route.exe') $sta
 foreach ($f in 'chocoload.exe', 'chocolateloading.dll') { Copy-Item (Join-Path $bin "chocolateloading\$f") (Join-Path $stage 'chocolateloading') }
 Copy-Item (Join-Path $repo 'third_party\chocolateloading\README.txt') (Join-Path $stage 'chocolateloading')
 Copy-Item (Join-Path $repo 'third_party\chocolateloading\fixes.patch') (Join-Path $stage 'chocolateloading')
-Copy-Item (Join-Path $repo 'README.md') $stage
+# the README with its pictures taken from the repository (docs\images is not in the zip)
+$readme = [IO.File]::ReadAllText((Join-Path $repo 'README.md'), [Text.Encoding]::UTF8)
+$readme = $readme.Replace('src="docs/images/', 'src="https://raw.githubusercontent.com/PortalRex/p2-practice/master/docs/images/')
+[IO.File]::WriteAllText((Join-Path $stage 'README.md'), $readme, (New-Object Text.UTF8Encoding $false))
 # (no demos folder: an empty one doesn't survive Compress-Archive, and the launcher makes demos\boards itself)
 
 $zip = Join-Path $repo "dist\P2Practice-$version.zip"
