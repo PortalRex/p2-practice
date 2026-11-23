@@ -87,7 +87,7 @@ SAR and p2boost, on DirectX 9 and with `-vulkan`.
 | ⚡ **Save states** | With the bundled ChocolateLoading, a retry puts the whole level back in about 10 ms instead of restarting it. |
 | 🐇 **Bhop trainer** | Speed gained per jump, how much of the air time gained speed, hop timing. |
 | ✋ **Use trainer** | When the use key uses nothing: how many units out of reach or degrees off it was, and how many ticks early or late. |
-| 📋 **In-game menu** | Press Insert: your demos, the leaderboards, how to practice and every setting, without leaving the game. |
+| 📋 **In-game menu** | Press Right Shift: your demos, the leaderboards, how to practice and every setting, without leaving the game. |
 
 <p align="center">
   <img src="docs/images/coop-split.jpg" alt="Co-op alone in split screen: you on one side, the driven partner on the other" width="80%"><br>
@@ -103,7 +103,7 @@ SAR and p2boost, on DirectX 9 and with `-vulkan`.
    - **With the launcher:** start `P2Practice.exe`, pick a run and press **Launch**. It puts the plugin into the
      Portal 2 folder itself.
    - **Without it:** copy `p2practice.dll` next to `portal2.exe`, type `plugin_load p2practice` in the game's
-     console (or put it in your autoexec), and press **Insert**.
+     console (or put it in your autoexec), and press **Right Shift**.
 
 > [!NOTE]
 > Load the plugin from a cfg or the console. Don't use `+plugin_load` if another plugin is loaded that way too: the
@@ -111,8 +111,8 @@ SAR and p2boost, on DirectX 9 and with `-vulkan`.
 
 ## The in-game menu
 
-**Insert** opens it, in the main menu or in a level. Insert or Esc closes it. While it is open the game gets no
-keys or clicks. To use another key, change it in SETTINGS or with `prac_menukey`.
+**Right Shift** opens it, in the main menu or in a level. Right Shift or Esc closes it. While it is open the game
+gets no keys or clicks. To use another key (Insert, Home, F1-F12), change it in SETTINGS or with `prac_menukey`.
 
 | Page | What is on it |
 | --- | --- |
